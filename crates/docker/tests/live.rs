@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use berth_docker::{
     BollardEngine, ContainerAction, ContainerState, Endpoint, Engine, EngineError, EngineEvent,
-    EventAction, ImagePrune, ObjectKind, RemoveOptions, TlsConfig,
+    EventAction, ObjectKind, RemoveOptions, TlsConfig,
 };
 use bollard::{
     API_DEFAULT_VERSION, Docker,
@@ -356,8 +356,8 @@ impl Drop for VolumeCleanup<'_> {
 }
 
 #[test]
-#[ignore = "requires a real engine, a throwaway volume, and permission to prune dangling images"]
-fn live_volume_disk_usage_and_dangling_image_prune_on_a_non_tokio_executor() {
+#[ignore = "requires a real engine and a uniquely named throwaway volume"]
+fn live_volume_disk_usage_on_a_non_tokio_executor() {
     assert!(tokio::runtime::Handle::try_current().is_err());
     let endpoint = endpoint().unwrap();
     let engine = BollardEngine::connect(&endpoint).unwrap();
@@ -412,7 +412,7 @@ fn live_volume_disk_usage_and_dangling_image_prune_on_a_non_tokio_executor() {
             .iter()
             .any(|v| v.name == name)
     );
-    // Explicitly authorized by the test brief. Never exercise broader prunes
-    // against the user's engine; their filters are covered by the HTTP tests.
-    assert!(block_on(engine.prune_images(ImagePrune::Dangling)).is_ok());
 }
+
+#[path = "live/m3.rs"]
+mod m3;
