@@ -414,7 +414,6 @@ impl Engine for FixtureEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt as _;
     use futures::executor::block_on;
 
     #[test]

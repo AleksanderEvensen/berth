@@ -10,3 +10,14 @@ publish.workspace = true
 [dependencies]
 futures.workspace = true
 thiserror.workspace = true
+bollard = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+hyper-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+
+[features]
+default = ["live"]
+live = ["dep:bollard", "dep:tokio", "dep:chrono", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types"]

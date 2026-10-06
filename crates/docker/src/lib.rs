@@ -6,9 +6,13 @@
 
 mod engine;
 pub mod fixtures;
+#[cfg(feature = "live")]
+pub mod live;
 mod model;
 mod tree;
 
 pub use engine::*;
+#[cfg(feature = "live")]
+pub use live::BollardEngine;
 pub use model::*;
 pub use tree::*;
