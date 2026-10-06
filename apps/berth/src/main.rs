@@ -7,7 +7,7 @@ mod store;
 use std::sync::Arc;
 use std::time::Duration;
 
-use berth_docker::{BollardEngine, DiscoveryEnv, Engine, discover, fixtures::FixtureEngine};
+use berth_docker::{BollardEngine, DiscoveryEnv, discover, fixtures::FixtureEngine};
 use store::Connector;
 
 use gpui::{
@@ -39,7 +39,7 @@ fn main() {
             cx.on_action(|_: &Quit, cx| cx.quit());
 
             let bounds = Bounds::centered(None, size(px(1240.0), px(800.0)), cx);
-            cx.open_window(
+            if let Err(error) = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(860.0), px(520.0))),
@@ -57,15 +57,18 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Shell::new(connector(), window, cx)),
-            )
-            .expect("failed to open the main window");
+            ) {
+                log::error!("failed to open the main window: {error}");
+                cx.quit();
+                return;
+            }
             cx.activate(true);
         });
 }
 
 /// How the store obtains an engine. `BERTH_FIXTURES=1` runs on in-memory
 /// fixture data (`BERTH_FIXTURE_LATENCY_MS` simulates a slow engine);
-/// otherwise each connect discovers the endpoint (DOCKER_HOST, Docker
+/// otherwise each connect discovers the endpoint (`DOCKER_HOST`, Docker
 /// context, default sockets) and opens a live client.
 fn connector() -> Connector {
     if std::env::var_os("BERTH_FIXTURES").is_some() {
@@ -74,10 +77,9 @@ fn connector() -> Connector {
             .and_then(|ms| ms.parse().ok())
             .unwrap_or(600);
         return Arc::new(move || {
-            Ok(
-                Arc::new(FixtureEngine::default().with_latency(Duration::from_millis(latency)))
-                    as Arc<dyn Engine>,
-            )
+            Ok(Arc::new(
+                FixtureEngine::default().with_latency(Duration::from_millis(latency)),
+            ))
         });
     }
     Arc::new(|| {
@@ -88,6 +90,6 @@ fn connector() -> Connector {
             discovered.source
         );
         let engine = BollardEngine::connect(&discovered.endpoint).map_err(|e| e.to_string())?;
-        Ok(Arc::new(engine) as Arc<dyn Engine>)
+        Ok(Arc::new(engine))
     })
 }

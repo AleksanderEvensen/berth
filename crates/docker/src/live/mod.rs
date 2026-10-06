@@ -19,7 +19,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt as _, SinkExt as _, Stream, StreamExt as _};
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::task::AbortHandle;
 
 use crate::{
@@ -36,7 +36,10 @@ pub struct BollardEngine {
 
 // Tasks retain handles, never an Arc to this owner, so engine drop always
 // initiates shutdown even while a caller still holds a future or stream.
-struct EngineRuntime(Option<Runtime>);
+struct EngineRuntime {
+    owner: Option<Runtime>,
+    handle: Handle,
+}
 impl EngineRuntime {
     fn new() -> Result<Self, ConnectError> {
         tokio::runtime::Builder::new_multi_thread()
@@ -44,16 +47,19 @@ impl EngineRuntime {
             .thread_name("berth-engine")
             .enable_all()
             .build()
-            .map(|runtime| Self(Some(runtime)))
+            .map(|runtime| Self {
+                handle: runtime.handle().clone(),
+                owner: Some(runtime),
+            })
             .map_err(|e| ConnectError::InvalidConfig(e.to_string()))
     }
-    fn get(&self) -> &Runtime {
-        self.0.as_ref().expect("runtime exists until drop")
+    const fn get(&self) -> &Handle {
+        &self.handle
     }
 }
 impl Drop for EngineRuntime {
     fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
+        if let Some(runtime) = self.owner.take() {
             runtime.shutdown_background();
         }
     }
@@ -81,6 +87,10 @@ impl BollardEngine {
     /// Validate the endpoint, negotiate the API version and ping the daemon.
     /// The synchronous handshake is bounded to ten seconds; call this on a
     /// background thread when connecting from a UI.
+    ///
+    /// # Errors
+    /// Returns an error for invalid endpoint or TLS settings, transport failures,
+    /// or a failed or timed-out daemon handshake.
     pub fn connect(endpoint: &Endpoint) -> Result<Self, ConnectError> {
         let runtime = EngineRuntime::new()?;
         let docker = {
@@ -111,7 +121,7 @@ impl BollardEngine {
         })
     }
 
-    fn runtime(&self) -> &Runtime {
+    const fn runtime(&self) -> &Handle {
         self.runtime.get()
     }
 

@@ -6,6 +6,7 @@ use crate::Theme;
 
 /// Section heading above a card ("Ports", "Mounts", "Labels").
 #[derive(IntoElement)]
+#[must_use]
 pub struct Heading {
     label: SharedString,
 }
@@ -43,6 +44,7 @@ pub enum CellStyle {
 }
 
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct Cell {
     pub text: SharedString,
     pub style: CellStyle,
@@ -100,6 +102,7 @@ fn card(theme: &Theme) -> gpui::Div {
 
 /// A rounded card of label → value rows separated by hairlines.
 #[derive(IntoElement, Default)]
+#[must_use]
 pub struct KeyValueCard {
     rows: Vec<(SharedString, AnyElement)>,
 }
@@ -156,6 +159,7 @@ impl RenderOnce for KeyValueCard {
 
 /// A simple table inside a card: header row + body rows, flex-weighted columns.
 #[derive(IntoElement)]
+#[must_use]
 pub struct DataTable {
     columns: Vec<(SharedString, f32)>,
     rows: Vec<Vec<Cell>>,

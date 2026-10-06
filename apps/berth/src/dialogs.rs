@@ -4,7 +4,15 @@ use std::rc::Rc;
 
 use gpui::{App, SharedString, Window, actions};
 
-actions!(dialog, [Confirm, Cancel]);
+actions!(
+    dialog,
+    [
+        #[derive(Eq)]
+        Confirm,
+        #[derive(Eq)]
+        Cancel
+    ]
+);
 
 /// Key context active while a confirm dialog has focus.
 pub const CONFIRM_CONTEXT: &str = "ConfirmDialog";

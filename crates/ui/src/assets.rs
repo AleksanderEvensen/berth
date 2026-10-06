@@ -80,6 +80,10 @@ const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
 ];
 
+/// Register the bundled fonts.
+///
+/// # Errors
+/// Returns an error if the text system cannot load a bundled font.
 pub fn register_fonts(cx: &App) -> anyhow::Result<()> {
     cx.text_system()
         .add_fonts(FONTS.iter().map(|f| Cow::Borrowed(*f)).collect())

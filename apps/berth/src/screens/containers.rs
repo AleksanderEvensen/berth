@@ -193,9 +193,9 @@ impl ContainersScreen {
                     .active(self.search.is_some())
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.search.is_some() {
-                            this.close_search(cx)
+                            this.close_search(cx);
                         } else {
-                            this.open_search(window, cx)
+                            this.open_search(window, cx);
                         }
                     })),
             )
@@ -290,7 +290,7 @@ impl ContainersScreen {
                 .child(detail(error.clone()))
                 .child(div().pt(px(Theme::SPACE_SM)).child(
                     Button::new("reconnect", "Retry").on_click(cx.listener(|this, _, _, cx| {
-                        this.store.update(cx, |store, cx| store.reconnect(cx))
+                        this.store.update(cx, Store::reconnect);
                     })),
                 ))
                 .into_any_element(),
@@ -375,7 +375,7 @@ impl ContainersScreen {
         };
         let lifecycle = cx.listener(move |this, _, _, cx| {
             let op = if active { Op::Stop } else { Op::Start };
-            this.run(lifecycle_ids.clone(), op, cx)
+            this.run(lifecycle_ids.clone(), op, cx);
         });
         let delete = {
             let project = project.clone();
@@ -386,7 +386,7 @@ impl ContainersScreen {
                     names.clone(),
                     all_ids.clone(),
                     cx,
-                )
+                );
             })
         };
         let select = {
@@ -439,7 +439,7 @@ impl ContainersScreen {
             let ids = vec![id.clone()];
             cx.listener(move |this, _, _, cx| {
                 let op = if active { Op::Stop } else { Op::Start };
-                this.run(ids.clone(), op, cx)
+                this.run(ids.clone(), op, cx);
             })
         };
         let delete = {
@@ -457,7 +457,7 @@ impl ContainersScreen {
                     Vec::new(),
                     ids.clone(),
                     cx,
-                )
+                );
             })
         };
         let select = {
@@ -522,12 +522,10 @@ impl ContainersScreen {
             )
             .into_any_element(),
             (Some(Selection::Container(id)), 0) => {
-                match store.containers().iter().find(|c| &c.id == id) {
-                    Some(c) => scroll_page(container_info(c, theme)).into_any_element(),
-                    None => {
-                        empty_state("Gone", "This container was removed.", theme).into_any_element()
-                    }
-                }
+                store.containers().iter().find(|c| &c.id == id).map_or_else(
+                    || empty_state("Gone", "This container was removed.", theme).into_any_element(),
+                    |c| scroll_page(container_info(c, theme)).into_any_element(),
+                )
             }
             (Some(Selection::Stack(project)), 0) => {
                 let stack = tree
@@ -538,12 +536,10 @@ impl ContainersScreen {
                         Node::Stack(s) if s.project == project => Some(s),
                         _ => None,
                     });
-                match stack {
-                    Some(stack) => scroll_page(stack_info(stack, theme)).into_any_element(),
-                    None => {
-                        empty_state("Gone", "This stack was removed.", theme).into_any_element()
-                    }
-                }
+                stack.map_or_else(
+                    || empty_state("Gone", "This stack was removed.", theme).into_any_element(),
+                    |stack| scroll_page(stack_info(stack, theme)).into_any_element(),
+                )
             }
             (Some(_), tab) => {
                 let (title, detail) = match tab {
@@ -631,7 +627,7 @@ fn delete_button(key: &str) -> IconButton {
         .tone(ButtonTone::Danger)
 }
 
-fn status_of(state: ContainerState) -> Status {
+const fn status_of(state: ContainerState) -> Status {
     match state {
         ContainerState::Running => Status::Running,
         ContainerState::Paused => Status::Paused,
@@ -685,10 +681,8 @@ fn container_info(c: &Container, theme: &Theme) -> impl IntoElement {
 
     let mut network = KeyValueCard::new().row(
         "IP address",
-        match &c.ip {
-            Some(ip) => Cell::mono(ip.clone()),
-            None => Cell::muted("Not running"),
-        },
+        c.ip.as_ref()
+            .map_or_else(|| Cell::muted("Not running"), |ip| Cell::mono(ip.clone())),
     );
     if let Some(compose) = &c.compose {
         network = network
@@ -757,7 +751,7 @@ fn stack_info(stack: &Stack<'_>, theme: &Theme) -> impl IntoElement {
         let service = c
             .compose
             .as_ref()
-            .map_or(c.name.clone(), |cr| cr.service.clone());
+            .map_or_else(|| c.name.clone(), |cr| cr.service.clone());
         div()
             .h(px(40.0))
             .px(px(Theme::SPACE_MD))

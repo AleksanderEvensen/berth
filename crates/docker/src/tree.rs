@@ -12,6 +12,7 @@ pub struct Stack<'a> {
 }
 
 impl Stack<'_> {
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.containers
             .iter()
@@ -20,10 +21,12 @@ impl Stack<'_> {
     }
 
     /// A stack belongs to the "Running" section if any service is active.
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.active_count() > 0
     }
 
+    #[must_use]
     pub fn working_dir(&self) -> Option<&str> {
         self.containers
             .iter()
@@ -38,6 +41,7 @@ pub enum Node<'a> {
 }
 
 impl Node<'_> {
+    #[must_use]
     pub fn is_active(&self) -> bool {
         match self {
             Node::Stack(s) => s.is_active(),
@@ -83,6 +87,7 @@ impl<'a> ContainerTree<'a> {
         Self { running, stopped }
     }
 
+    #[must_use]
     pub fn running_container_count(&self) -> usize {
         self.running
             .iter()

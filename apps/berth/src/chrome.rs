@@ -55,7 +55,7 @@ pub fn drag_region(id: &'static str, el: Div) -> Stateful<Div> {
             }
         })
         .on_mouse_down(MouseButton::Right, |event, window, _| {
-            window.show_window_menu(event.position)
+            window.show_window_menu(event.position);
         })
 }
 
@@ -122,10 +122,10 @@ pub fn window_frame(content: AnyElement, window: &mut Window, cx: &App) -> impl 
                     Decorations::Server => d,
                     Decorations::Client { tiling } => d
                         .border_color(theme.border_strong)
-                        .when(!tiling.top, |d| d.border_t_1())
-                        .when(!tiling.bottom, |d| d.border_b_1())
-                        .when(!tiling.left, |d| d.border_l_1())
-                        .when(!tiling.right, |d| d.border_r_1())
+                        .when(!tiling.top, Styled::border_t_1)
+                        .when(!tiling.bottom, Styled::border_b_1)
+                        .when(!tiling.left, Styled::border_l_1)
+                        .when(!tiling.right, Styled::border_r_1)
                         .when(!tiling.is_tiled(), |d| {
                             d.shadow(vec![
                                 gpui::BoxShadow::new(
@@ -133,7 +133,7 @@ pub fn window_frame(content: AnyElement, window: &mut Window, cx: &App) -> impl 
                                     px(2.0),
                                     gpui::hsla(0.0, 0.0, 0.0, 0.45),
                                 )
-                                .blur_radius(FRAME_INSET / 1.5),
+                                .blur_radius(px(f32::from(FRAME_INSET) / 1.5)),
                             ])
                         }),
                 })
@@ -145,9 +145,9 @@ pub fn window_frame(content: AnyElement, window: &mut Window, cx: &App) -> impl 
 fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
     let inset = FRAME_INSET;
     let top = pos.y < inset && !tiling.top;
-    let bottom = pos.y > size.height - inset && !tiling.bottom;
+    let bottom = pos.y > px(f32::from(size.height) - f32::from(inset)) && !tiling.bottom;
     let left = pos.x < inset && !tiling.left;
-    let right = pos.x > size.width - inset && !tiling.right;
+    let right = pos.x > px(f32::from(size.width) - f32::from(inset)) && !tiling.right;
     Some(match (top, bottom, left, right) {
         (true, _, true, _) => ResizeEdge::TopLeft,
         (true, _, _, true) => ResizeEdge::TopRight,
@@ -161,7 +161,7 @@ fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option
     })
 }
 
-fn cursor_for(edge: ResizeEdge) -> CursorStyle {
+const fn cursor_for(edge: ResizeEdge) -> CursorStyle {
     match edge {
         ResizeEdge::Top | ResizeEdge::Bottom => CursorStyle::ResizeUpDown,
         ResizeEdge::Left | ResizeEdge::Right => CursorStyle::ResizeLeftRight,
@@ -190,7 +190,7 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
 
     let hover_fg = theme.text;
     let buttons = layout.right.into_iter().flatten().filter_map(|button| {
-        use gpui::WindowButton::*;
+        use gpui::WindowButton::{Close, Maximize, Minimize};
         let (id, glyph, close): (&'static str, AnyElement, bool) = match button {
             Minimize if controls.minimize => (
                 "caption-min",
@@ -225,8 +225,8 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
             ),
             _ => return None,
         };
-        let hover_bg = if close {
-            gpui::rgb(0xe5484d).into()
+        let hover_background = if close {
+            gpui::rgb(0x00e5_484d).into()
         } else {
             theme.element_hover
         };
@@ -241,7 +241,7 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
                 .rounded_full()
                 .bg(theme.row_hover)
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg))
+                .hover(move |s| s.bg(hover_background))
                 .occlude()
                 .child(glyph)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

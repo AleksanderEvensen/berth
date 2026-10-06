@@ -126,7 +126,7 @@ fn trait_methods_work_on_futures_executor_and_events_end_on_disconnect() {
     assert_eq!(info.kind, crate::EngineKind::Docker);
     assert!(info.rootless);
     assert_eq!(info.endpoint, server.endpoint);
-    assert!(block_on(engine.list_containers()).unwrap().is_empty());
+    assert_eq!(block_on(engine.list_containers()).unwrap(), []);
     let inspected = block_on(engine.inspect_container("test")).unwrap();
     assert_eq!(inspected.name, "test");
     assert_eq!(inspected.env, Some(vec!["A=B".into()]));
@@ -189,6 +189,7 @@ fn trait_methods_work_on_futures_executor_and_events_end_on_disconnect() {
             .iter()
             .any(|s| s.contains("/restart?") && !s.contains("t="))
     );
+    drop(requests);
 }
 
 #[test]
@@ -428,16 +429,16 @@ fn tls_authenticates_client_and_honors_server_verification_in_tls12_and_tls13() 
             .unwrap();
         let server = TestServer::with_tls(Some(Arc::new(config)));
         let Endpoint::Tcp { url, .. } = &server.endpoint else {
-            unreachable!()
+            panic!("TLS test server must have a TCP endpoint")
         };
-        let verified = Endpoint::Tcp {
+        let verified_endpoint = Endpoint::Tcp {
             url: url.replace("http://127.0.0.1", "https://localhost"),
             tls: Some(crate::TlsConfig {
                 cert_dir: directory.clone(),
                 verify: true,
             }),
         };
-        let engine = BollardEngine::connect(&verified)
+        let engine = BollardEngine::connect(&verified_endpoint)
             .expect("trusted CA, matching hostname and client certificate");
         assert_eq!(block_on(engine.info()).unwrap().version, "test");
         let wrong_name = Endpoint::Tcp {

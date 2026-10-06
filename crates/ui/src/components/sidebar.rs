@@ -16,6 +16,7 @@ pub const PANEL_SPRING: SpringConfig = SpringConfig::new(900.0, 60.0, 1.0);
 /// width while the column narrows (it is clipped, not reflowed), so labels
 /// never wrap mid-animation.
 #[derive(IntoElement)]
+#[must_use]
 pub struct Sidebar {
     id: ElementId,
     collapsed: bool,
@@ -39,19 +40,19 @@ impl Sidebar {
         }
     }
 
-    pub fn collapsed(mut self, collapsed: bool) -> Self {
+    pub const fn collapsed(mut self, collapsed: bool) -> Self {
         self.collapsed = collapsed;
         self
     }
 
-    pub fn width(mut self, width: f32) -> Self {
+    pub const fn width(mut self, width: f32) -> Self {
         self.width = width;
         self
     }
 
     /// Radius for the outer (left) corners when the sidebar sits at the edge
     /// of a rounded client-decorated window.
-    pub fn corner_radius(mut self, radius: f32) -> Self {
+    pub const fn corner_radius(mut self, radius: f32) -> Self {
         self.corner_radius = radius;
         self
     }
@@ -125,13 +126,14 @@ impl RenderOnce for Sidebar {
                 SpringAnimation::new(PANEL_SPRING)
                     .to(px(target))
                     .with_epsilon(0.5),
-                |this, w| this.w(w),
+                gpui::Styled::w,
             )
     }
 }
 
 /// A titled group of sidebar items.
 #[derive(IntoElement)]
+#[must_use]
 pub struct SidebarSection {
     title: Option<SharedString>,
     items: Vec<SidebarItem>,
@@ -145,7 +147,7 @@ impl SidebarSection {
         }
     }
 
-    pub fn untitled() -> Self {
+    pub const fn untitled() -> Self {
         Self {
             title: None,
             items: Vec::new(),
@@ -182,6 +184,7 @@ impl RenderOnce for SidebarSection {
 
 /// One navigation entry: icon, label, optional trailing count.
 #[derive(IntoElement)]
+#[must_use]
 pub struct SidebarItem {
     id: ElementId,
     icon: &'static str,
@@ -212,7 +215,7 @@ impl SidebarItem {
         self
     }
 
-    pub fn active(mut self, active: bool) -> Self {
+    pub const fn active(mut self, active: bool) -> Self {
         self.active = active;
         self
     }
@@ -270,6 +273,7 @@ impl RenderOnce for SidebarItem {
 /// The sidebar toggle glyph: a rounded frame holding a panel that narrows when
 /// the sidebar is closed. Drawn from quads in a 24-unit space so it can sit in
 /// a spring (`open` 0..=1).
+#[must_use]
 pub fn sidebar_glyph(open: f32, size: f32, color: Hsla) -> Div {
     let s = size / 24.0;
     let stroke = 1.6;
@@ -294,7 +298,7 @@ pub fn sidebar_glyph(open: f32, size: f32, color: Hsla) -> Div {
                 .absolute()
                 .left(px(6.5 * s))
                 .top(px(7.5 * s))
-                .w(px((1.75 + (5.5 - 1.75) * open) * s))
+                .w(px(f32::mul_add(5.5 - 1.75, open, 1.75) * s))
                 .h(px(9.0 * s))
                 .rounded(px(0.9 * s))
                 .bg(color),

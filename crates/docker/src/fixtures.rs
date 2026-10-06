@@ -96,8 +96,16 @@ impl Spec<'_> {
     }
 }
 
+#[must_use]
 pub fn containers() -> Vec<Container> {
-    use ContainerState::*;
+    active_containers()
+        .into_iter()
+        .chain(inactive_containers())
+        .collect()
+}
+
+fn active_containers() -> Vec<Container> {
+    use ContainerState::{Restarting, Running};
     let s = |k: &str, v: &str| (k.to_string(), v.to_string());
     vec![
         Spec {
@@ -184,6 +192,12 @@ pub fn containers() -> Vec<Container> {
             compose: Some(("berth-dev", "worker", "/home/dev/code/berth-dev")),
         }
         .build(),
+    ]
+}
+
+fn inactive_containers() -> Vec<Container> {
+    use ContainerState::{Created, Exited};
+    vec![
         Spec {
             id: "a2f5b8e1d4a7c0f3b6e9d2a5c8f1b4e7d0a3c6f9b2e5d8a1c4f7b0e3d6a9c2f5",
             name: "photon_dev_db",
@@ -286,6 +300,7 @@ impl Default for FixtureEngine {
 }
 
 impl FixtureEngine {
+    #[must_use]
     pub fn new(containers: Vec<Container>) -> Self {
         Self {
             state: Arc::new(Mutex::new(FixtureState {
@@ -297,7 +312,8 @@ impl FixtureEngine {
     }
 
     /// Delay every mutation (and its event) — makes pending UI states visible.
-    pub fn with_latency(mut self, latency: Duration) -> Self {
+    #[must_use]
+    pub const fn with_latency(mut self, latency: Duration) -> Self {
         self.latency = Some(latency);
         self
     }
@@ -308,7 +324,11 @@ impl FixtureEngine {
         f: impl FnOnce(&mut FixtureState) -> EngineResult<T> + Send + 'static,
     ) -> BoxFuture<'static, EngineResult<T>> {
         let state = self.state.clone();
-        let apply = move || f(&mut state.lock().unwrap_or_else(|e| e.into_inner()));
+        let apply = move || {
+            f(&mut state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+        };
         match self.latency {
             None => future::ready(apply()).boxed(),
             Some(latency) => {
@@ -326,7 +346,10 @@ impl FixtureEngine {
     }
 
     fn with_state<T>(&self, f: impl FnOnce(&mut FixtureState) -> T) -> T {
-        f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()))
+        f(&mut self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 }
 
@@ -375,7 +398,7 @@ impl Engine for FixtureEngine {
                 .containers
                 .iter_mut()
                 .find(|c| c.id == id)
-                .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
             let (state, status, event) = match action {
                 ContainerAction::Start => (
                     ContainerState::Running,
@@ -424,11 +447,15 @@ impl Engine for FixtureEngine {
                 .containers
                 .iter()
                 .position(|c| c.id == id)
-                .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
-            if s.containers[ix].state.is_active() && !options.force {
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
+            let container = s
+                .containers
+                .get(ix)
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
+            if container.state.is_active() && !options.force {
                 return Err(EngineError::Conflict(format!(
                     "cannot remove container {}: container is running",
-                    s.containers[ix].name
+                    container.name
                 )));
             }
             let removed = s.containers.remove(ix);

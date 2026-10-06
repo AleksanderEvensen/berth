@@ -35,16 +35,16 @@ pub enum Endpoint {
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Endpoint::Unix(path) => write!(f, "unix://{}", path.display()),
-            Endpoint::NamedPipe(pipe) => write!(f, "npipe://{pipe}"),
-            Endpoint::Tcp { url, .. } => f.write_str(url),
+            Self::Unix(path) => write!(f, "unix://{}", path.display()),
+            Self::NamedPipe(pipe) => write!(f, "npipe://{pipe}"),
+            Self::Tcp { url, .. } => f.write_str(url),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsConfig {
-    /// Directory holding `ca.pem`, `cert.pem`, `key.pem` (DOCKER_CERT_PATH).
+    /// Directory holding `ca.pem`, `cert.pem`, `key.pem` (`DOCKER_CERT_PATH`).
     pub cert_dir: PathBuf,
     pub verify: bool,
 }
@@ -53,7 +53,7 @@ pub struct TlsConfig {
 pub enum EngineKind {
     Docker,
     Podman,
-    /// Anything else speaking the Docker API (OrbStack, Colima, …) or unknown.
+    /// Anything else speaking the Docker API (`OrbStack`, Colima, …) or unknown.
     Other,
 }
 

@@ -37,6 +37,7 @@ impl Default for DiscoveryEnv {
 }
 
 impl DiscoveryEnv {
+    #[must_use]
     pub fn from_process() -> Self {
         fn string(key: &str) -> Option<String> {
             std::env::var(key).ok().filter(|s| !s.is_empty())
@@ -134,6 +135,10 @@ fn parse_host(host: &str) -> Result<Endpoint, ConnectError> {
 
 /// Resolve explicit settings first, then probe platform socket fallbacks in order.
 /// Explicit settings are never probed or silently replaced by a fallback.
+///
+/// # Errors
+/// Returns an error for invalid explicit settings, unreadable context files,
+/// or when no accessible default endpoint is available.
 pub fn discover(env: &DiscoveryEnv) -> Result<Discovered, ConnectError> {
     if let Some(host) = env.docker_host.as_deref().filter(|s| !s.is_empty()) {
         let mut endpoint = parse_host(host)?;
@@ -252,7 +257,7 @@ fn discover_candidates(
     Err(permission_denied.unwrap_or(ConnectError::NotFound { tried }))
 }
 
-fn probe_error(endpoint: &Endpoint, error: io::Error) -> ConnectError {
+fn probe_error(endpoint: &Endpoint, error: &io::Error) -> ConnectError {
     let endpoint = endpoint.to_string();
     match error.kind() {
         io::ErrorKind::NotFound => ConnectError::NotFound {
@@ -265,21 +270,25 @@ fn probe_error(endpoint: &Endpoint, error: io::Error) -> ConnectError {
 }
 
 /// Test local transport connectability, without making a Docker API request.
+///
 /// TCP probing is intentionally unsupported: explicit remote hosts are resolved
 /// without connecting, and the engine client owns their connection and TLS.
+///
+/// # Errors
+/// Returns an error if the transport is unsupported or the connection fails.
 pub fn probe(endpoint: &Endpoint) -> Result<(), ConnectError> {
     match endpoint {
         #[cfg(unix)]
         Endpoint::Unix(path) => std::os::unix::net::UnixStream::connect(path)
             .map(|_| ())
-            .map_err(|e| probe_error(endpoint, e)),
+            .map_err(|e| probe_error(endpoint, &e)),
         #[cfg(windows)]
         Endpoint::NamedPipe(pipe) => fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(pipe)
             .map(|_| ())
-            .map_err(|e| probe_error(endpoint, e)),
+            .map_err(|e| probe_error(endpoint, &e)),
         _ => Err(invalid(format!(
             "probing this transport is unsupported: {endpoint}"
         ))),

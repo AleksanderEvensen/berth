@@ -97,10 +97,11 @@ impl Theme {
     pub const TEXT_MD: f32 = 13.0;
     pub const TEXT_LG: f32 = 14.0;
 
-    pub fn of(cx: &App) -> &Theme {
-        cx.global::<Theme>()
+    pub fn of(cx: &App) -> &Self {
+        cx.global::<Self>()
     }
 
+    #[must_use]
     pub fn dark() -> Self {
         let accent = oklch(0.673, 0.182, 276.935);
         Self {
@@ -137,6 +138,7 @@ impl Theme {
 
     /// Light is designed, not inverted (see docs/plan/04-design-system.md):
     /// content plane white, chrome grey, accents one step darker.
+    #[must_use]
     pub fn light() -> Self {
         let accent = oklch(0.511, 0.262, 276.966);
         Self {
@@ -173,11 +175,13 @@ impl Theme {
 
     /// A deterministic, theme-tuned tint for an arbitrary key (image name,
     /// volume name) — used for monogram badges.
+    #[must_use]
     pub fn tint_for(&self, key: &str) -> Hsla {
-        let hash = key.bytes().fold(0x811c9dc5u32, |h, b| {
-            (h ^ b as u32).wrapping_mul(0x01000193)
+        let hash = key.bytes().fold(0x811c_9dc5_u32, |h, b| {
+            (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
         });
-        let hue = (hash % 360) as f32;
+        // The remainder fits in u16, which converts losslessly to f32.
+        let hue = f32::from(u16::try_from(hash % 360).unwrap_or_default());
         match self.appearance {
             Appearance::Dark => oklch(0.74, 0.12, hue),
             Appearance::Light => oklch(0.52, 0.14, hue),
@@ -186,39 +190,42 @@ impl Theme {
 }
 
 /// An exact achromatic tone from an 8-bit channel value (`grey(13)` ≡ `#0d0d0d`).
+#[must_use]
 pub fn grey(value: u8) -> Hsla {
-    hsla(0.0, 0.0, value as f32 / 255.0, 1.0)
+    hsla(0.0, 0.0, f32::from(value) / 255.0, 1.0)
 }
 
 /// A neutral (chroma 0) oklch tone.
+#[must_use]
 pub fn neutral(lightness: f32) -> Hsla {
     let [v, _, _] = oklch_to_srgb(lightness, 0.0, 0.0);
     hsla(0.0, 0.0, v, 1.0)
 }
 
 /// oklch (CSS notation: L 0..1, C, H in degrees) → gpui Hsla.
-pub fn oklch(l: f32, c: f32, h_deg: f32) -> Hsla {
-    let [r, g, b] = oklch_to_srgb(l, c, h_deg);
-    let (h, s, l) = rgb_to_hsl(r, g, b);
-    hsla(h, s, l, 1.0)
+#[must_use]
+pub fn oklch(lightness: f32, chroma: f32, hue_degrees: f32) -> Hsla {
+    let [red, green, blue] = oklch_to_srgb(lightness, chroma, hue_degrees);
+    let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
+    hsla(hue, saturation, lightness, 1.0)
 }
 
-/// Björn Ottosson's OKLab → sRGB (the matrices CSS Color 4 uses), gamut-clipped.
-fn oklch_to_srgb(l: f32, c: f32, h_deg: f32) -> [f32; 3] {
-    let h = h_deg.to_radians();
-    let a = c * h.cos();
-    let b = c * h.sin();
+/// Björn Ottosson's `OKLab` → sRGB (the matrices CSS Color 4 uses), gamut-clipped.
+fn oklch_to_srgb(lightness: f32, chroma: f32, hue_degrees: f32) -> [f32; 3] {
+    let hue = hue_degrees.to_radians();
+    let a = chroma * hue.cos();
+    let lab_b = chroma * hue.sin();
 
-    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
-    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
-    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+    let l_ = 0.215_803_76f32.mul_add(lab_b, 0.396_337_78f32.mul_add(a, lightness));
+    let m_ = 0.063_854_17f32.mul_add(-lab_b, 0.105_561_346f32.mul_add(-a, lightness));
+    let s_ = 1.291_485_5f32.mul_add(-lab_b, 0.089_484_18f32.mul_add(-a, lightness));
     let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
 
-    let r = 4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_93 * s3;
-    let g = -1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_4 * s3;
-    let b = -0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3;
+    let red = 0.230_969_93f32.mul_add(s3, 3.307_711_6f32.mul_add(-m3, 4.076_741_7 * l3));
+    let green = 0.341_319_4f32.mul_add(-s3, 2.609_757_4f32.mul_add(m3, -1.268_438 * l3));
+    let blue = 1.707_614_7f32.mul_add(s3, 0.703_418_6f32.mul_add(-m3, -0.004_196_086_3 * l3));
 
-    [gamma_encode(r), gamma_encode(g), gamma_encode(b)]
+    [gamma_encode(red), gamma_encode(green), gamma_encode(blue)]
 }
 
 fn gamma_encode(x: f32) -> f32 {
@@ -226,31 +233,36 @@ fn gamma_encode(x: f32) -> f32 {
     if x <= 0.003_130_8 {
         12.92 * x
     } else {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
+        1.055f32.mul_add(x.powf(1.0 / 2.4), -0.055)
     }
 }
 
-fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
+// The maximum is one of these exact input channels; equality selects its hue formula.
+#[expect(
+    clippy::float_cmp,
+    reason = "identify the channel that supplied the maximum"
+)]
+fn rgb_to_hsl(red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    let lightness = f32::midpoint(max, min);
     if (max - min).abs() < f32::EPSILON {
-        return (0.0, 0.0, l);
+        return (0.0, 0.0, lightness);
     }
-    let d = max - min;
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
+    let range = max - min;
+    let saturation = if lightness > 0.5 {
+        range / (2.0 - max - min)
     } else {
-        d / (max + min)
+        range / (max + min)
     };
-    let h = if max == r {
-        (g - b) / d + if g < b { 6.0 } else { 0.0 }
-    } else if max == g {
-        (b - r) / d + 2.0
+    let hue = if max == red {
+        (green - blue) / range + if green < blue { 6.0 } else { 0.0 }
+    } else if max == green {
+        (blue - red) / range + 2.0
     } else {
-        (r - g) / d + 4.0
+        (red - green) / range + 4.0
     };
-    (h / 6.0, s, l)
+    (hue / 6.0, saturation, lightness)
 }
 
 #[cfg(test)]
@@ -260,12 +272,44 @@ mod tests {
     #[test]
     fn neutral_950_is_0a0a0a() {
         let c = gpui::Rgba::from(neutral(0.145));
-        assert!((c.r * 255.0 - 10.0).abs() < 1.0, "{c:?}");
+        assert!(f32::mul_add(c.r, 255.0, -10.0).abs() < 1.0, "{c:?}");
     }
 
     #[test]
     fn tint_is_stable() {
         let t = Theme::dark();
         assert_eq!(t.tint_for("postgres"), t.tint_for("postgres"));
+    }
+
+    #[test]
+    fn oklch_primary_colors_match_srgb() {
+        for (lightness, chroma, hue, expected) in [
+            (0.627_955, 0.257_683, 29.233_885, [1.0, 0.0, 0.0]),
+            (0.866_44, 0.294_827, 142.495_3, [0.0, 1.0, 0.0]),
+            (0.452_014, 0.313_214, 264.052, [0.0, 0.0, 1.0]),
+        ] {
+            let color = gpui::Rgba::from(oklch(lightness, chroma, hue));
+            for (actual, expected) in [color.r, color.g, color.b].into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 0.002, "{color:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rgb_hues_cover_primary_colors_and_tied_maxima() {
+        for (rgb, expected_hue) in [
+            ([1.0, 0.0, 0.0], 0.0),
+            ([1.0, 1.0, 0.0], 1.0 / 6.0),
+            ([0.0, 1.0, 0.0], 2.0 / 6.0),
+            ([0.0, 1.0, 1.0], 3.0 / 6.0),
+            ([0.0, 0.0, 1.0], 4.0 / 6.0),
+            ([1.0, 0.0, 1.0], 5.0 / 6.0),
+        ] {
+            let [red, green, blue] = rgb;
+            let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
+            assert!((hue - expected_hue).abs() < f32::EPSILON);
+            assert!((saturation - 1.0).abs() < f32::EPSILON);
+            assert!((lightness - 0.5).abs() < f32::EPSILON);
+        }
     }
 }

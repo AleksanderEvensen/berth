@@ -9,6 +9,7 @@ use crate::{Theme, icons};
 /// Title + subtitle header of a list column ("Containers · 3 running"), with
 /// trailing actions.
 #[derive(IntoElement)]
+#[must_use]
 pub struct ListHeader {
     title: SharedString,
     subtitle: Option<SharedString>,
@@ -32,7 +33,7 @@ impl ListHeader {
     }
 
     /// Extra left padding, e.g. to clear a floating sidebar toggle.
-    pub fn leading_inset(mut self, inset: f32) -> Self {
+    pub const fn leading_inset(mut self, inset: f32) -> Self {
         self.leading_inset = inset;
         self
     }
@@ -84,6 +85,7 @@ impl RenderOnce for ListHeader {
 
 /// Small muted heading inside a list ("Running", "Stopped").
 #[derive(IntoElement)]
+#[must_use]
 pub struct SectionLabel {
     label: SharedString,
     count: Option<usize>,
@@ -97,7 +99,7 @@ impl SectionLabel {
         }
     }
 
-    pub fn count(mut self, count: usize) -> Self {
+    pub const fn count(mut self, count: usize) -> Self {
         self.count = Some(count);
         self
     }
@@ -137,18 +139,20 @@ pub enum Status {
 }
 
 impl Status {
+    #[must_use]
     pub fn color(self, theme: &Theme) -> Hsla {
         match self {
-            Status::Running => theme.success,
-            Status::Paused | Status::Transitioning => theme.warning,
-            Status::Stopped => theme.text_faint.opacity(0.6),
-            Status::Error => theme.danger,
+            Self::Running => theme.success,
+            Self::Paused | Self::Transitioning => theme.warning,
+            Self::Stopped => theme.text_faint.opacity(0.6),
+            Self::Error => theme.danger,
         }
     }
 }
 
 /// A status dot. With `ring`, it gets a border in `ring` colour so it can sit
 /// on top of a badge corner.
+#[must_use]
 pub fn status_dot(status: Status, size: f32, ring: Option<Hsla>, theme: &Theme) -> gpui::Div {
     div()
         .flex_none()
@@ -161,6 +165,7 @@ pub fn status_dot(status: Status, size: f32, ring: Option<Hsla>, theme: &Theme) 
 /// Leading tile for resource rows: a tinted rounded square with either a
 /// monogram or an icon, and an optional status dot on its corner.
 #[derive(IntoElement)]
+#[must_use]
 pub struct Badge {
     key: SharedString,
     content: BadgeContent,
@@ -181,8 +186,7 @@ impl Badge {
         let letter = key
             .chars()
             .find(|c| c.is_alphanumeric())
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into());
+            .map_or_else(|| "?".into(), |c| c.to_uppercase().to_string());
         Self {
             key,
             content: BadgeContent::Monogram(letter.into()),
@@ -202,17 +206,17 @@ impl Badge {
         }
     }
 
-    pub fn size(mut self, size: f32) -> Self {
+    pub const fn size(mut self, size: f32) -> Self {
         self.size = size;
         self
     }
 
-    pub fn status(mut self, status: Status) -> Self {
+    pub const fn status(mut self, status: Status) -> Self {
         self.status = Some(status);
         self
     }
 
-    pub fn dimmed(mut self, dimmed: bool) -> Self {
+    pub const fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
         self
     }
@@ -268,6 +272,7 @@ impl RenderOnce for Badge {
 ///
 /// Actions are revealed on hover and always shown on the selected row.
 #[derive(IntoElement)]
+#[must_use]
 pub struct ResourceRow {
     id: ElementId,
     leading: Option<AnyElement>,
@@ -319,24 +324,24 @@ impl ResourceRow {
         self
     }
 
-    pub fn selected(mut self, selected: bool) -> Self {
+    pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
     }
 
     /// Stopped / unused resources read one step quieter.
-    pub fn dimmed(mut self, dimmed: bool) -> Self {
+    pub const fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
         self
     }
 
-    pub fn depth(mut self, depth: usize) -> Self {
+    pub const fn depth(mut self, depth: usize) -> Self {
         self.depth = depth;
         self
     }
 
     /// Reserve the chevron slot so leaf rows align with expandable siblings.
-    pub fn reserve_disclosure(mut self) -> Self {
+    pub const fn reserve_disclosure(mut self) -> Self {
         self.reserve_disclosure = true;
         self
     }
@@ -368,6 +373,45 @@ impl ResourceRow {
     }
 }
 
+fn disclosure_slot(
+    disclosure: Option<(bool, ClickHandler)>,
+    reserve_disclosure: bool,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    if let Some((expanded, on_toggle)) = disclosure {
+        Some(
+            div()
+                .id("disclosure")
+                .flex_none()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.element_hover))
+                .child(
+                    icon(if expanded {
+                        icons::CHEVRON_DOWN
+                    } else {
+                        icons::CHEVRON_RIGHT
+                    })
+                    .size(px(12.0))
+                    .text_color(theme.text_faint),
+                )
+                .on_click(move |e, w, cx| {
+                    cx.stop_propagation();
+                    on_toggle(e, w, cx);
+                })
+                .into_any_element(),
+        )
+    } else if reserve_disclosure {
+        Some(div().flex_none().w(px(16.0)).into_any_element())
+    } else {
+        None
+    }
+}
+
 impl RenderOnce for ResourceRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::of(cx);
@@ -379,39 +423,10 @@ impl RenderOnce for ResourceRow {
             (theme.text, theme.text_muted)
         };
         let row_hover = theme.row_hover;
-        let disclosure_slot = if let Some((expanded, on_toggle)) = self.disclosure {
-            Some(
-                div()
-                    .id("disclosure")
-                    .flex_none()
-                    .size(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.element_hover))
-                    .child(
-                        icon(if expanded {
-                            icons::CHEVRON_DOWN
-                        } else {
-                            icons::CHEVRON_RIGHT
-                        })
-                        .size(px(12.0))
-                        .text_color(theme.text_faint),
-                    )
-                    .on_click(move |e, w, cx| {
-                        cx.stop_propagation();
-                        on_toggle(e, w, cx)
-                    })
-                    .into_any_element(),
-            )
-        } else if self.reserve_disclosure {
-            Some(div().flex_none().w(px(16.0)).into_any_element())
-        } else {
-            None
-        };
+        let disclosure_slot = disclosure_slot(self.disclosure, self.reserve_disclosure, theme);
         let on_click = self.on_click;
+        // Bound display indentation before converting to an exactly representable float.
+        let depth = f32::from(u16::try_from(self.depth).unwrap_or(u16::MAX));
 
         div()
             .id(self.id)
@@ -421,7 +436,7 @@ impl RenderOnce for ResourceRow {
             .flex()
             .items_center()
             .gap(px(Theme::SPACE_SM + 2.0))
-            .pl(px(Theme::SPACE_XS + self.depth as f32 * 22.0))
+            .pl(px(depth.mul_add(22.0, Theme::SPACE_XS)))
             .pr(px(Theme::SPACE_XS + 2.0))
             .rounded(px(Theme::ROW_RADIUS))
             .cursor_pointer()

@@ -16,7 +16,17 @@ use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
 use crate::store::{Connection, Connector, Store, StoreEvent};
 use crate::{chrome, screens::containers::ContainersScreen};
 
-actions!(berth, [ToggleSidebar, FocusSearch, Quit]);
+actions!(
+    berth,
+    [
+        #[derive(Eq)]
+        ToggleSidebar,
+        #[derive(Eq)]
+        FocusSearch,
+        #[derive(Eq)]
+        Quit
+    ]
+);
 
 /// Space the floating sidebar toggle occupies in the list header when the
 /// sidebar is collapsed.
@@ -50,7 +60,7 @@ impl Shell {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&store, |this, _, event: &StoreEvent, cx| match event {
             StoreEvent::Error { title, detail } => {
-                this.push_toast(title.clone(), detail.clone(), cx)
+                this.push_toast(title.clone(), detail.clone(), cx);
             }
         })
         .detach();
@@ -105,7 +115,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn render_confirm(&self, request: &ConfirmRequest, cx: &mut Context<Self>) -> AnyElement {
+    fn render_confirm(&self, request: &ConfirmRequest, cx: &Context<Self>) -> AnyElement {
         let theme = Theme::of(cx);
         let mut dialog = Dialog::new(request.title.clone()).message(request.message.clone());
         if !request.items.is_empty() {
@@ -140,7 +150,8 @@ impl Shell {
 
     fn push_toast(&mut self, title: String, detail: String, cx: &mut Context<Self>) {
         let id = self.next_toast_id;
-        self.next_toast_id += 1;
+        // IDs only identify the bounded list of recent toasts.
+        self.next_toast_id = self.next_toast_id.wrapping_add(1);
         self.toasts.push(ToastItem {
             id,
             title: title.into(),
@@ -162,7 +173,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn render_toasts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toasts(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
             .absolute()
             .bottom(px(Theme::SPACE_LG + 4.0))
@@ -182,7 +193,7 @@ impl Shell {
 
     // ---- sidebar ----
 
-    fn render_engine_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_engine_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         let (status, name, detail): (Status, SharedString, SharedString) =
             match self.store.read(cx).connection() {
@@ -232,7 +243,7 @@ impl Shell {
             .child(IconButton::new("settings", icons::SETTINGS).size(28.0, 16.0))
     }
 
-    fn render_sidebar(&self, radius: f32, cx: &mut Context<Self>) -> Sidebar {
+    fn render_sidebar(&self, radius: f32, cx: &Context<Self>) -> Sidebar {
         let running = self.store.read(cx).running_count();
         Sidebar::new("sidebar")
             .collapsed(self.sidebar_collapsed)
@@ -264,7 +275,7 @@ impl Shell {
             .footer(self.render_engine_footer(cx))
     }
 
-    fn render_sidebar_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         let color = theme.text_muted;
         let open = if self.sidebar_collapsed { 0.0 } else { 1.0 };
@@ -304,7 +315,7 @@ impl Render for Shell {
                 if collapsed { radius } else { 0.0 },
                 radius,
                 cx,
-            )
+            );
         });
         let captions = chrome::caption_buttons(window, cx);
         let confirm = self

@@ -14,42 +14,49 @@ use bollard::{
 use futures::{FutureExt as _, StreamExt as _, channel::oneshot, executor::block_on};
 use tokio::runtime::Runtime;
 
-fn endpoint() -> Endpoint {
+type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+fn endpoint() -> TestResult<Endpoint> {
     let host =
         std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".into());
     if let Some(path) = host.strip_prefix("unix://") {
-        return Endpoint::Unix(path.into());
+        return Ok(Endpoint::Unix(path.into()));
     }
     if let Some(pipe) = host.strip_prefix("npipe://") {
-        return Endpoint::NamedPipe(pipe.into());
+        return Ok(Endpoint::NamedPipe(pipe.into()));
     }
     let verify = std::env::var("DOCKER_TLS_VERIFY").is_ok_and(|v| !v.is_empty());
-    let tls = (verify || host.starts_with("https://")).then(|| TlsConfig {
-        cert_dir: std::env::var_os("DOCKER_CERT_PATH")
-            .map(Into::into)
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from(
-                    std::env::var_os("HOME").expect("HOME or DOCKER_CERT_PATH is needed for TLS"),
-                )
-                .join(".docker")
-            }),
-        verify: true,
-    });
-    Endpoint::Tcp { url: host, tls }
+    let tls = if verify || host.starts_with("https://") {
+        Some(TlsConfig {
+            cert_dir: std::env::var_os("DOCKER_CERT_PATH")
+                .map(Into::into)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|home| std::path::PathBuf::from(home).join(".docker"))
+                })
+                .ok_or("HOME or DOCKER_CERT_PATH is needed for TLS")?,
+            verify: true,
+        })
+    } else {
+        None
+    };
+    Ok(Endpoint::Tcp { url: host, tls })
 }
 
-fn direct_client(endpoint: &Endpoint) -> Docker {
-    match endpoint {
+fn direct_client(endpoint: &Endpoint) -> TestResult<Docker> {
+    Ok(match endpoint {
         #[cfg(unix)]
-        Endpoint::Unix(path) => {
-            Docker::connect_with_unix(path.to_str().unwrap(), 30, API_DEFAULT_VERSION).unwrap()
-        }
+        Endpoint::Unix(path) => Docker::connect_with_unix(
+            path.to_str().ok_or("socket path is not UTF-8")?,
+            30,
+            API_DEFAULT_VERSION,
+        )?,
         #[cfg(windows)]
         Endpoint::NamedPipe(pipe) => {
-            Docker::connect_with_named_pipe(pipe, 30, API_DEFAULT_VERSION).unwrap()
+            Docker::connect_with_named_pipe(pipe, 30, API_DEFAULT_VERSION)?
         }
         Endpoint::Tcp { url, tls: None } => {
-            Docker::connect_with_http(url, 30, API_DEFAULT_VERSION).unwrap()
+            Docker::connect_with_http(url, 30, API_DEFAULT_VERSION)?
         }
         Endpoint::Tcp {
             url,
@@ -61,11 +68,10 @@ fn direct_client(endpoint: &Endpoint) -> Docker {
             &config.cert_dir.join("ca.pem"),
             30,
             API_DEFAULT_VERSION,
-        )
-        .unwrap(),
+        )?,
         #[allow(unreachable_patterns)]
-        _ => panic!("endpoint unsupported on this test platform"),
-    }
+        _ => return Err("endpoint unsupported on this test platform".into()),
+    })
 }
 
 /// Installed before create: cleanup by the unique name also covers a failed
@@ -92,10 +98,12 @@ impl Drop for Cleanup<'_> {
             .await
         });
         match result {
-            Ok(Ok(()))
-            | Ok(Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 404, ..
-            })) => {}
+            Ok(
+                Ok(())
+                | Err(bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404, ..
+                }),
+            ) => {}
             other => eprintln!("cleanup failed for {}: {other:?}", self.name),
         }
     }
@@ -123,7 +131,7 @@ impl Events {
                         }
                     }
                 }
-            })
+            });
         });
         Self {
             receiver,
@@ -131,47 +139,33 @@ impl Events {
             thread: Some(thread),
         }
     }
-    fn expect(&self, id: &str, action: EventAction) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    fn expect(&self, id: &str, action: &EventAction) -> TestResult<()> {
+        let deadline = std::time::Instant::now()
+            .checked_add(Duration::from_secs(15))
+            .ok_or("event deadline overflow")?;
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let event = self
-                .receiver
-                .recv_timeout(remaining)
-                .expect("expected engine event before timeout")
-                .expect("event transport error");
-            if event.kind == ObjectKind::Container && event.id == id && event.action == action {
-                return;
+            let event = self.receiver.recv_timeout(remaining)??;
+            if event.kind == ObjectKind::Container && event.id == id && &event.action == action {
+                return Ok(());
             }
         }
     }
 }
 impl Drop for Events {
     fn drop(&mut self) {
-        let _ = self.cancel.take().unwrap().send(());
-        self.thread.take().unwrap().join().unwrap();
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            eprintln!("event listener thread panicked");
+        }
     }
 }
 
-#[test]
-#[ignore = "requires a real engine and permission to create an alpine:latest container"]
-fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
-    assert!(tokio::runtime::Handle::try_current().is_err());
-    let endpoint = endpoint();
-    let engine =
-        BollardEngine::connect(&endpoint).expect("connect to DOCKER_HOST or /var/run/docker.sock");
-    let info = block_on(engine.info()).unwrap();
-    assert!(!info.version.is_empty());
-    assert!(!info.api_version.is_empty());
-    assert_eq!(info.endpoint, endpoint);
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let docker = runtime
-        .block_on(direct_client(&endpoint).negotiate_version())
-        .unwrap();
+fn ensure_test_image(runtime: &Runtime, docker: &Docker) -> TestResult<()> {
     runtime.block_on(async {
         // Pull if absent; draining the stream completes the image download.
         if docker.inspect_image("alpine:latest").await.is_err() {
@@ -185,39 +179,67 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
                 None,
             );
             while let Some(result) = pull.next().await {
-                result.expect("pull alpine:latest");
+                result?;
             }
         }
-    });
-    let events = Events::subscribe(&engine);
-    let name = format!(
+        Ok(())
+    })
+}
+
+fn create_test_container(runtime: &Runtime, docker: &Docker, name: &str) -> TestResult<String> {
+    let created = runtime.block_on(docker.create_container(
+        Some(query::CreateContainerOptions {
+            name: Some(name.to_string()),
+            ..Default::default()
+        }),
+        ContainerCreateBody {
+            image: Some("alpine:latest".into()),
+            cmd: Some(vec!["sleep".into(), "300".into()]),
+            env: Some(vec!["BERTH_TEST=live".into()]),
+            ..Default::default()
+        },
+    ))?;
+    Ok(created.id)
+}
+
+fn test_client(endpoint: &Endpoint) -> TestResult<(Runtime, Docker)> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let docker = runtime.block_on(direct_client(endpoint)?.negotiate_version())?;
+    Ok((runtime, docker))
+}
+
+fn test_container_name() -> TestResult<String> {
+    Ok(format!(
         "berth-live-test-{}-{}",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ))
+}
+
+#[test]
+#[ignore = "requires a real engine and permission to create an alpine:latest container"]
+fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let endpoint = endpoint().unwrap();
+    let engine =
+        BollardEngine::connect(&endpoint).expect("connect to DOCKER_HOST or /var/run/docker.sock");
+    let info = block_on(engine.info()).unwrap();
+    assert_ne!(info.version, "");
+    assert_ne!(info.api_version, "");
+    assert_eq!(info.endpoint, endpoint);
+
+    let (runtime, docker) = test_client(&endpoint).unwrap();
+    ensure_test_image(&runtime, &docker).unwrap();
+    let events = Events::subscribe(&engine);
+    let name = test_container_name().unwrap();
     let _cleanup = Cleanup {
         runtime: &runtime,
         docker: &docker,
         name: name.clone(),
     };
-    let created = runtime
-        .block_on(docker.create_container(
-            Some(query::CreateContainerOptions {
-                name: Some(name.clone()),
-                ..Default::default()
-            }),
-            ContainerCreateBody {
-                image: Some("alpine:latest".into()),
-                cmd: Some(vec!["sleep".into(), "300".into()]),
-                env: Some(vec!["BERTH_TEST=live".into()]),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-    let id = created.id;
+    let id = create_test_container(&runtime, &docker, &name).unwrap();
     let listed = block_on(engine.list_containers()).unwrap();
     let listed = listed
         .iter()
@@ -230,7 +252,7 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
     assert!(inspected.env.unwrap().contains(&"BERTH_TEST=live".into()));
 
     block_on(engine.container_action(&id, ContainerAction::Start)).unwrap();
-    events.expect(&id, EventAction::Start);
+    events.expect(&id, &EventAction::Start).unwrap();
     // Starting an already running container must also succeed (HTTP 304).
     block_on(engine.container_action(&id, ContainerAction::Start)).unwrap();
     assert_eq!(
@@ -243,13 +265,13 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
     ));
 
     block_on(engine.container_action(&id, ContainerAction::Pause)).unwrap();
-    events.expect(&id, EventAction::Pause);
+    events.expect(&id, &EventAction::Pause).unwrap();
     assert_eq!(
         block_on(engine.inspect_container(&id)).unwrap().state,
         ContainerState::Paused
     );
     block_on(engine.container_action(&id, ContainerAction::Unpause)).unwrap();
-    events.expect(&id, EventAction::Unpause);
+    events.expect(&id, &EventAction::Unpause).unwrap();
     block_on(engine.container_action(
         &id,
         ContainerAction::Restart {
@@ -257,15 +279,15 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
         },
     ))
     .unwrap();
-    events.expect(&id, EventAction::Restart);
+    events.expect(&id, &EventAction::Restart).unwrap();
     block_on(engine.container_action(&id, ContainerAction::Kill)).unwrap();
-    events.expect(&id, EventAction::Die);
+    events.expect(&id, &EventAction::Die).unwrap();
     assert_eq!(
         block_on(engine.inspect_container(&id)).unwrap().state,
         ContainerState::Exited
     );
     block_on(engine.container_action(&id, ContainerAction::Start)).unwrap();
-    events.expect(&id, EventAction::Start);
+    events.expect(&id, &EventAction::Start).unwrap();
     block_on(engine.container_action(
         &id,
         ContainerAction::Stop {
@@ -273,7 +295,7 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
         },
     ))
     .unwrap();
-    events.expect(&id, EventAction::Stop);
+    events.expect(&id, &EventAction::Stop).unwrap();
     assert_eq!(
         block_on(engine.inspect_container(&id)).unwrap().state,
         ContainerState::Exited
@@ -286,7 +308,7 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
         },
     ))
     .unwrap();
-    events.expect(&id, EventAction::Destroy);
+    events.expect(&id, &EventAction::Destroy).unwrap();
     assert!(matches!(
         block_on(engine.inspect_container(&id)),
         Err(EngineError::NotFound(_))

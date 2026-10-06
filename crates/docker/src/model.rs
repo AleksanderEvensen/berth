@@ -12,22 +12,21 @@ pub enum ContainerState {
 impl ContainerState {
     /// Running, paused and restarting containers all hold resources and sit
     /// in the "Running" section.
-    pub fn is_active(self) -> bool {
-        matches!(
-            self,
-            ContainerState::Running | ContainerState::Paused | ContainerState::Restarting
-        )
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Running | Self::Paused | Self::Restarting)
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            ContainerState::Created => "Created",
-            ContainerState::Running => "Running",
-            ContainerState::Paused => "Paused",
-            ContainerState::Restarting => "Restarting",
-            ContainerState::Removing => "Removing",
-            ContainerState::Exited => "Exited",
-            ContainerState::Dead => "Dead",
+            Self::Created => "Created",
+            Self::Running => "Running",
+            Self::Paused => "Paused",
+            Self::Restarting => "Restarting",
+            Self::Removing => "Removing",
+            Self::Exited => "Exited",
+            Self::Dead => "Dead",
         }
     }
 }
@@ -40,11 +39,12 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            Protocol::Tcp => "TCP",
-            Protocol::Udp => "UDP",
-            Protocol::Sctp => "SCTP",
+            Self::Tcp => "TCP",
+            Self::Udp => "UDP",
+            Self::Sctp => "SCTP",
         }
     }
 }
@@ -104,12 +104,16 @@ pub struct Container {
 }
 
 impl Container {
+    #[must_use]
     pub fn short_id(&self) -> &str {
-        &self.id[..self.id.len().min(12)]
+        self.id
+            .get(..self.id.floor_char_boundary(self.id.len().min(12)))
+            .unwrap_or(&self.id)
     }
 
     /// A browser URL for the container's most web-like published TCP port,
     /// preferring common HTTP ports. Wildcard bindings map to `localhost`.
+    #[must_use]
     pub fn web_url(&self) -> Option<String> {
         let tcp = || {
             self.ports
@@ -136,5 +140,24 @@ impl Container {
             "http"
         };
         Some(format!("{scheme}://{host}:{port}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn short_ids_preserve_utf8_boundaries() {
+        let mut container = crate::fixtures::containers().into_iter().next().unwrap();
+        for (id, expected) in [
+            ("", ""),
+            ("abc", "abc"),
+            ("0123456789abcdef", "0123456789ab"),
+            ("0123456789érest", "0123456789é"),
+            ("01234567890érest", "01234567890"),
+            ("🚢🚢🚢🚢", "🚢🚢🚢"),
+        ] {
+            container.id = id.into();
+            assert_eq!(container.short_id(), expected);
+        }
     }
 }

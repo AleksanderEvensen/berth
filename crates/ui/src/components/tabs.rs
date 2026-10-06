@@ -10,6 +10,7 @@ type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 
 /// A pill-shaped segmented control (Info · Stats · Logs · Terminal · Files).
 #[derive(IntoElement)]
+#[must_use]
 pub struct SegmentedTabs {
     id: ElementId,
     labels: Vec<SharedString>,
@@ -30,7 +31,7 @@ impl SegmentedTabs {
         }
     }
 
-    pub fn selected(mut self, index: usize) -> Self {
+    pub const fn selected(mut self, index: usize) -> Self {
         self.selected = index;
         self
     }

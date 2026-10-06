@@ -43,21 +43,21 @@ pub enum Op {
 }
 
 impl Op {
-    pub fn progress_label(self) -> &'static str {
+    pub const fn progress_label(self) -> &'static str {
         match self {
-            Op::Start => "Starting…",
-            Op::Stop => "Stopping…",
-            Op::Restart => "Restarting…",
-            Op::Remove => "Removing…",
+            Self::Start => "Starting...",
+            Self::Stop => "Stopping...",
+            Self::Restart => "Restarting...",
+            Self::Remove => "Removing...",
         }
     }
 
-    fn verb(self) -> &'static str {
+    const fn verb(self) -> &'static str {
         match self {
-            Op::Start => "start",
-            Op::Stop => "stop",
-            Op::Restart => "restart",
-            Op::Remove => "remove",
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+            Self::Remove => "remove",
         }
     }
 }
@@ -77,13 +77,13 @@ pub struct Store {
     connection: Connection,
     containers: Vec<Container>,
     pending: HashMap<String, Op>,
-    _session: Task<()>,
+    session: Task<()>,
 }
 
 impl EventEmitter<StoreEvent> for Store {}
 
 impl Store {
-    pub fn new(connector: Connector, cx: &mut Context<Self>) -> Self {
+    pub fn new(connector: Connector, cx: &Context<Self>) -> Self {
         let session = Self::spawn_session(connector.clone(), cx);
         Self {
             connector,
@@ -91,11 +91,11 @@ impl Store {
             connection: Connection::Connecting,
             containers: Vec::new(),
             pending: HashMap::new(),
-            _session: session,
+            session,
         }
     }
 
-    pub fn connection(&self) -> &Connection {
+    pub const fn connection(&self) -> &Connection {
         &self.connection
     }
 
@@ -117,7 +117,7 @@ impl Store {
     /// Drop the current session and connect again immediately.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.connection = Connection::Connecting;
-        self._session = Self::spawn_session(self.connector.clone(), cx);
+        self.session = Self::spawn_session(self.connector.clone(), cx);
         cx.notify();
     }
 
@@ -157,9 +157,8 @@ impl Store {
             cx.spawn(async move |this, cx| {
                 let result = call.await;
                 let refreshed = match (&result, op) {
-                    (Ok(()), Op::Remove) => None,
+                    (Ok(()), Op::Remove) | (Err(_), _) => None,
                     (Ok(()), _) => Some(engine.inspect_container(&id).await),
-                    (Err(_), _) => None,
                 };
                 this.update(cx, |store, cx| {
                     store.pending.remove(&id);
@@ -214,7 +213,7 @@ impl Store {
         }
     }
 
-    fn spawn_session(connector: Connector, cx: &mut Context<Self>) -> Task<()> {
+    fn spawn_session(connector: Connector, cx: &Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
             let mut backoff = Duration::from_secs(1);
             loop {
@@ -249,7 +248,7 @@ impl Store {
                             return;
                         }
                         cx.background_executor().timer(backoff).await;
-                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                        backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
                     }
                     SessionEnd::StreamClosed => {
                         // Was connected; retry promptly.
@@ -271,6 +270,10 @@ enum SessionEnd {
     StreamClosed,
 }
 
+#[expect(
+    clippy::future_not_send,
+    reason = "GPUI AsyncApp stays on the foreground executor"
+)]
 async fn run_session(
     engine: &Arc<dyn Engine>,
     this: &WeakEntity<Store>,
@@ -312,6 +315,10 @@ async fn run_session(
 }
 
 /// Returns `false` once the store is gone.
+#[expect(
+    clippy::future_not_send,
+    reason = "GPUI AsyncApp stays on the foreground executor"
+)]
 async fn handle_event(
     engine: &Arc<dyn Engine>,
     this: &WeakEntity<Store>,

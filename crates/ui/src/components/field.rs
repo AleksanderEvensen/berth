@@ -7,6 +7,7 @@ use crate::{Theme, icons};
 /// A compact search field: magnifier, a `gpui-base` text input, and a clear
 /// button while it has a value.
 #[derive(IntoElement)]
+#[must_use]
 pub struct SearchField {
     state: Entity<InputState>,
     on_clear: Option<ClickHandler>,

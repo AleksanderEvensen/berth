@@ -27,3 +27,6 @@ tempfile.workspace = true
 [features]
 default = ["live"]
 live = ["dep:bollard", "dep:tokio", "dep:chrono", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types"]
+
+[lints]
+workspace = true

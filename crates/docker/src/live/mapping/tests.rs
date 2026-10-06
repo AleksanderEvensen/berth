@@ -190,7 +190,7 @@ fn summary_maps_fields_and_omits_environment() {
             },
             Mount {
                 kind: MountKind::Tmpfs,
-                source: "".into(),
+                source: String::new(),
                 destination: "/tmp".into(),
                 read_only: false
             },
@@ -202,8 +202,8 @@ fn summary_maps_fields_and_omits_environment() {
 fn missing_fields_are_safe_and_compose_requires_project_and_service() {
     let container = summary(api::ContainerSummary::default());
     assert_eq!(container.state, ContainerState::Created);
-    assert!(container.ports.is_empty());
-    assert!(container.mounts.is_empty());
+    assert_eq!(container.ports, []);
+    assert_eq!(container.mounts, []);
     assert!(container.ip.is_none());
     assert!(container.compose.is_none());
     assert!(
@@ -389,7 +389,7 @@ fn elapsed_handles_missing_zero_invalid_future_and_unit_boundaries() {
         (3600, "1 hour"),
         (7200, "2 hours"),
         (86400, "1 day"),
-        (172800, "2 days"),
+        (172_800, "2 days"),
         (-60, "Less than a second"),
     ] {
         let time = (now() - chrono::Duration::seconds(seconds)).to_rfc3339();
@@ -522,7 +522,7 @@ fn events_map_object_types_actions_ids_and_timestamps() {
                     ..Default::default()
                 }),
                 time: Some(100),
-                time_nano: Some(100123),
+                time_nano: Some(100_123),
                 ..Default::default()
             })
             .unwrap();
@@ -532,7 +532,7 @@ fn events_map_object_types_actions_ids_and_timestamps() {
                     kind,
                     id: "id".into(),
                     action,
-                    time_nanos: 100123
+                    time_nanos: 100_123
                 }
             );
         }

@@ -23,6 +23,7 @@ pub type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static
 
 /// An icon element for an embedded asset path (see [`crate::icons`]). Size and
 /// colour are set by the caller.
+#[must_use]
 pub fn icon(path: &'static str) -> Svg {
     use gpui::Styled as _;
     svg().path(path).flex_none()

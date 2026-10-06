@@ -12,6 +12,7 @@ use crate::{Theme, icons};
 
 /// An indeterminate spinner (rotating arc).
 #[derive(IntoElement)]
+#[must_use]
 pub struct Spinner {
     id: ElementId,
     size: f32,
@@ -27,12 +28,12 @@ impl Spinner {
         }
     }
 
-    pub fn size(mut self, size: f32) -> Self {
+    pub const fn size(mut self, size: f32) -> Self {
         self.size = size;
         self
     }
 
-    pub fn color(mut self, color: Hsla) -> Self {
+    pub const fn color(mut self, color: Hsla) -> Self {
         self.color = Some(color);
         self
     }
@@ -40,7 +41,7 @@ impl Spinner {
 
 impl RenderOnce for Spinner {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let color = self.color.unwrap_or(Theme::of(cx).text_muted);
+        let color = self.color.unwrap_or_else(|| Theme::of(cx).text_muted);
         icon(icons::SPINNER)
             .size(px(self.size))
             .text_color(color)
@@ -73,6 +74,7 @@ pub fn modal_overlay(content: impl IntoElement, theme: &Theme) -> impl IntoEleme
 /// A modal dialog card: title, message, optional body and a right-aligned
 /// button row.
 #[derive(IntoElement)]
+#[must_use]
 pub struct Dialog {
     title: SharedString,
     message: Option<SharedString>,
@@ -151,6 +153,7 @@ impl RenderOnce for Dialog {
 }
 
 /// A short list of affected objects inside a dialog ("+N more" beyond `max`).
+#[must_use]
 pub fn item_list(items: &[SharedString], max: usize, theme: &Theme) -> impl IntoElement {
     let more = items.len().saturating_sub(max);
     div()
@@ -189,6 +192,7 @@ pub enum ToastKind {
 
 /// A floating notification pill.
 #[derive(IntoElement)]
+#[must_use]
 pub struct Toast {
     id: ElementId,
     kind: ToastKind,

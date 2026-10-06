@@ -160,7 +160,7 @@ fn elapsed(timestamp: Option<&str>, now: DateTime<Utc>) -> Option<String> {
     if timestamp.timestamp() <= 0 {
         return None;
     }
-    let seconds = (now.timestamp() - timestamp.timestamp()).max(0);
+    let seconds = now.timestamp().saturating_sub(timestamp.timestamp()).max(0);
     let (amount, unit) = match seconds {
         0 => return Some("Less than a second".into()),
         1..60 => (seconds, "second"),
@@ -184,15 +184,16 @@ pub(super) fn status(value: &api::ContainerState, now: DateTime<Utc>) -> String 
     match state {
         ContainerState::Running | ContainerState::Paused => {
             let mut text = elapsed(value.started_at.as_deref(), now)
-                .map(|s| format!("Up {s}"))
-                .unwrap_or_else(|| "Up".into());
+                .map_or_else(|| "Up".into(), |s| format!("Up {s}"));
             if state == ContainerState::Paused {
                 text.push_str(" (Paused)");
             } else if let Some(health) = value.health.as_ref().and_then(|h| h.status.as_ref())
                 && !health.as_ref().is_empty()
                 && health.as_ref() != "none"
             {
-                text.push_str(&format!(" ({health})"));
+                text.push_str(" (");
+                text.push_str(health.as_ref());
+                text.push(')');
             }
             text
         }
@@ -344,10 +345,10 @@ pub(super) fn event(value: api::EventMessage) -> Option<EngineEvent> {
         "restart" => EventAction::Restart,
         "destroy" => EventAction::Destroy,
         "rename" => EventAction::Rename,
-        s if s.starts_with("health_status:") => {
-            EventAction::HealthStatus(s["health_status:".len()..].trim().into())
-        }
-        _ => EventAction::Other(action),
+        _ => action.strip_prefix("health_status:").map_or_else(
+            || EventAction::Other(action.clone()),
+            |status| EventAction::HealthStatus(status.trim().into()),
+        ),
     };
     Some(EngineEvent {
         kind,
