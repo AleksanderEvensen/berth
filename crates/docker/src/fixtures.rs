@@ -428,6 +428,7 @@ const CONTAINER_BYTES: u64 = 8_000_000;
 pub struct FixtureEngine {
     state: Arc<Mutex<FixtureState>>,
     latency: Option<Duration>,
+    log_history_lines: u32,
 }
 
 #[derive(Default)]
@@ -492,10 +493,12 @@ impl FixtureEngine {
                 subscribers: Vec::new(),
             })),
             latency: None,
+            log_history_lines: 240,
         }
     }
 
-    /// Delay every mutation (and its event) — makes pending UI states visible.
+    /// Delay every mutation (and its event), plus logs/stats/exec startup.
+    /// Makes pending UI states visible without requiring an async runtime.
     #[must_use]
     pub const fn with_latency(mut self, latency: Duration) -> Self {
         self.latency = Some(latency);
@@ -860,27 +863,24 @@ impl Engine for FixtureEngine {
         rx.boxed()
     }
 
-    // M3 stubs: replaced by the real implementations.
-    fn logs(&self, _id: &str, _options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>> {
-        futures::stream::once(async { Err(EngineError::Transport("logs: not implemented".into())) })
-            .boxed()
+    fn logs(&self, id: &str, options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>> {
+        self.fixture_logs(id, options)
     }
 
-    fn stats(&self, _id: &str) -> BoxStream<'static, EngineResult<StatsSample>> {
-        futures::stream::once(async {
-            Err(EngineError::Transport("stats: not implemented".into()))
-        })
-        .boxed()
+    fn stats(&self, id: &str) -> BoxStream<'static, EngineResult<StatsSample>> {
+        self.fixture_stats(id)
     }
 
     fn exec(
         &self,
-        _id: &str,
-        _options: ExecOptions,
+        id: &str,
+        options: ExecOptions,
     ) -> BoxFuture<'static, EngineResult<ExecSession>> {
-        async { Err(EngineError::Transport("exec: not implemented".into())) }.boxed()
+        self.fixture_exec(id, options)
     }
 }
+
+mod m3;
 
 #[cfg(test)]
 mod storage_tests;
