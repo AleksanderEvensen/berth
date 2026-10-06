@@ -24,6 +24,10 @@ use berth_docker::{
 use futures::StreamExt as _;
 use gpui::{AsyncApp, Context, EventEmitter, Task, WeakEntity};
 
+mod storage;
+pub use storage::PruneTarget;
+use storage::Storage;
+
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -68,6 +72,7 @@ pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn Engine>, String> + Send + Sy
 
 pub enum StoreEvent {
     Error { title: String, detail: String },
+    Info { title: String, detail: String },
 }
 
 pub struct Store {
@@ -76,7 +81,9 @@ pub struct Store {
     engine: Option<Arc<dyn Engine>>,
     connection: Connection,
     containers: Vec<Container>,
+    /// In-flight operations, keyed by container/image id or volume name.
     pending: HashMap<String, Op>,
+    storage: Storage,
     session: Task<()>,
 }
 
@@ -91,6 +98,7 @@ impl Store {
             connection: Connection::Connecting,
             containers: Vec::new(),
             pending: HashMap::new(),
+            storage: Storage::default(),
             session,
         }
     }
@@ -293,6 +301,8 @@ async fn run_session(
         store.connection = Connection::Connected(info);
         store.containers = containers;
         store.pending.clear();
+        store.storage.refresh_queued = false;
+        store.refresh_storage(cx);
         cx.notify();
     });
     if synced.is_err() {
@@ -325,6 +335,16 @@ async fn handle_event(
     cx: &mut AsyncApp,
     event: EngineEvent,
 ) -> bool {
+    // Image/volume changes, and containers appearing or disappearing (which
+    // changes usage), refresh the storage lists.
+    let affects_storage = match event.kind {
+        ObjectKind::Image | ObjectKind::Volume => true,
+        ObjectKind::Container => matches!(event.action, EventAction::Create | EventAction::Destroy),
+        ObjectKind::Network => false,
+    };
+    if affects_storage && this.update(cx, Store::refresh_storage).is_err() {
+        return false;
+    }
     if event.kind != ObjectKind::Container {
         return true;
     }

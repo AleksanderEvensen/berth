@@ -4,7 +4,6 @@
 //! confirmed first via a [`ConfirmRequest`] that the shell presents.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 use std::rc::Rc;
 
 use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack};
@@ -15,15 +14,15 @@ use berth_ui::{
     status_dot,
 };
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent,
-    ListAlignment, ListState, Render, SharedString, Subscription, Window, div, list, prelude::*,
-    px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Window, div, list, prelude::*, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
 use crate::store::{Connection, Op, Store};
+use crate::virtual_rows::VirtualRows;
 
 const TABS: [&str; 5] = ["Info", "Stats", "Logs", "Terminal", "Files"];
 
@@ -54,8 +53,7 @@ pub struct ContainersScreen {
     header_inset: f32,
     left_radius: f32,
     right_radius: f32,
-    list_state: ListState,
-    rows: Vec<Row>,
+    rows: VirtualRows<Row>,
     /// Compose project → member container ids, in service order.
     stack_members: HashMap<String, Vec<String>>,
     /// Container id → index into the store's container list.
@@ -81,8 +79,7 @@ impl ContainersScreen {
             header_inset: 0.0,
             left_radius: 0.0,
             right_radius: 0.0,
-            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
-            rows: Vec::new(),
+            rows: VirtualRows::new(),
             stack_members: HashMap::new(),
             index: HashMap::new(),
         }
@@ -129,10 +126,7 @@ impl ContainersScreen {
                 }
             }
         }
-        if let Some((range, count)) = splice_range(&self.rows, &rows) {
-            self.list_state.splice(range, count);
-        }
-        self.rows = rows;
+        self.rows.sync(rows);
         self.stack_members = stack_members;
         self.index = store
             .containers()
@@ -302,7 +296,7 @@ impl ContainersScreen {
             self.render_list_placeholder(store, cx)
         } else {
             list(
-                self.list_state.clone(),
+                self.rows.state.clone(),
                 cx.processor(|this, ix: usize, _, cx| this.render_row(ix, cx)),
             )
             .flex_1()
@@ -676,27 +670,6 @@ impl Render for ContainersScreen {
     }
 }
 
-/// The minimal splice turning `old` into `new`: the changed middle between
-/// the common prefix and suffix. `None` when nothing changed.
-fn splice_range(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
-    if old == new {
-        return None;
-    }
-    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let room = old.len().min(new.len()).saturating_sub(prefix);
-    let suffix = old
-        .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take(room)
-        .take_while(|(a, b)| a == b)
-        .count();
-    Some((
-        prefix..old.len().saturating_sub(suffix),
-        new.len().saturating_sub(prefix).saturating_sub(suffix),
-    ))
-}
-
 /// Case-insensitive match on name, image, compose project and service.
 /// `query` is already lower-cased.
 fn matches_query(c: &Container, query: &str) -> bool {
@@ -938,41 +911,7 @@ fn stack_info(stack: &Stack<'_>, theme: &Theme) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{Row, image_name, splice_range};
-
-    fn c(id: &str) -> Row {
-        Row::Container {
-            id: id.into(),
-            depth: 0,
-        }
-    }
-
-    #[test]
-    fn splice_covers_only_the_changed_middle() {
-        let old = [c("a"), c("b"), c("c"), c("d")];
-        assert_eq!(splice_range(&old, &old), None);
-        // b moves out: one row removed at index 1.
-        assert_eq!(
-            splice_range(&old, &[c("a"), c("c"), c("d")]),
-            Some((1..2, 0))
-        );
-        // Insert in the middle.
-        assert_eq!(
-            splice_range(&old, &[c("a"), c("b"), c("x"), c("c"), c("d")]),
-            Some((2..2, 1))
-        );
-        // Replace everything.
-        assert_eq!(splice_range(&old, &[c("x")]), Some((0..4, 1)));
-        // From empty.
-        assert_eq!(splice_range(&[], &[c("a")]), Some((0..0, 1)));
-    }
-
-    #[test]
-    fn splice_handles_repeated_rows_without_overlap() {
-        // Prefix and suffix must not double-count the shared element.
-        let old = [c("a"), c("a")];
-        assert_eq!(splice_range(&old, &[c("a")]), Some((1..2, 0)));
-    }
+    use super::image_name;
 
     #[test]
     fn image_names() {

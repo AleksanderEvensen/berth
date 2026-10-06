@@ -8,13 +8,17 @@ use berth_ui::{
     Status, Theme, Toast, ToastKind, icons, item_list, modal_overlay, sidebar_glyph, status_dot,
 };
 use gpui::{
-    AnimationExt as _, AnyElement, Context, Entity, FocusHandle, FontWeight, IntoElement, Render,
-    SharedString, SpringAnimation, Window, actions, div, prelude::*, px,
+    AnimationExt as _, AnyElement, Context, Entity, EventEmitter, FocusHandle, FontWeight,
+    IntoElement, Render, SharedString, SpringAnimation, Window, actions, div, prelude::*, px,
 };
 
+use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
+use crate::screens::{
+    Chrome, cleanup::CleanupScreen, containers::ContainersScreen, images::ImagesScreen,
+    volumes::VolumesScreen,
+};
 use crate::store::{Connection, Connector, Store, StoreEvent};
-use crate::{chrome, screens::containers::ContainersScreen};
 
 actions!(
     berth,
@@ -34,8 +38,18 @@ const TOGGLE_CLEARANCE: f32 = 34.0;
 const TOAST_LIFETIME: Duration = Duration::from_secs(6);
 const MAX_TOASTS: usize = 3;
 
+/// Which screen the sidebar has selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Containers,
+    Volumes,
+    Images,
+    Cleanup,
+}
+
 struct ToastItem {
     id: usize,
+    kind: ToastKind,
     title: SharedString,
     detail: SharedString,
 }
@@ -45,7 +59,11 @@ pub struct Shell {
     dialog_focus: FocusHandle,
     sidebar_collapsed: bool,
     store: Entity<Store>,
+    route: Route,
     containers: Entity<ContainersScreen>,
+    volumes: Entity<VolumesScreen>,
+    images: Entity<ImagesScreen>,
+    cleanup: Entity<CleanupScreen>,
     confirm: Option<ConfirmRequest>,
     toasts: Vec<ToastItem>,
     next_toast_id: usize,
@@ -60,14 +78,47 @@ impl Shell {
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&store, |this, _, event: &StoreEvent, cx| match event {
             StoreEvent::Error { title, detail } => {
-                this.push_toast(title.clone(), detail.clone(), cx);
+                this.push_toast(ToastKind::Error, title.clone(), detail.clone(), cx);
+            }
+            StoreEvent::Info { title, detail } => {
+                this.push_toast(ToastKind::Info, title.clone(), detail.clone(), cx);
             }
         })
         .detach();
 
         let containers = cx.new(|cx| ContainersScreen::new(store.clone(), cx));
+        let volumes = cx.new(|cx| VolumesScreen::new(store.clone(), cx));
+        let images = cx.new(|cx| ImagesScreen::new(store.clone(), cx));
+        let cleanup = cx.new(|cx| CleanupScreen::new(store.clone(), cx));
+        Self::present_confirms(&containers, window, cx);
+        Self::present_confirms(&volumes, window, cx);
+        Self::present_confirms(&images, window, cx);
+        Self::present_confirms(&cleanup, window, cx);
+
+        Self {
+            focus,
+            dialog_focus: cx.focus_handle(),
+            sidebar_collapsed: false,
+            store,
+            route: Route::Containers,
+            containers,
+            volumes,
+            images,
+            cleanup,
+            confirm: None,
+            toasts: Vec::new(),
+            next_toast_id: 0,
+        }
+    }
+
+    /// Show the confirm dialog whenever `screen` asks for one.
+    fn present_confirms<T: EventEmitter<ConfirmRequest>>(
+        screen: &Entity<T>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.subscribe_in(
-            &containers,
+            screen,
             window,
             |this, _, request: &ConfirmRequest, window, cx| {
                 this.confirm = Some(request.clone());
@@ -76,20 +127,15 @@ impl Shell {
             },
         )
         .detach();
+    }
 
-        Self {
-            focus,
-            dialog_focus: cx.focus_handle(),
-            sidebar_collapsed: false,
-            store,
-            containers,
-            confirm: None,
-            toasts: Vec::new(),
-            next_toast_id: 0,
-        }
+    fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.route = route;
+        cx.notify();
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.route = Route::Containers;
         self.containers
             .update(cx, |screen, cx| screen.open_search(window, cx));
     }
@@ -148,12 +194,19 @@ impl Shell {
 
     // ---- toasts ----
 
-    fn push_toast(&mut self, title: String, detail: String, cx: &mut Context<Self>) {
+    fn push_toast(
+        &mut self,
+        kind: ToastKind,
+        title: String,
+        detail: String,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.next_toast_id;
         // IDs only identify the bounded list of recent toasts.
         self.next_toast_id = self.next_toast_id.wrapping_add(1);
         self.toasts.push(ToastItem {
             id,
+            kind,
             title: title.into(),
             detail: detail.into(),
         });
@@ -185,7 +238,7 @@ impl Shell {
             .gap(px(Theme::SPACE_SM))
             .children(self.toasts.iter().map(|toast| {
                 let id = toast.id;
-                Toast::new(("toast", id), ToastKind::Error, toast.title.clone())
+                Toast::new(("toast", id), toast.kind, toast.title.clone())
                     .detail(toast.detail.clone())
                     .on_dismiss(cx.listener(move |this, _, _, cx| this.dismiss_toast(id, cx)))
             }))
@@ -244,7 +297,15 @@ impl Shell {
     }
 
     fn render_sidebar(&self, radius: f32, cx: &Context<Self>) -> Sidebar {
-        let running = self.store.read(cx).running_count();
+        let store = self.store.read(cx);
+        let running = store.running_count();
+        let volumes = store.volumes().len();
+        let images = store.images().len();
+        let item = |id: &'static str, icon, label: &'static str, route: Route| {
+            SidebarItem::new(id, icon, label)
+                .active(self.route == route)
+                .on_click(cx.listener(move |this, _, _, cx| this.navigate(route, cx)))
+        };
         Sidebar::new("sidebar")
             .collapsed(self.sidebar_collapsed)
             .corner_radius(radius)
@@ -255,22 +316,33 @@ impl Shell {
             .section(
                 SidebarSection::new("Docker")
                     .item(
-                        SidebarItem::new("nav-containers", icons::BOX, "Containers")
-                            .trailing(running.to_string())
-                            .active(true),
+                        item(
+                            "nav-containers",
+                            icons::BOX,
+                            "Containers",
+                            Route::Containers,
+                        )
+                        .trailing(running.to_string()),
                     )
-                    .item(SidebarItem::new(
-                        "nav-volumes",
-                        icons::HARD_DRIVE,
-                        "Volumes",
-                    ))
-                    .item(SidebarItem::new("nav-images", icons::DISC, "Images"))
+                    .item(
+                        item("nav-volumes", icons::HARD_DRIVE, "Volumes", Route::Volumes)
+                            .trailing(volumes.to_string()),
+                    )
+                    .item(
+                        item("nav-images", icons::DISC, "Images", Route::Images)
+                            .trailing(images.to_string()),
+                    )
                     .item(SidebarItem::new("nav-networks", icons::NETWORK, "Networks")),
             )
             .section(
                 SidebarSection::new("General")
                     .item(SidebarItem::new("nav-activity", icons::CHART, "Activity"))
-                    .item(SidebarItem::new("nav-cleanup", icons::BROOM, "Clean up")),
+                    .item(item(
+                        "nav-cleanup",
+                        icons::BROOM,
+                        "Clean up",
+                        Route::Cleanup,
+                    )),
             )
             .footer(self.render_engine_footer(cx))
     }
@@ -309,14 +381,34 @@ impl Render for Shell {
         let radius = chrome::content_radius(window);
         let theme = Theme::of(cx).clone();
         let collapsed = self.sidebar_collapsed;
-        self.containers.update(cx, |screen, cx| {
-            screen.set_chrome(
-                if collapsed { TOGGLE_CLEARANCE } else { 0.0 },
-                if collapsed { radius } else { 0.0 },
-                radius,
-                cx,
-            );
-        });
+        let frame = Chrome {
+            header_inset: if collapsed { TOGGLE_CLEARANCE } else { 0.0 },
+            left_radius: if collapsed { radius } else { 0.0 },
+            right_radius: radius,
+        };
+        let screen = match self.route {
+            Route::Containers => {
+                self.containers.update(cx, |screen, cx| {
+                    screen.set_chrome(frame.header_inset, frame.left_radius, radius, cx);
+                });
+                self.containers.clone().into_any_element()
+            }
+            Route::Volumes => {
+                self.volumes
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
+                self.volumes.clone().into_any_element()
+            }
+            Route::Images => {
+                self.images
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
+                self.images.clone().into_any_element()
+            }
+            Route::Cleanup => {
+                self.cleanup
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
+                self.cleanup.clone().into_any_element()
+            }
+        };
         let captions = chrome::caption_buttons(window, cx);
         let confirm = self
             .confirm
@@ -337,13 +429,7 @@ impl Render for Shell {
             .text_color(theme.text)
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.containers.clone()),
-            )
+            .child(div().flex_1().min_w_0().h_full().child(screen))
             .child(self.render_sidebar_toggle(cx))
             .when_some(captions, |d, captions| {
                 d.child(

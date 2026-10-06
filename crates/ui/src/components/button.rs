@@ -4,7 +4,7 @@ use gpui::{
 };
 
 use super::{ClickHandler, icon};
-use crate::Theme;
+use crate::{Theme, icons};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonTone {
@@ -226,5 +226,73 @@ impl RenderOnce for Button {
             })
             .child(self.label)
             .when_some(on_click, |d, f| d.on_click(move |e, w, cx| f(e, w, cx)))
+    }
+}
+
+/// A square checkbox. Checked: accent plate with a check glyph.
+#[derive(IntoElement)]
+#[must_use]
+pub struct Checkbox {
+    id: ElementId,
+    checked: bool,
+    disabled: bool,
+    on_toggle: Option<ClickHandler>,
+}
+
+impl Checkbox {
+    pub fn new(id: impl Into<ElementId>, checked: bool) -> Self {
+        Self {
+            id: id.into(),
+            checked,
+            disabled: false,
+            on_toggle: None,
+        }
+    }
+
+    pub const fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn on_toggle(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_toggle = Some(Box::new(f));
+        self
+    }
+}
+
+impl RenderOnce for Checkbox {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let hover_border = theme.text_faint;
+        div()
+            .id(self.id)
+            .flex_none()
+            .size(px(16.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .border_1()
+            .map(|d| {
+                if self.checked {
+                    d.bg(theme.accent).border_color(theme.accent)
+                } else {
+                    d.bg(theme.row_hover).border_color(theme.border_strong)
+                }
+            })
+            .when(self.disabled, |d| d.opacity(0.4))
+            .when(!self.disabled, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.border_color(hover_border))
+            })
+            .when(self.checked, |d| {
+                d.child(icon(icons::CHECK).size(px(12.0)).text_color(theme.on_solid))
+            })
+            .when_some(self.on_toggle.filter(|_| !self.disabled), |d, f| {
+                d.on_click(move |e, w, cx| {
+                    cx.stop_propagation();
+                    f(e, w, cx);
+                })
+            })
     }
 }

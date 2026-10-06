@@ -68,6 +68,7 @@ icon_assets![
     (MORE, "more-horizontal"),
     (CLOSE, "close"),
     (SPINNER, "spinner"),
+    (CHECK, "check"),
     (DANGER, "danger-circle"),
 ];
 

@@ -1,8 +1,11 @@
 mod chrome;
 mod dialogs;
+mod format;
 mod screens;
+mod selection;
 mod shell;
 mod store;
+mod virtual_rows;
 
 use std::sync::Arc;
 use std::time::Duration;
