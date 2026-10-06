@@ -1,6 +1,13 @@
 mod chrome;
+mod dialogs;
 mod screens;
 mod shell;
+mod store;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use berth_docker::{Engine, fixtures::FixtureEngine};
 
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
@@ -23,6 +30,8 @@ fn main() {
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("enter", dialogs::Confirm, Some(dialogs::CONFIRM_CONTEXT)),
+                KeyBinding::new("escape", dialogs::Cancel, Some(dialogs::CONFIRM_CONTEXT)),
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
 
@@ -44,9 +53,19 @@ fn main() {
                     app_id: Some("berth".into()),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Shell::new(window, cx)),
+                |window, cx| cx.new(|cx| Shell::new(engine(), window, cx)),
             )
             .expect("failed to open the main window");
             cx.activate(true);
         });
+}
+
+/// The engine to drive the UI with. Fixture data until the live client and
+/// discovery are merged (M1); `BERTH_FIXTURE_LATENCY_MS` simulates a slow engine.
+fn engine() -> Arc<dyn Engine> {
+    let latency = std::env::var("BERTH_FIXTURE_LATENCY_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(600);
+    Arc::new(FixtureEngine::default().with_latency(Duration::from_millis(latency)))
 }

@@ -1,20 +1,25 @@
 //! Containers screen: list column (stacks + containers) and detail pane.
 //!
-//! Runs on fixture data; lifecycle actions mutate the fixtures locally so the
-//! interaction model can be evaluated before the engine layer lands (M1).
+//! Reads the [`Store`]; lifecycle actions go through it, destructive ones are
+//! confirmed first via a [`ConfirmRequest`] that the shell presents.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
-use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack, fixtures};
+use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack};
 use berth_ui::{
-    Badge, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader, ResourceRow,
-    SectionLabel, SegmentedTabs, Status, Theme, empty_state, icon, icons, status_dot,
+    Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
+    ResourceRow, SectionLabel, SegmentedTabs, Spinner, Status, Theme, empty_state, icon, icons,
+    status_dot,
 };
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, Render, SharedString, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString,
+    Window, div, prelude::*, px,
 };
 
 use crate::chrome;
+use crate::dialogs::ConfirmRequest;
+use crate::store::{Connection, Op, Store};
 
 const TABS: [&str; 5] = ["Info", "Stats", "Logs", "Terminal", "Files"];
 
@@ -25,7 +30,7 @@ enum Selection {
 }
 
 pub struct ContainersScreen {
-    containers: Vec<Container>,
+    store: Entity<Store>,
     /// Compose projects the user collapsed (stacks start expanded).
     collapsed: HashSet<String>,
     selection: Option<Selection>,
@@ -35,26 +40,24 @@ pub struct ContainersScreen {
     right_radius: f32,
 }
 
+impl EventEmitter<ConfirmRequest> for ContainersScreen {}
+
 impl ContainersScreen {
-    pub fn new(_cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&store, |this, store, cx| {
+            this.drop_stale_selection(store.read(cx).containers());
+            cx.notify();
+        })
+        .detach();
         Self {
-            containers: fixtures::containers(),
+            store,
             collapsed: HashSet::new(),
-            selection: Some(Selection::Container(
-                "e3a58e962b46d1c0f9a7b8e2d4c6a1f3e5b7d9c0a2f4e6b8d1c3a5f7e9b0d2c4".into(),
-            )),
+            selection: None,
             tab: 0,
             header_inset: 0.0,
             left_radius: 0.0,
             right_radius: 0.0,
         }
-    }
-
-    pub fn running_count(&self) -> usize {
-        self.containers
-            .iter()
-            .filter(|c| c.state.is_active())
-            .count()
     }
 
     /// Layout facts owned by the shell: clearance for the floating sidebar
@@ -68,37 +71,41 @@ impl ContainersScreen {
         }
     }
 
-    // ---- simulated lifecycle (replaced by Engine commands in M1) ----
-
-    fn set_running(&mut self, ids: &[String], running: bool, cx: &mut Context<Self>) {
-        for c in self.containers.iter_mut().filter(|c| ids.contains(&c.id)) {
-            if running {
-                c.state = ContainerState::Running;
-                c.status = "Up less than a second".into();
-                c.ip = Some("172.17.0.9".into());
-            } else {
-                c.state = ContainerState::Exited;
-                c.status = "Exited (0) just now".into();
-                c.ip = None;
-            }
-        }
-        cx.notify();
-    }
-
-    fn remove(&mut self, ids: &[String], cx: &mut Context<Self>) {
-        self.containers.retain(|c| !ids.contains(&c.id));
-        let gone = match &self.selection {
-            Some(Selection::Container(id)) => ids.contains(id),
-            Some(Selection::Stack(project)) => !self
-                .containers
+    fn drop_stale_selection(&mut self, containers: &[Container]) {
+        let exists = match &self.selection {
+            None => return,
+            Some(Selection::Container(id)) => containers.iter().any(|c| &c.id == id),
+            Some(Selection::Stack(project)) => containers
                 .iter()
                 .any(|c| c.compose.as_ref().is_some_and(|cr| &cr.project == project)),
-            None => false,
         };
-        if gone {
+        if !exists {
             self.selection = None;
         }
-        cx.notify();
+    }
+
+    fn run(&self, ids: Vec<String>, op: Op, cx: &mut Context<Self>) {
+        self.store.update(cx, |store, cx| store.run(ids, op, cx));
+    }
+
+    fn confirm_delete(
+        &self,
+        title: String,
+        message: &str,
+        names: Vec<SharedString>,
+        ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        cx.emit(ConfirmRequest {
+            title: title.into(),
+            message: message.to_string().into(),
+            items: names,
+            confirm_label: "Delete".into(),
+            on_confirm: Rc::new(move |_, cx| {
+                store.update(cx, |store, cx| store.run(ids.clone(), Op::Remove, cx));
+            }),
+        });
     }
 
     fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
@@ -108,8 +115,13 @@ impl ContainersScreen {
 
     // ---- list column ----
 
-    fn render_list(&self, tree: &ContainerTree<'_>, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
+    fn render_list(
+        &self,
+        store: &Store,
+        tree: &ContainerTree<'_>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = Theme::of(cx);
         let running = tree.running_container_count();
 
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -120,24 +132,44 @@ impl ContainersScreen {
                     .into_any_element(),
             );
             for node in &tree.running {
-                self.push_node(node, &mut rows, cx);
+                self.push_node(store, node, &mut rows, cx);
             }
         }
         if !tree.stopped.is_empty() {
             rows.push(SectionLabel::new("Stopped").into_any_element());
             for node in &tree.stopped {
-                self.push_node(node, &mut rows, cx);
+                self.push_node(store, node, &mut rows, cx);
             }
         }
 
+        let subtitle = match store.connection() {
+            Connection::Connecting => "Connecting…".to_string(),
+            Connection::Disconnected { .. } => "Not connected".to_string(),
+            Connection::Connected(_) if running == 0 => "None running".to_string(),
+            Connection::Connected(_) => format!("{running} running"),
+        };
         let header = ListHeader::new("Containers")
-            .subtitle(match running {
-                0 => "None running".to_string(),
-                n => format!("{n} running"),
-            })
+            .subtitle(subtitle)
             .leading_inset(self.header_inset)
             .action(IconButton::new("search", icons::SEARCH))
             .action(IconButton::new("new-container", icons::PLUS));
+
+        let body: AnyElement = if rows.is_empty() {
+            self.render_list_placeholder(store, cx)
+        } else {
+            div()
+                .id("container-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(px(Theme::SPACE_SM))
+                .pb(px(Theme::SPACE_MD))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .children(rows)
+                .into_any_element()
+        };
 
         div()
             .w(px(Theme::LIST_WIDTH))
@@ -151,42 +183,112 @@ impl ContainersScreen {
             .border_r_1()
             .border_color(theme.border)
             .child(chrome::drag_region("list-titlebar", div().child(header)))
-            .child(
-                div()
-                    .id("container-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(Theme::SPACE_SM))
-                    .pb(px(Theme::SPACE_MD))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .children(rows),
-            )
+            .child(body)
     }
 
-    fn push_node(&self, node: &Node<'_>, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
+    /// Connecting / disconnected / empty states for the list column.
+    fn render_list_placeholder(&self, store: &Store, cx: &Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx);
+        let column = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(Theme::SPACE_SM))
+            .px(px(Theme::SPACE_LG * 2.0))
+            .pb(px(Theme::HEADER_HEIGHT));
+        let title = |text: &'static str| {
+            div()
+                .text_size(px(Theme::TEXT_LG))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_muted)
+                .child(text)
+        };
+        let detail = |text: String| {
+            div()
+                .text_size(px(Theme::TEXT_SM))
+                .line_height(px(17.0))
+                .text_center()
+                .text_color(theme.text_faint)
+                .child(text)
+        };
+        match store.connection() {
+            Connection::Connecting => column
+                .child(Spinner::new("connecting").size(18.0))
+                .child(title("Connecting to engine…"))
+                .into_any_element(),
+            Connection::Disconnected { error } => column
+                .child(title("Can't reach the engine"))
+                .child(detail(error.clone()))
+                .child(div().pt(px(Theme::SPACE_SM)).child(
+                    Button::new("reconnect", "Retry").on_click(cx.listener(|this, _, _, cx| {
+                        this.store.update(cx, |store, cx| store.reconnect(cx))
+                    })),
+                ))
+                .into_any_element(),
+            Connection::Connected(_) => column
+                .child(title("No containers"))
+                .child(detail(
+                    "Run a container or `docker compose up` and it shows up here.".into(),
+                ))
+                .into_any_element(),
+        }
+    }
+
+    fn push_node(
+        &self,
+        store: &Store,
+        node: &Node<'_>,
+        rows: &mut Vec<AnyElement>,
+        cx: &Context<Self>,
+    ) {
         match node {
-            Node::Container(c) => rows.push(self.container_row(c, 0, cx).into_any_element()),
+            Node::Container(c) => rows.push(self.container_row(store, c, 0, cx).into_any_element()),
             Node::Stack(stack) => {
                 let expanded = !self.collapsed.contains(stack.project);
-                rows.push(self.stack_row(stack, expanded, cx).into_any_element());
+                rows.push(
+                    self.stack_row(store, stack, expanded, cx)
+                        .into_any_element(),
+                );
                 if expanded {
                     for c in &stack.containers {
-                        rows.push(self.container_row(c, 1, cx).into_any_element());
+                        rows.push(self.container_row(store, c, 1, cx).into_any_element());
                     }
                 }
             }
         }
     }
 
-    fn stack_row(&self, stack: &Stack<'_>, expanded: bool, cx: &mut Context<Self>) -> ResourceRow {
+    fn stack_row(
+        &self,
+        store: &Store,
+        stack: &Stack<'_>,
+        expanded: bool,
+        cx: &Context<Self>,
+    ) -> ResourceRow {
         let project = stack.project.to_string();
-        let ids: Vec<String> = stack.containers.iter().map(|c| c.id.clone()).collect();
         let active = stack.is_active();
         let selected = self.selection == Some(Selection::Stack(project.clone()));
         let total = stack.containers.len();
+        let busy = stack
+            .containers
+            .iter()
+            .find_map(|c| store.pending(&c.id))
+            .map(Op::progress_label);
+        // Stop what runs; start everything otherwise.
+        let lifecycle_ids: Vec<String> = stack
+            .containers
+            .iter()
+            .filter(|c| !active || c.state.is_active())
+            .map(|c| c.id.clone())
+            .collect();
+        let all_ids: Vec<String> = stack.containers.iter().map(|c| c.id.clone()).collect();
+        let names: Vec<SharedString> = stack
+            .containers
+            .iter()
+            .map(|c| SharedString::from(c.name.clone()))
+            .collect();
 
         let toggle = {
             let project = project.clone();
@@ -197,11 +299,22 @@ impl ContainersScreen {
                 cx.notify();
             })
         };
-        let lifecycle = {
-            let ids = ids.clone();
-            cx.listener(move |this, _, _, cx| this.set_running(&ids, !active, cx))
+        let lifecycle = cx.listener(move |this, _, _, cx| {
+            let op = if active { Op::Stop } else { Op::Start };
+            this.run(lifecycle_ids.clone(), op, cx)
+        });
+        let delete = {
+            let project = project.clone();
+            cx.listener(move |this, _, _, cx| {
+                this.confirm_delete(
+                    format!("Delete stack {project}?"),
+                    "All of its containers are stopped and removed. Volumes are kept.",
+                    names.clone(),
+                    all_ids.clone(),
+                    cx,
+                )
+            })
         };
-        let delete = cx.listener(move |this, _, _, cx| this.remove(&ids, cx));
         let select = {
             let project = project.clone();
             cx.listener(move |this, _, _, cx| this.select(Selection::Stack(project.clone()), cx))
@@ -224,6 +337,7 @@ impl ContainersScreen {
             0 => format!("{total} services"),
             n => format!("{n} of {total} running"),
         })
+        .busy(busy)
         .disclosure(expanded, toggle)
         .selected(selected)
         .dimmed(!active)
@@ -232,7 +346,13 @@ impl ContainersScreen {
         .on_click(select)
     }
 
-    fn container_row(&self, c: &Container, depth: usize, cx: &mut Context<Self>) -> ResourceRow {
+    fn container_row(
+        &self,
+        store: &Store,
+        c: &Container,
+        depth: usize,
+        cx: &Context<Self>,
+    ) -> ResourceRow {
         let id = c.id.clone();
         let active = c.state.is_active();
         let selected = self.selection == Some(Selection::Container(id.clone()));
@@ -243,11 +363,28 @@ impl ContainersScreen {
 
         let lifecycle = {
             let ids = vec![id.clone()];
-            cx.listener(move |this, _, _, cx| this.set_running(&ids, !active, cx))
+            cx.listener(move |this, _, _, cx| {
+                let op = if active { Op::Stop } else { Op::Start };
+                this.run(ids.clone(), op, cx)
+            })
         };
         let delete = {
             let ids = vec![id.clone()];
-            cx.listener(move |this, _, _, cx| this.remove(&ids, cx))
+            let name = c.name.clone();
+            let message = if active {
+                "The container is stopped and removed. Its volumes are kept."
+            } else {
+                "The container is removed. Its volumes are kept."
+            };
+            cx.listener(move |this, _, _, cx| {
+                this.confirm_delete(
+                    format!("Delete {name}?"),
+                    message,
+                    Vec::new(),
+                    ids.clone(),
+                    cx,
+                )
+            })
         };
         let select = {
             let id = id.clone();
@@ -261,6 +398,7 @@ impl ContainersScreen {
                     .dimmed(!active),
             )
             .subtitle(c.image.clone())
+            .busy(store.pending(&id).map(Op::progress_label))
             .depth(depth)
             .reserve_disclosure()
             .selected(selected)
@@ -272,6 +410,15 @@ impl ContainersScreen {
                     .on_click(move |_, _, cx| cx.open_url(&url)),
             );
         }
+        if active {
+            let ids = vec![id.clone()];
+            row = row.action(
+                IconButton::new(SharedString::from(format!("restart-{id}")), icons::RESTART)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.run(ids.clone(), Op::Restart, cx)),
+                    ),
+            );
+        }
         row.action(lifecycle_button(&id, active).on_click(lifecycle))
             .action(delete_button(&id).on_click(delete))
             .on_click(select)
@@ -279,7 +426,12 @@ impl ContainersScreen {
 
     // ---- detail pane ----
 
-    fn render_detail(&self, tree: &ContainerTree<'_>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_detail(
+        &self,
+        store: &Store,
+        tree: &ContainerTree<'_>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = Theme::of(cx);
         let tabs = SegmentedTabs::new("detail-tabs", TABS)
             .selected(self.tab)
@@ -296,7 +448,7 @@ impl ContainersScreen {
             )
             .into_any_element(),
             (Some(Selection::Container(id)), 0) => {
-                match self.containers.iter().find(|c| &c.id == id) {
+                match store.containers().iter().find(|c| &c.id == id) {
                     Some(c) => scroll_page(container_info(c, theme)).into_any_element(),
                     None => {
                         empty_state("Gone", "This container was removed.", theme).into_any_element()
@@ -362,12 +514,10 @@ impl ContainersScreen {
 
 impl Render for ContainersScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let containers = std::mem::take(&mut self.containers);
-        let tree = ContainerTree::build(&containers);
-        let list = self.render_list(&tree, cx).into_any_element();
-        let detail = self.render_detail(&tree, cx).into_any_element();
-        drop(tree);
-        self.containers = containers;
+        let store = self.store.read(cx);
+        let tree = ContainerTree::build(store.containers());
+        let list = self.render_list(store, &tree, cx).into_any_element();
+        let detail = self.render_detail(store, &tree, cx).into_any_element();
         div().size_full().flex().child(list).child(detail)
     }
 }

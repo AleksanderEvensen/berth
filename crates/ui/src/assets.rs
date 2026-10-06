@@ -67,6 +67,8 @@ icon_assets![
     (LIST, "list"),
     (MORE, "more-horizontal"),
     (CLOSE, "close"),
+    (SPINNER, "spinner"),
+    (DANGER, "danger-circle"),
 ];
 
 const FONTS: &[&[u8]] = &[

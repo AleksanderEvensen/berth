@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use futures::channel::mpsc;
+use std::time::Duration;
+
+use futures::channel::{mpsc, oneshot};
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
 use futures::{FutureExt as _, StreamExt as _};
@@ -255,6 +257,7 @@ pub fn containers() -> Vec<Container> {
 /// store can be built and tested without Docker.
 pub struct FixtureEngine {
     state: Arc<Mutex<FixtureState>>,
+    latency: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -289,6 +292,36 @@ impl FixtureEngine {
                 containers,
                 subscribers: Vec::new(),
             })),
+            latency: None,
+        }
+    }
+
+    /// Delay every mutation (and its event) — makes pending UI states visible.
+    pub fn with_latency(mut self, latency: Duration) -> Self {
+        self.latency = Some(latency);
+        self
+    }
+
+    /// Apply `f` to the state, after the configured latency if any.
+    fn mutate<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut FixtureState) -> EngineResult<T> + Send + 'static,
+    ) -> BoxFuture<'static, EngineResult<T>> {
+        let state = self.state.clone();
+        let apply = move || f(&mut state.lock().unwrap_or_else(|e| e.into_inner()));
+        match self.latency {
+            None => future::ready(apply()).boxed(),
+            Some(latency) => {
+                let (tx, rx) = oneshot::channel();
+                std::thread::spawn(move || {
+                    std::thread::sleep(latency);
+                    let _ = tx.send(apply());
+                });
+                rx.map(|r| {
+                    r.unwrap_or_else(|_| Err(EngineError::Transport("fixture worker gone".into())))
+                })
+                .boxed()
+            }
         }
     }
 
@@ -336,7 +369,8 @@ impl Engine for FixtureEngine {
         id: &str,
         action: ContainerAction,
     ) -> BoxFuture<'static, EngineResult<()>> {
-        let result = self.with_state(|s| {
+        let id = id.to_string();
+        self.mutate(move |s| {
             let c = s
                 .containers
                 .iter_mut()
@@ -376,8 +410,7 @@ impl Engine for FixtureEngine {
             let id = c.id.clone();
             s.emit(&id, event);
             Ok(())
-        });
-        future::ready(result).boxed()
+        })
     }
 
     fn remove_container(
@@ -385,7 +418,8 @@ impl Engine for FixtureEngine {
         id: &str,
         options: RemoveOptions,
     ) -> BoxFuture<'static, EngineResult<()>> {
-        let result = self.with_state(|s| {
+        let id = id.to_string();
+        self.mutate(move |s| {
             let ix = s
                 .containers
                 .iter()
@@ -400,8 +434,7 @@ impl Engine for FixtureEngine {
             let removed = s.containers.remove(ix);
             s.emit(&removed.id, EventAction::Destroy);
             Ok(())
-        });
-        future::ready(result).boxed()
+        })
     }
 
     fn events(&self) -> BoxStream<'static, EngineResult<EngineEvent>> {
@@ -414,7 +447,6 @@ impl Engine for FixtureEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt as _;
     use futures::executor::block_on;
 
     #[test]

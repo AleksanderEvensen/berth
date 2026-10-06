@@ -61,6 +61,10 @@ pub struct Theme {
     pub warning: Hsla,
     pub danger: Hsla,
     pub danger_wash: Hsla,
+    /// Solid destructive plate carrying white text.
+    pub danger_strong: Hsla,
+    /// Dims the window behind a modal.
+    pub scrim: Hsla,
 
     pub font_sans: SharedString,
     pub font_mono: SharedString,
@@ -124,6 +128,8 @@ impl Theme {
             warning: oklch(0.828, 0.189, 84.429),
             danger: oklch(0.704, 0.191, 22.216),
             danger_wash: oklch(0.704, 0.191, 22.216).opacity(0.14),
+            danger_strong: oklch(0.58, 0.16, 25.0),
+            scrim: hsla(0.0, 0.0, 0.0, 0.60),
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
         }
@@ -158,6 +164,8 @@ impl Theme {
             warning: oklch(0.666, 0.179, 58.318),
             danger: oklch(0.577, 0.245, 27.325),
             danger_wash: oklch(0.577, 0.245, 27.325).opacity(0.10),
+            danger_strong: oklch(0.577, 0.245, 27.325),
+            scrim: hsla(0.0, 0.0, 0.0, 0.28),
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
         }

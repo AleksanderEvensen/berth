@@ -3,12 +3,14 @@
 
 mod button;
 mod card;
+mod feedback;
 mod list;
 mod sidebar;
 mod tabs;
 
 pub use button::*;
 pub use card::*;
+pub use feedback::*;
 pub use list::*;
 pub use sidebar::*;
 pub use tabs::*;

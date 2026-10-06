@@ -3,7 +3,7 @@ use gpui::{
     SharedString, Window, div, prelude::*, px,
 };
 
-use super::{ClickHandler, icon};
+use super::{ClickHandler, Spinner, icon};
 use crate::{Theme, icons};
 
 /// Title + subtitle header of a list column ("Containers · 3 running"), with
@@ -280,6 +280,7 @@ pub struct ResourceRow {
     disclosure: Option<(bool, ClickHandler)>,
     reserve_disclosure: bool,
     actions: Vec<AnyElement>,
+    busy: Option<SharedString>,
     on_click: Option<ClickHandler>,
 }
 
@@ -297,6 +298,7 @@ impl ResourceRow {
             disclosure: None,
             reserve_disclosure: false,
             actions: Vec::new(),
+            busy: None,
             on_click: None,
         }
     }
@@ -353,6 +355,13 @@ impl ResourceRow {
         self
     }
 
+    /// An operation is in flight: the subtitle shows `label` ("Stopping…")
+    /// and a spinner replaces the actions.
+    pub fn busy(mut self, label: Option<impl Into<SharedString>>) -> Self {
+        self.busy = label.map(Into::into);
+        self
+    }
+
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Box::new(f));
         self
@@ -362,6 +371,7 @@ impl ResourceRow {
 impl RenderOnce for ResourceRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::of(cx);
+        let busy = self.busy.is_some();
         let group: SharedString = "resource-row".into();
         let (title_color, subtitle_color) = if self.dimmed {
             (theme.text_muted, theme.text_faint)
@@ -439,11 +449,15 @@ impl RenderOnce for ResourceRow {
                             .truncate()
                             .child(self.title),
                     )
-                    .when_some(self.subtitle, |d, s| {
+                    .when_some(self.busy.clone().or(self.subtitle), |d, s| {
                         d.child(
                             div()
                                 .text_size(px(Theme::TEXT_XS + 0.5))
-                                .text_color(subtitle_color)
+                                .text_color(if busy {
+                                    theme.text_muted
+                                } else {
+                                    subtitle_color
+                                })
                                 .truncate()
                                 .child(s),
                         )
@@ -458,7 +472,18 @@ impl RenderOnce for ResourceRow {
                         .child(meta),
                 )
             })
-            .when(!self.actions.is_empty(), |d| {
+            .when(busy, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .size(px(26.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Spinner::new("busy")),
+                )
+            })
+            .when(!busy && !self.actions.is_empty(), |d| {
                 d.child(
                     div()
                         .flex_none()

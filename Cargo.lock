@@ -583,9 +583,11 @@ dependencies = [
  "berth-docker",
  "berth-ui",
  "env_logger",
+ "futures",
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
+ "log",
 ]
 
 [[package]]
