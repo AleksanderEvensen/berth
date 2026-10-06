@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/berth"
+    # Add crates here in the future like ui crate for components etc
+    # and some for services and wrapping docker
+    # "crates/<>"
+]
