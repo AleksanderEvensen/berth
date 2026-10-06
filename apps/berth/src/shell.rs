@@ -1,10 +1,8 @@
 //! The window root: sidebar + active screen + chrome, plus shell-owned
 //! overlays (confirm dialog, toasts).
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use berth_docker::Engine;
 use berth_ui::{
     Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, Sidebar, SidebarItem, SidebarSection,
     Status, Theme, Toast, ToastKind, icons, item_list, modal_overlay, sidebar_glyph, status_dot,
@@ -15,7 +13,7 @@ use gpui::{
 };
 
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
-use crate::store::{Connection, Store, StoreEvent};
+use crate::store::{Connection, Connector, Store, StoreEvent};
 use crate::{chrome, screens::containers::ContainersScreen};
 
 actions!(berth, [ToggleSidebar, FocusSearch, Quit]);
@@ -44,11 +42,11 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(engine: Arc<dyn Engine>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(connector: Connector, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
 
-        let store = cx.new(|cx| Store::new(engine, cx));
+        let store = cx.new(|cx| Store::new(connector, cx));
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&store, |this, _, event: &StoreEvent, cx| match event {
             StoreEvent::Error { title, detail } => {

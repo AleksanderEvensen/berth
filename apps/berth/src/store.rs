@@ -62,12 +62,18 @@ impl Op {
     }
 }
 
+/// Produces a connected engine. Runs on a background thread at the start of
+/// every session, so a reconnect also re-runs endpoint discovery.
+pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn Engine>, String> + Send + Sync>;
+
 pub enum StoreEvent {
     Error { title: String, detail: String },
 }
 
 pub struct Store {
-    engine: Arc<dyn Engine>,
+    connector: Connector,
+    /// The engine of the current session; `None` while disconnected.
+    engine: Option<Arc<dyn Engine>>,
     connection: Connection,
     containers: Vec<Container>,
     pending: HashMap<String, Op>,
@@ -77,10 +83,11 @@ pub struct Store {
 impl EventEmitter<StoreEvent> for Store {}
 
 impl Store {
-    pub fn new(engine: Arc<dyn Engine>, cx: &mut Context<Self>) -> Self {
-        let session = Self::spawn_session(engine.clone(), cx);
+    pub fn new(connector: Connector, cx: &mut Context<Self>) -> Self {
+        let session = Self::spawn_session(connector.clone(), cx);
         Self {
-            engine,
+            connector,
+            engine: None,
             connection: Connection::Connecting,
             containers: Vec::new(),
             pending: HashMap::new(),
@@ -110,28 +117,35 @@ impl Store {
     /// Drop the current session and connect again immediately.
     pub fn reconnect(&mut self, cx: &mut Context<Self>) {
         self.connection = Connection::Connecting;
-        self._session = Self::spawn_session(self.engine.clone(), cx);
+        self._session = Self::spawn_session(self.connector.clone(), cx);
         cx.notify();
     }
 
     /// Run `op` on each container. Already-pending containers are skipped.
     pub fn run(&mut self, ids: Vec<String>, op: Op, cx: &mut Context<Self>) {
+        let Some(engine) = self.engine.clone() else {
+            cx.emit(StoreEvent::Error {
+                title: format!("Couldn't {}", op.verb()),
+                detail: "Not connected to a container engine.".into(),
+            });
+            return;
+        };
         for id in ids {
             if self.pending.contains_key(&id) {
                 continue;
             }
             self.pending.insert(id.clone(), op);
             let call = match op {
-                Op::Start => self.engine.container_action(&id, ContainerAction::Start),
-                Op::Stop => self
-                    .engine
-                    .container_action(&id, ContainerAction::Stop { timeout_secs: None }),
-                Op::Restart => self
-                    .engine
-                    .container_action(&id, ContainerAction::Restart { timeout_secs: None }),
+                Op::Start => engine.container_action(&id, ContainerAction::Start),
+                Op::Stop => {
+                    engine.container_action(&id, ContainerAction::Stop { timeout_secs: None })
+                }
+                Op::Restart => {
+                    engine.container_action(&id, ContainerAction::Restart { timeout_secs: None })
+                }
                 // The UI confirms before removing, and says running
                 // containers will be stopped — hence `force`.
-                Op::Remove => self.engine.remove_container(
+                Op::Remove => engine.remove_container(
                     &id,
                     RemoveOptions {
                         force: true,
@@ -139,7 +153,7 @@ impl Store {
                     },
                 ),
             };
-            let engine = self.engine.clone();
+            let engine = engine.clone();
             cx.spawn(async move |this, cx| {
                 let result = call.await;
                 let refreshed = match (&result, op) {
@@ -200,15 +214,33 @@ impl Store {
         }
     }
 
-    fn spawn_session(engine: Arc<dyn Engine>, cx: &mut Context<Self>) -> Task<()> {
+    fn spawn_session(connector: Connector, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
             let mut backoff = Duration::from_secs(1);
             loop {
-                match run_session(&engine, &this, cx).await {
+                let connect = connector.clone();
+                let connected = cx
+                    .background_executor()
+                    .spawn(async move { connect() })
+                    .await;
+                let end = match connected {
+                    Err(error) => SessionEnd::Failed(error),
+                    Ok(engine) => {
+                        let installed = this.update(cx, |store, _| {
+                            store.engine = Some(engine.clone());
+                        });
+                        if installed.is_err() {
+                            return;
+                        }
+                        run_session(&engine, &this, cx).await
+                    }
+                };
+                match end {
                     SessionEnd::Dropped => return,
                     SessionEnd::Failed(error) => {
                         let alive = this
                             .update(cx, |store, cx| {
+                                store.engine = None;
                                 store.connection = Connection::Disconnected { error };
                                 cx.notify();
                             })
