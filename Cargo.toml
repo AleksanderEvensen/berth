@@ -37,6 +37,13 @@ sha2 = "0.10"
 tempfile = "3"
 env_logger = "0.11"
 log = "0.4"
+bollard = { version = "0.21.1", features = ["ssl", "chrono"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 
 [profile.dev]
 opt-level = 0
