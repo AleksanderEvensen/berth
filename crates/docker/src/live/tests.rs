@@ -68,32 +68,7 @@ impl TestServer {
                 let request = String::from_utf8_lossy(&request);
                 let line = request.lines().next().unwrap_or_default().to_owned();
                 captured.lock().unwrap().push(line.clone());
-                let (status, body) = if line.contains("/version ") {
-                    (
-                        "200 OK",
-                        r#"{"Version":"test","ApiVersion":"1.53","Platform":{"Name":"Docker Engine"}}"#,
-                    )
-                } else if line.contains("/_ping ") {
-                    ("200 OK", "OK")
-                } else if line.contains("/info ") {
-                    ("200 OK", r#"{"SecurityOptions":["name=rootless"]}"#)
-                } else if line.contains("/containers/json?") {
-                    ("200 OK", "[]")
-                } else if line.contains("/containers/test/json ") {
-                    (
-                        "200 OK",
-                        r#"{"Id":"test","Name":"/test","Config":{"Env":["A=B"]},"State":{"Status":"created"}}"#,
-                    )
-                } else if line.contains("/events?") {
-                    (
-                        "200 OK",
-                        "{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"test\"},\"timeNano\":123}\n",
-                    )
-                } else if line.contains("/start ") {
-                    ("304 Not Modified", "")
-                } else {
-                    ("204 No Content", "")
-                };
+                let (status, body) = response_for(&line);
                 let response = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -109,6 +84,70 @@ impl TestServer {
         }
     }
 }
+fn response_for(line: &str) -> (&'static str, &'static str) {
+    if line.contains("/version ") {
+        (
+            "200 OK",
+            r#"{"Version":"test","ApiVersion":"1.53","Platform":{"Name":"Docker Engine"}}"#,
+        )
+    } else if line.contains("/_ping ") {
+        ("200 OK", "OK")
+    } else if line.contains("/info ") {
+        ("200 OK", r#"{"SecurityOptions":["name=rootless"]}"#)
+    } else if line.contains("/containers/json?") {
+        ("200 OK", "[]")
+    } else if line.contains("/containers/test/json ") {
+        (
+            "200 OK",
+            r#"{"Id":"test","Name":"/test","Config":{"Env":["A=B"]},"State":{"Status":"created"}}"#,
+        )
+    } else if line.contains("/images/json?") {
+        ("200 OK", "[]")
+    } else if line.contains("/volumes ") {
+        ("200 OK", r#"{"Volumes":[]}"#)
+    } else if line.contains("/system/df ") {
+        ("200 OK", r#"{"Images":[],"Volumes":[],"BuildCache":[]}"#)
+    } else if line.contains("/images/in-use?") || line.contains("/volumes/in-use?") {
+        (
+            "409 Conflict",
+            r#"{"message":"resource is referenced by a stopped container"}"#,
+        )
+    } else if line.contains("/images/prune?") {
+        (
+            "200 OK",
+            r#"{"ImagesDeleted":[{"Deleted":"sha256:test"}],"SpaceReclaimed":123}"#,
+        )
+    } else if line.contains("/volumes/prune?") {
+        (
+            "200 OK",
+            r#"{"VolumesDeleted":["test-volume"],"SpaceReclaimed":456}"#,
+        )
+    } else if line.contains("/containers/prune") {
+        (
+            "200 OK",
+            r#"{"ContainersDeleted":["test-container"],"SpaceReclaimed":789}"#,
+        )
+    } else if line.contains("/networks/prune") {
+        ("200 OK", r#"{"NetworksDeleted":["test-network"]}"#)
+    } else if line.contains("/build/prune?") {
+        (
+            "200 OK",
+            r#"{"CachesDeleted":["test-cache"],"SpaceReclaimed":987}"#,
+        )
+    } else if line.contains("/images/test?") {
+        ("200 OK", "[]")
+    } else if line.contains("/events?") {
+        (
+            "200 OK",
+            "{\"Type\":\"container\",\"Action\":\"start\",\"Actor\":{\"ID\":\"test\"},\"timeNano\":123}\n",
+        )
+    } else if line.contains("/start ") {
+        ("304 Not Modified", "")
+    } else {
+        ("204 No Content", "")
+    }
+}
+
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Relaxed);
@@ -463,4 +502,79 @@ fn tls_authenticates_client_and_honors_server_verification_in_tls12_and_tls13() 
             .expect("verify=false permits a mismatched server name");
         assert_eq!(block_on(engine.info()).unwrap().version, "test");
     }
+}
+
+#[test]
+fn storage_methods_bridge_runtime_and_send_the_required_filters() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let server = TestServer::new();
+    let engine = BollardEngine::connect(&server.endpoint).unwrap();
+    let engine: &dyn Engine = &engine;
+    assert_eq!(block_on(engine.list_images()).unwrap(), Vec::<Image>::new());
+    assert_eq!(
+        block_on(engine.list_volumes()).unwrap(),
+        Vec::<Volume>::new()
+    );
+    assert_eq!(
+        block_on(engine.disk_usage()).unwrap().volumes,
+        Vec::<Volume>::new()
+    );
+    for force in [false, true] {
+        block_on(engine.remove_image("test", force)).unwrap();
+        block_on(engine.remove_volume("test", force)).unwrap();
+    }
+    let expected = EngineError::Conflict("resource is referenced by a stopped container".into());
+    assert_eq!(
+        block_on(engine.remove_image("in-use", false)),
+        Err(expected.clone())
+    );
+    assert_eq!(
+        block_on(engine.remove_volume("in-use", false)),
+        Err(expected)
+    );
+    assert_eq!(
+        block_on(engine.prune_containers()).unwrap().reclaimed_bytes,
+        789
+    );
+    for mode in [ImagePrune::Dangling, ImagePrune::AllUnused] {
+        assert_eq!(
+            block_on(engine.prune_images(mode)).unwrap().deleted,
+            ["sha256:test"]
+        );
+    }
+    assert_eq!(
+        block_on(engine.prune_volumes()).unwrap().reclaimed_bytes,
+        456
+    );
+    assert_eq!(
+        block_on(engine.prune_networks()).unwrap().deleted,
+        ["test-network"]
+    );
+    assert_eq!(
+        block_on(engine.prune_build_cache())
+            .unwrap()
+            .reclaimed_bytes,
+        987
+    );
+    let requests = server.requests.lock().unwrap();
+    for expected in [
+        "/images/json?all=true",
+        "/volumes HTTP",
+        "/system/df HTTP",
+        "/images/test?force=false",
+        "/images/test?force=true",
+        "/volumes/test?force=false",
+        "/volumes/test?force=true",
+        // The JSON filter values are URL-encoded on the wire.
+        "/images/prune?filters=%7B%22dangling%22%3A%5B%22true%22%5D%7D",
+        "/images/prune?filters=%7B%22dangling%22%3A%5B%22false%22%5D%7D",
+        "/volumes/prune?filters=%7B%22all%22%3A%5B%22true%22%5D%7D",
+        "/build/prune?all=true",
+    ] {
+        assert!(
+            requests.iter().any(|s| s.contains(expected)),
+            "missing {expected}: {requests:?}"
+        );
+    }
+    drop(requests);
 }

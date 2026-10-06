@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
-use crate::Container;
+use crate::{Container, DiskUsage, Image, ImagePrune, PruneReport, Volume};
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
@@ -187,6 +187,26 @@ pub trait Engine: Send + Sync + 'static {
         id: &str,
         options: RemoveOptions,
     ) -> BoxFuture<'static, EngineResult<()>>;
+
+    /// Fast image list; container counts are included when the API reports them.
+    fn list_images(&self) -> BoxFuture<'static, EngineResult<Vec<Image>>>;
+
+    /// Fast volume list, without size or reference counts.
+    fn list_volumes(&self) -> BoxFuture<'static, EngineResult<Vec<Volume>>>;
+
+    /// Potentially slow `/system/df` request with sizes and reference counts.
+    fn disk_usage(&self) -> BoxFuture<'static, EngineResult<DiskUsage>>;
+
+    fn remove_image(&self, id: &str, force: bool) -> BoxFuture<'static, EngineResult<()>>;
+    fn remove_volume(&self, name: &str, force: bool) -> BoxFuture<'static, EngineResult<()>>;
+
+    /// Remove stopped containers.
+    fn prune_containers(&self) -> BoxFuture<'static, EngineResult<PruneReport>>;
+    fn prune_images(&self, mode: ImagePrune) -> BoxFuture<'static, EngineResult<PruneReport>>;
+    /// Remove unused volumes, including named volumes.
+    fn prune_volumes(&self) -> BoxFuture<'static, EngineResult<PruneReport>>;
+    fn prune_networks(&self) -> BoxFuture<'static, EngineResult<PruneReport>>;
+    fn prune_build_cache(&self) -> BoxFuture<'static, EngineResult<PruneReport>>;
 
     /// Live change notifications. The stream ends on disconnect; the caller
     /// resyncs and resubscribes.

@@ -23,8 +23,8 @@ use tokio::runtime::{Handle, Runtime};
 use tokio::task::AbortHandle;
 
 use crate::{
-    ConnectError, Container, ContainerAction, Endpoint, Engine, EngineError, EngineEvent,
-    EngineInfo, EngineResult, RemoveOptions,
+    ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
+    EngineEvent, EngineInfo, EngineResult, Image, ImagePrune, PruneReport, RemoveOptions, Volume,
 };
 
 /// A live engine whose Tokio work never depends on the caller's executor.
@@ -225,7 +225,7 @@ impl Engine for BollardEngine {
         let id = id.to_owned();
         self.spawn(async move {
             let value = docker
-                .inspect_container(&id, None)
+                .inspect_container(&id, None::<query::InspectContainerOptions>)
                 .await
                 .map_err(mapping::error)?;
             Ok(mapping::inspect(value, chrono::Utc::now()))
@@ -241,7 +241,11 @@ impl Engine for BollardEngine {
         let id = id.to_owned();
         self.spawn(async move {
             let result = match action {
-                ContainerAction::Start => docker.start_container(&id, None).await,
+                ContainerAction::Start => {
+                    docker
+                        .start_container(&id, None::<query::StartContainerOptions>)
+                        .await
+                }
                 ContainerAction::Stop { timeout_secs } => {
                     docker
                         .stop_container(
@@ -264,7 +268,11 @@ impl Engine for BollardEngine {
                         )
                         .await
                 }
-                ContainerAction::Kill => docker.kill_container(&id, None).await,
+                ContainerAction::Kill => {
+                    docker
+                        .kill_container(&id, None::<query::KillContainerOptions>)
+                        .await
+                }
                 ContainerAction::Pause => docker.pause_container(&id).await,
                 ContainerAction::Unpause => docker.unpause_container(&id).await,
             };
@@ -290,6 +298,140 @@ impl Engine for BollardEngine {
                     }),
                 )
                 .await
+                .map_err(mapping::error)
+        })
+    }
+
+    fn list_images(&self) -> BoxFuture<'static, EngineResult<Vec<Image>>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            let values = docker
+                .list_images(Some(query::ListImagesOptions {
+                    all: true,
+                    ..Default::default()
+                }))
+                .await
+                .map_err(mapping::error)?;
+            Ok(values.into_iter().map(mapping::image).collect())
+        })
+    }
+
+    fn list_volumes(&self) -> BoxFuture<'static, EngineResult<Vec<Volume>>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            let values = docker
+                .list_volumes(None::<query::ListVolumesOptions>)
+                .await
+                .map_err(mapping::error)?;
+            Ok(values
+                .volumes
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| {
+                    let mut volume = mapping::volume(value);
+                    volume.size = None;
+                    volume.ref_count = None;
+                    volume
+                })
+                .collect())
+        })
+    }
+
+    fn disk_usage(&self) -> BoxFuture<'static, EngineResult<DiskUsage>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            let value = docker
+                .df(None::<query::DataUsageOptions>)
+                .await
+                .map_err(mapping::error)?;
+            Ok(mapping::disk_usage(value))
+        })
+    }
+
+    fn remove_image(&self, id: &str, force: bool) -> BoxFuture<'static, EngineResult<()>> {
+        let docker = self.docker.clone();
+        let id = id.to_owned();
+        self.spawn(async move {
+            docker
+                .remove_image(
+                    &id,
+                    Some(query::RemoveImageOptions {
+                        force,
+                        ..Default::default()
+                    }),
+                    None,
+                )
+                .await
+                .map(|_| ())
+                .map_err(mapping::error)
+        })
+    }
+
+    fn remove_volume(&self, name: &str, force: bool) -> BoxFuture<'static, EngineResult<()>> {
+        let docker = self.docker.clone();
+        let name = name.to_owned();
+        self.spawn(async move {
+            docker
+                .remove_volume(&name, Some(query::RemoveVolumeOptions { force }))
+                .await
+                .map_err(mapping::error)
+        })
+    }
+
+    fn prune_containers(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            docker
+                .prune_containers(None::<query::PruneContainersOptions>)
+                .await
+                .map(mapping::pruned_containers)
+                .map_err(mapping::error)
+        })
+    }
+
+    fn prune_images(&self, mode: ImagePrune) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            docker
+                .prune_images(Some(image_prune_options(mode)))
+                .await
+                .map(mapping::pruned_images)
+                .map_err(mapping::error)
+        })
+    }
+
+    fn prune_volumes(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            docker
+                .prune_volumes(Some(volume_prune_options()))
+                .await
+                .map(mapping::pruned_volumes)
+                .map_err(mapping::error)
+        })
+    }
+
+    fn prune_networks(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            docker
+                .prune_networks(None::<query::PruneNetworksOptions>)
+                .await
+                .map(mapping::pruned_networks)
+                .map_err(mapping::error)
+        })
+    }
+
+    fn prune_build_cache(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            docker
+                .prune_build(Some(query::PruneBuildOptions {
+                    all: Some(true),
+                    ..Default::default()
+                }))
+                .await
+                .map(mapping::pruned_build_cache)
                 .map_err(mapping::error)
         })
     }
@@ -329,6 +471,25 @@ impl Engine for BollardEngine {
             _task: AbortOnDrop(task.abort_handle()),
         }
         .boxed()
+    }
+}
+
+fn image_prune_options(mode: ImagePrune) -> query::PruneImagesOptions {
+    query::PruneImagesOptions {
+        filters: Some(std::collections::HashMap::from([(
+            "dangling".into(),
+            vec![(mode == ImagePrune::Dangling).to_string()],
+        )])),
+    }
+}
+
+fn volume_prune_options() -> query::PruneVolumesOptions {
+    query::PruneVolumesOptions {
+        // Since Docker 23, the default only prunes anonymous volumes.
+        filters: Some(std::collections::HashMap::from([(
+            "all".into(),
+            vec!["true".into()],
+        )])),
     }
 }
 

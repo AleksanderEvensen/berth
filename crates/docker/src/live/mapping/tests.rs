@@ -21,40 +21,40 @@ fn compose_labels() -> HashMap<String, String> {
         ("a".into(), "first".into()),
     ])
 }
-fn publications() -> Vec<api::PortSummary> {
+fn publications() -> Vec<api::Port> {
     vec![
-        api::PortSummary {
+        api::Port {
             ip: Some("::".into()),
             private_port: 80,
             public_port: Some(8080),
-            typ: Some(api::PortSummaryTypeEnum::TCP),
+            typ: Some(api::PortTypeEnum::TCP),
         },
-        api::PortSummary {
+        api::Port {
             ip: Some("0.0.0.0".into()),
             private_port: 80,
             public_port: Some(8080),
-            typ: Some(api::PortSummaryTypeEnum::TCP),
+            typ: Some(api::PortTypeEnum::TCP),
         },
-        api::PortSummary {
+        api::Port {
             ip: Some("127.0.0.1".into()),
             private_port: 80,
             public_port: Some(8080),
-            typ: Some(api::PortSummaryTypeEnum::TCP),
+            typ: Some(api::PortTypeEnum::TCP),
         },
-        api::PortSummary {
+        api::Port {
             ip: Some("::1".into()),
             private_port: 80,
             public_port: Some(8080),
-            typ: Some(api::PortSummaryTypeEnum::TCP),
+            typ: Some(api::PortTypeEnum::TCP),
         },
-        api::PortSummary {
+        api::Port {
             private_port: 53,
-            typ: Some(api::PortSummaryTypeEnum::UDP),
+            typ: Some(api::PortTypeEnum::UDP),
             ..Default::default()
         },
-        api::PortSummary {
+        api::Port {
             private_port: 9000,
-            typ: Some(api::PortSummaryTypeEnum::SCTP),
+            typ: Some(api::PortTypeEnum::SCTP),
             ..Default::default()
         },
     ]
@@ -62,7 +62,7 @@ fn publications() -> Vec<api::PortSummary> {
 fn mount_values() -> Vec<api::MountPoint> {
     vec![
         api::MountPoint {
-            typ: Some("volume".into()),
+            typ: Some(api::MountPointTypeEnum::VOLUME),
             name: Some("data".into()),
             source: Some("/var/lib/docker/volumes/data/_data".into()),
             destination: Some("/data".into()),
@@ -70,20 +70,20 @@ fn mount_values() -> Vec<api::MountPoint> {
             ..Default::default()
         },
         api::MountPoint {
-            typ: Some("bind".into()),
+            typ: Some(api::MountPointTypeEnum::BIND),
             source: Some("/host".into()),
             destination: Some("/app".into()),
             rw: Some(false),
             ..Default::default()
         },
         api::MountPoint {
-            typ: Some("tmpfs".into()),
+            typ: Some(api::MountPointTypeEnum::TMPFS),
             destination: Some("/tmp".into()),
             rw: Some(true),
             ..Default::default()
         },
         api::MountPoint {
-            typ: Some("npipe".into()),
+            typ: Some(api::MountPointTypeEnum::NPIPE),
             ..Default::default()
         },
     ]
@@ -589,4 +589,220 @@ fn errors_preserve_engine_messages_and_classify_transport() {
         error(bollard::errors::Error::RequestTimeoutError),
         EngineError::Transport(_)
     ));
+}
+
+#[test]
+fn images_normalize_tags_unknown_counts_and_sorted_labels() {
+    let mapped = image(api::ImageSummary {
+        id: "sha256:0123456789abcdef".into(),
+        repo_tags: vec!["<none>:<none>".into(), "postgres:17-alpine".into()],
+        size: 275_000_000,
+        created: 1_790_000_000,
+        containers: 2,
+        labels: HashMap::from([("z".into(), "last".into()), ("a".into(), "first".into())]),
+        ..Default::default()
+    });
+    assert_eq!(mapped.id, "sha256:0123456789abcdef");
+    assert_eq!(mapped.repo_tags, ["postgres:17-alpine"]);
+    assert_eq!(mapped.size, 275_000_000);
+    assert_eq!(mapped.created, 1_790_000_000);
+    assert_eq!(mapped.containers, Some(2));
+    assert_eq!(
+        mapped.labels,
+        [("a".into(), "first".into()), ("z".into(), "last".into())]
+    );
+    let unknown = image(api::ImageSummary {
+        repo_tags: vec!["<none>:<none>".into()],
+        containers: -1,
+        size: -1,
+        ..Default::default()
+    });
+    assert!(unknown.is_dangling());
+    assert_eq!(unknown.containers, None);
+    assert_eq!(unknown.size, 0);
+    assert!(image(api::ImageSummary::default()).is_dangling());
+    assert_eq!(
+        image(api::ImageSummary {
+            containers: i64::MAX,
+            ..Default::default()
+        })
+        .containers,
+        None
+    );
+}
+
+#[test]
+fn volumes_preserve_metadata_and_unknown_usage() {
+    let mapped = volume(api::Volume {
+        name: "berth_pgdata".into(),
+        driver: "local".into(),
+        mountpoint: "/var/lib/docker/volumes/berth_pgdata/_data".into(),
+        created_at: Some("2026-10-06T12:00:00+02:00".parse().unwrap()),
+        labels: compose_labels(),
+        usage_data: Some(api::VolumeUsageData {
+            size: 350_000_000,
+            ref_count: 2,
+        }),
+        ..Default::default()
+    });
+    assert_eq!(mapped.name, "berth_pgdata");
+    assert_eq!(mapped.driver, "local");
+    assert_eq!(
+        mapped.mountpoint,
+        "/var/lib/docker/volumes/berth_pgdata/_data"
+    );
+    assert_eq!(mapped.created.as_deref(), Some("2026-10-06T10:00:00+00:00"));
+    assert_eq!(mapped.compose_project(), Some("berth"));
+    assert!(
+        mapped
+            .labels
+            .windows(2)
+            .all(|pair| pair.first().unwrap().0 <= pair.get(1).unwrap().0)
+    );
+    assert_eq!(
+        (mapped.size, mapped.ref_count),
+        (Some(350_000_000), Some(2))
+    );
+    for usage in [
+        None,
+        Some(api::VolumeUsageData {
+            size: -1,
+            ref_count: -1,
+        }),
+    ] {
+        let mapped = volume(api::Volume {
+            usage_data: usage,
+            ..Default::default()
+        });
+        assert_eq!((mapped.size, mapped.ref_count), (None, None));
+    }
+    let zero = volume(api::Volume {
+        usage_data: Some(api::VolumeUsageData {
+            size: 0,
+            ref_count: 0,
+        }),
+        ..Default::default()
+    });
+    assert_eq!((zero.size, zero.ref_count), (Some(0), Some(0)));
+}
+
+#[test]
+fn disk_usage_maps_items_and_excludes_busy_or_shared_cache_from_reclaimable() {
+    let cache = |size, in_use, shared| api::BuildCache {
+        size: Some(size),
+        in_use: Some(in_use),
+        shared: Some(shared),
+        ..Default::default()
+    };
+    let mapped = disk_usage(api::SystemDataUsageResponse {
+        images: Some(vec![api::ImageSummary {
+            containers: 3,
+            size: 100,
+            ..Default::default()
+        }]),
+        volumes: Some(vec![api::Volume {
+            usage_data: Some(api::VolumeUsageData {
+                size: 200,
+                ref_count: 1,
+            }),
+            ..Default::default()
+        }]),
+        build_cache: Some(vec![
+            cache(100, false, false),
+            cache(200, true, false),
+            cache(300, false, true),
+            cache(-1, false, false),
+        ]),
+        ..Default::default()
+    });
+    assert_eq!(mapped.images.first().unwrap().containers, Some(3));
+    assert_eq!(mapped.volumes.first().unwrap().size, Some(200));
+    assert_eq!(mapped.volumes.first().unwrap().ref_count, Some(1));
+    assert_eq!(mapped.build_cache_bytes, 600);
+    assert_eq!(mapped.build_cache_reclaimable_bytes, 100);
+    let empty = disk_usage(api::SystemDataUsageResponse::default());
+    assert!(empty.images.is_empty() && empty.volumes.is_empty());
+    assert_eq!(
+        (empty.build_cache_bytes, empty.build_cache_reclaimable_bytes),
+        (0, 0)
+    );
+    let saturated = disk_usage(api::SystemDataUsageResponse {
+        build_cache: Some(vec![cache(i64::MAX, false, false); 3]),
+        ..Default::default()
+    });
+    assert_eq!(saturated.build_cache_bytes, u64::MAX);
+    assert_eq!(saturated.build_cache_reclaimable_bytes, u64::MAX);
+}
+
+#[test]
+fn prune_responses_preserve_ids_bytes_and_image_untagged_fallback() {
+    assert_eq!(
+        pruned_images(api::ImagePruneResponse {
+            images_deleted: Some(vec![
+                api::ImageDeleteResponseItem {
+                    deleted: Some("sha256:a".into()),
+                    untagged: Some("unused:tag".into())
+                },
+                api::ImageDeleteResponseItem {
+                    deleted: None,
+                    untagged: Some("fallback:tag".into())
+                },
+                api::ImageDeleteResponseItem::default(),
+            ]),
+            space_reclaimed: Some(42),
+        }),
+        PruneReport {
+            deleted: vec!["sha256:a".into(), "fallback:tag".into()],
+            reclaimed_bytes: 42
+        }
+    );
+    for report in [
+        pruned_containers(api::ContainerPruneResponse {
+            containers_deleted: Some(vec!["id".into()]),
+            space_reclaimed: Some(7),
+        }),
+        pruned_volumes(api::VolumePruneResponse {
+            volumes_deleted: Some(vec!["id".into()]),
+            space_reclaimed: Some(7),
+        }),
+        pruned_build_cache(api::BuildPruneResponse {
+            caches_deleted: Some(vec!["id".into()]),
+            space_reclaimed: Some(7),
+        }),
+    ] {
+        assert_eq!(
+            report,
+            PruneReport {
+                deleted: vec!["id".into()],
+                reclaimed_bytes: 7
+            }
+        );
+    }
+    assert_eq!(
+        pruned_networks(api::NetworkPruneResponse {
+            networks_deleted: Some(vec!["network".into()])
+        }),
+        PruneReport {
+            deleted: vec!["network".into()],
+            reclaimed_bytes: 0
+        }
+    );
+    for report in [
+        pruned_images(api::ImagePruneResponse::default()),
+        pruned_containers(api::ContainerPruneResponse::default()),
+        pruned_volumes(api::VolumePruneResponse {
+            space_reclaimed: Some(-1),
+            ..Default::default()
+        }),
+        pruned_networks(api::NetworkPruneResponse::default()),
+        pruned_build_cache(api::BuildPruneResponse::default()),
+    ] {
+        assert_eq!(
+            report,
+            PruneReport {
+                deleted: vec![],
+                reclaimed_bytes: 0
+            }
+        );
+    }
 }

@@ -10,9 +10,9 @@ use futures::stream::BoxStream;
 use futures::{FutureExt as _, StreamExt as _};
 
 use crate::{
-    ComposeRef, Container, ContainerAction, ContainerState, Endpoint, Engine, EngineError,
-    EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, Mount, MountKind, ObjectKind,
-    PortBinding, Protocol, RemoveOptions,
+    ComposeRef, Container, ContainerAction, ContainerState, DiskUsage, Endpoint, Engine,
+    EngineError, EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, Image, ImagePrune,
+    Mount, MountKind, ObjectKind, PortBinding, Protocol, PruneReport, RemoveOptions, Volume,
 };
 
 fn port(host: u16, container: u16) -> PortBinding {
@@ -266,6 +266,161 @@ fn inactive_containers() -> Vec<Container> {
     ]
 }
 
+/// Image inventory includes each fixture container's image, unused tags and
+/// four untagged build results. IDs are stable content-shaped SHA256 digests.
+#[must_use]
+pub fn images() -> Vec<Image> {
+    images_for(&containers())
+}
+
+fn images_for(containers: &[Container]) -> Vec<Image> {
+    use sha2::{Digest as _, Sha256};
+    let mut tags: Vec<_> = containers.iter().map(|c| c.image.clone()).collect();
+    tags.extend(
+        [
+            "apache/kafka:4.1.0",
+            "provectuslabs/kafka-ui:latest",
+            "crystaldba/postgres-mcp:latest",
+            "blue-zone-workshop-api:latest",
+            "blue-zone-workshop-worker:latest",
+            "blue-zone-workshop-web:latest",
+        ]
+        .map(str::to_owned),
+    );
+    tags.sort();
+    tags.dedup();
+    let mut images: Vec<_> = tags
+        .into_iter()
+        .map(|tag| {
+            let size = if tag.contains("kafka") {
+                640_000_000
+            } else if tag.contains("postgres") {
+                275_000_000
+            } else if tag.contains("nginx") || tag.contains("redis") || tag.contains("mailpit") {
+                48_000_000
+            } else {
+                185_000_000
+            };
+            Image {
+                id: format!("sha256:{:x}", Sha256::digest(tag.as_bytes())),
+                containers: Some(count(containers.iter().filter(|c| c.image == tag).count())),
+                repo_tags: vec![tag],
+                size,
+                created: 1_790_000_000,
+                labels: vec![],
+            }
+        })
+        .collect();
+    for index in 0..4 {
+        images.push(Image {
+            id: format!("sha256:{:x}", Sha256::digest(format!("dangling-{index}"))),
+            repo_tags: vec![],
+            size: 115_000_000,
+            created: 1_785_000_000,
+            containers: Some(0),
+            labels: vec![],
+        });
+    }
+    images
+}
+
+/// Named mounts, old project caches and two anonymous volumes.
+#[must_use]
+pub fn volumes() -> Vec<Volume> {
+    volumes_for(&containers())
+}
+
+fn volumes_for(containers: &[Container]) -> Vec<Volume> {
+    let mut volumes = Vec::new();
+    for container in containers {
+        for mount in container
+            .mounts
+            .iter()
+            .filter(|m| m.kind == MountKind::Volume)
+        {
+            if volumes.iter().any(|v: &Volume| v.name == mount.source) {
+                continue;
+            }
+            let labels = container.compose.as_ref().map_or_else(Vec::new, |compose| {
+                vec![("com.docker.compose.project".into(), compose.project.clone())]
+            });
+            volumes.push(fixture_volume(&mount.source, 240_000_000, labels));
+        }
+    }
+    for name in [
+        "blue-zone-workshop_maven-cache",
+        "photon-old_maven-cache",
+        "scratch_maven-cache",
+    ] {
+        if !volumes.iter().any(|v| v.name == name) {
+            volumes.push(fixture_volume(name, 350_000_000, vec![]));
+        }
+    }
+    if !volumes
+        .iter()
+        .any(|v| v.name == "blue-zone-workshop_pgdata")
+    {
+        volumes.push(fixture_volume(
+            "blue-zone-workshop_pgdata",
+            180_000_000,
+            vec![(
+                "com.docker.compose.project".into(),
+                "blue-zone-workshop".into(),
+            )],
+        ));
+    }
+    for name in ["a".repeat(64), "b".repeat(64)] {
+        if !volumes.iter().any(|v| v.name == name) {
+            volumes.push(fixture_volume(&name, 65_000_000, vec![]));
+        }
+    }
+    for volume in &mut volumes {
+        volume.ref_count = Some(volume_references(containers, &volume.name));
+    }
+    volumes
+}
+
+fn fixture_volume(name: &str, size: u64, labels: Vec<(String, String)>) -> Volume {
+    Volume {
+        name: name.into(),
+        driver: "local".into(),
+        mountpoint: format!("/var/lib/docker/volumes/{name}/_data"),
+        created: Some("2026-09-22T09:30:00Z".into()),
+        labels,
+        size: Some(size),
+        ref_count: Some(0),
+    }
+}
+
+fn count(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn image_references(containers: &[Container], image: &Image) -> u32 {
+    count(
+        containers
+            .iter()
+            .filter(|c| c.image == image.id || image.repo_tags.contains(&c.image))
+            .count(),
+    )
+}
+
+fn volume_references(containers: &[Container], name: &str) -> u32 {
+    count(
+        containers
+            .iter()
+            .filter(|c| {
+                c.mounts
+                    .iter()
+                    .any(|m| m.kind == MountKind::Volume && m.source == name)
+            })
+            .count(),
+    )
+}
+
+// Fixture writable layers are small; image and volume storage is counted separately.
+const CONTAINER_BYTES: u64 = 8_000_000;
+
 /// An in-memory [`Engine`] over [`containers`]. Actions mutate the fixtures
 /// and emit the same events a real engine would, so the UI's event-driven
 /// store can be built and tested without Docker.
@@ -277,13 +432,23 @@ pub struct FixtureEngine {
 #[derive(Default)]
 struct FixtureState {
     containers: Vec<Container>,
+    images: Vec<Image>,
+    volumes: Vec<Volume>,
+    networks: Vec<String>,
+    build_cache: Vec<(String, u64, bool)>,
     subscribers: Vec<mpsc::UnboundedSender<EngineResult<EngineEvent>>>,
 }
 
 impl FixtureState {
-    fn emit(&mut self, id: &str, action: EventAction) {
+    fn emit_deleted(&mut self, kind: ObjectKind, report: &PruneReport) {
+        for id in &report.deleted {
+            self.emit(kind, id, EventAction::Destroy);
+        }
+    }
+
+    fn emit(&mut self, kind: ObjectKind, id: &str, action: EventAction) {
         let event = EngineEvent {
-            kind: ObjectKind::Container,
+            kind,
             id: id.to_string(),
             action,
             time_nanos: 0,
@@ -304,6 +469,24 @@ impl FixtureEngine {
     pub fn new(containers: Vec<Container>) -> Self {
         Self {
             state: Arc::new(Mutex::new(FixtureState {
+                images: images_for(&containers),
+                volumes: volumes_for(&containers),
+                networks: containers
+                    .iter()
+                    .filter_map(|c| c.compose.as_ref())
+                    .map(|c| format!("{}_default", c.project))
+                    .chain([
+                        "blue-zone-workshop_default".into(),
+                        "scratch_default".into(),
+                    ])
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                build_cache: vec![
+                    ("cache-api".into(), 220_000_000, false),
+                    ("cache-workshop".into(), 380_000_000, false),
+                    ("cache-active".into(), 90_000_000, true),
+                ],
                 containers,
                 subscribers: Vec::new(),
             })),
@@ -431,7 +614,7 @@ impl Engine for FixtureEngine {
                 c.ip = None;
             }
             let id = c.id.clone();
-            s.emit(&id, event);
+            s.emit(ObjectKind::Container, &id, event);
             Ok(())
         })
     }
@@ -459,8 +642,214 @@ impl Engine for FixtureEngine {
                 )));
             }
             let removed = s.containers.remove(ix);
-            s.emit(&removed.id, EventAction::Destroy);
+            s.emit(ObjectKind::Container, &removed.id, EventAction::Destroy);
             Ok(())
+        })
+    }
+
+    fn list_images(&self) -> BoxFuture<'static, EngineResult<Vec<Image>>> {
+        future::ready(Ok(self.with_state(|s| {
+            s.images
+                .iter()
+                .cloned()
+                .map(|mut image| {
+                    image.containers = Some(image_references(&s.containers, &image));
+                    image
+                })
+                .collect()
+        })))
+        .boxed()
+    }
+
+    fn list_volumes(&self) -> BoxFuture<'static, EngineResult<Vec<Volume>>> {
+        future::ready(Ok(self.with_state(|s| {
+            s.volumes
+                .iter()
+                .cloned()
+                .map(|mut volume| {
+                    volume.size = None;
+                    volume.ref_count = None;
+                    volume
+                })
+                .collect()
+        })))
+        .boxed()
+    }
+
+    fn disk_usage(&self) -> BoxFuture<'static, EngineResult<DiskUsage>> {
+        future::ready(Ok(self.with_state(|s| DiskUsage {
+            images: s
+                .images
+                .iter()
+                .cloned()
+                .map(|mut image| {
+                    image.containers = Some(image_references(&s.containers, &image));
+                    image
+                })
+                .collect(),
+            volumes: s
+                .volumes
+                .iter()
+                .cloned()
+                .map(|mut volume| {
+                    volume.ref_count = Some(volume_references(&s.containers, &volume.name));
+                    volume
+                })
+                .collect(),
+            build_cache_bytes: s
+                .build_cache
+                .iter()
+                .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size)),
+            build_cache_reclaimable_bytes: s
+                .build_cache
+                .iter()
+                .filter(|(_, _, in_use)| !in_use)
+                .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size)),
+        })))
+        .boxed()
+    }
+
+    fn remove_image(&self, id: &str, force: bool) -> BoxFuture<'static, EngineResult<()>> {
+        let id = id.to_owned();
+        self.mutate(move |s| {
+            let index = s
+                .images
+                .iter()
+                .position(|i| i.id == id || i.repo_tags.contains(&id))
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
+            let image = s
+                .images
+                .get(index)
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
+            if !force && image_references(&s.containers, image) > 0 {
+                return Err(EngineError::Conflict(format!(
+                    "cannot remove image {id}: image is used by a container"
+                )));
+            }
+            let image = s.images.remove(index);
+            s.emit(ObjectKind::Image, &image.id, EventAction::Destroy);
+            Ok(())
+        })
+    }
+
+    fn remove_volume(&self, name: &str, force: bool) -> BoxFuture<'static, EngineResult<()>> {
+        let name = name.to_owned();
+        self.mutate(move |s| {
+            let index = s
+                .volumes
+                .iter()
+                .position(|v| v.name == name)
+                .ok_or_else(|| EngineError::NotFound(name.clone()))?;
+            if !force && volume_references(&s.containers, &name) > 0 {
+                return Err(EngineError::Conflict(format!(
+                    "cannot remove volume {name}: volume is in use"
+                )));
+            }
+            s.volumes.remove(index);
+            s.emit(ObjectKind::Volume, &name, EventAction::Destroy);
+            Ok(())
+        })
+    }
+
+    fn prune_containers(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        self.mutate(|s| {
+            let mut report = PruneReport {
+                deleted: vec![],
+                reclaimed_bytes: 0,
+            };
+            s.containers.retain(|c| {
+                let remove = matches!(
+                    c.state,
+                    ContainerState::Created | ContainerState::Exited | ContainerState::Dead
+                );
+                if remove {
+                    report.deleted.push(c.id.clone());
+                    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(CONTAINER_BYTES);
+                }
+                !remove
+            });
+            s.emit_deleted(ObjectKind::Container, &report);
+            Ok(report)
+        })
+    }
+
+    fn prune_images(&self, mode: ImagePrune) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        self.mutate(move |s| {
+            let mut report = PruneReport {
+                deleted: vec![],
+                reclaimed_bytes: 0,
+            };
+            s.images.retain(|image| {
+                let remove = image_references(&s.containers, image) == 0
+                    && (mode == ImagePrune::AllUnused || image.is_dangling());
+                if remove {
+                    report.deleted.push(image.id.clone());
+                    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(image.size);
+                }
+                !remove
+            });
+            s.emit_deleted(ObjectKind::Image, &report);
+            Ok(report)
+        })
+    }
+
+    fn prune_volumes(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        self.mutate(|s| {
+            let mut report = PruneReport {
+                deleted: vec![],
+                reclaimed_bytes: 0,
+            };
+            s.volumes.retain(|volume| {
+                let remove = volume_references(&s.containers, &volume.name) == 0;
+                if remove {
+                    report.deleted.push(volume.name.clone());
+                    report.reclaimed_bytes = report
+                        .reclaimed_bytes
+                        .saturating_add(volume.size.unwrap_or_default());
+                }
+                !remove
+            });
+            s.emit_deleted(ObjectKind::Volume, &report);
+            Ok(report)
+        })
+    }
+
+    fn prune_networks(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        self.mutate(|s| {
+            let mut report = PruneReport {
+                deleted: vec![],
+                reclaimed_bytes: 0,
+            };
+            s.networks.retain(|network| {
+                let in_use = s
+                    .containers
+                    .iter()
+                    .filter_map(|c| c.compose.as_ref())
+                    .any(|c| format!("{}_default", c.project) == *network);
+                if !in_use {
+                    report.deleted.push(network.clone());
+                }
+                in_use
+            });
+            s.emit_deleted(ObjectKind::Network, &report);
+            Ok(report)
+        })
+    }
+
+    fn prune_build_cache(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
+        self.mutate(|s| {
+            let mut report = PruneReport {
+                deleted: vec![],
+                reclaimed_bytes: 0,
+            };
+            s.build_cache.retain(|(id, size, in_use)| {
+                if !in_use {
+                    report.deleted.push(id.clone());
+                    report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(*size);
+                }
+                *in_use
+            });
+            Ok(report)
         })
     }
 
@@ -470,6 +859,9 @@ impl Engine for FixtureEngine {
         rx.boxed()
     }
 }
+
+#[cfg(test)]
+mod storage_tests;
 
 #[cfg(test)]
 mod tests {

@@ -6,10 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use berth_docker::{
     BollardEngine, ContainerAction, ContainerState, Endpoint, Engine, EngineError, EngineEvent,
-    EventAction, ObjectKind, RemoveOptions, TlsConfig,
+    EventAction, ImagePrune, ObjectKind, RemoveOptions, TlsConfig,
 };
 use bollard::{
-    API_DEFAULT_VERSION, Docker, models::ContainerCreateBody, query_parameters as query,
+    API_DEFAULT_VERSION, Docker,
+    models::{ContainerCreateBody, VolumeCreateOptions},
+    query_parameters as query,
 };
 use futures::{FutureExt as _, StreamExt as _, channel::oneshot, executor::block_on};
 use tokio::runtime::Runtime;
@@ -319,4 +321,98 @@ fn live_container_lifecycle_and_events_on_a_non_tokio_executor() {
             .iter()
             .any(|c| c.id == id)
     );
+}
+
+/// Best-effort cleanup is installed before volume creation, including when the
+/// create response fails after the daemon has already created the volume.
+struct VolumeCleanup<'a> {
+    runtime: &'a Runtime,
+    docker: &'a Docker,
+    name: String,
+}
+
+impl Drop for VolumeCleanup<'_> {
+    fn drop(&mut self) {
+        let result = self.runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                self.docker.remove_volume(
+                    &self.name,
+                    Some(query::RemoveVolumeOptions { force: false }),
+                ),
+            )
+            .await
+        });
+        match result {
+            Ok(
+                Ok(())
+                | Err(bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404, ..
+                }),
+            ) => {}
+            other => eprintln!("volume cleanup failed for {}: {other:?}", self.name),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a real engine, a throwaway volume, and permission to prune dangling images"]
+fn live_volume_disk_usage_and_dangling_image_prune_on_a_non_tokio_executor() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let endpoint = endpoint().unwrap();
+    let engine = BollardEngine::connect(&endpoint).unwrap();
+    let (runtime, docker) = test_client(&endpoint).unwrap();
+    let name = test_container_name()
+        .unwrap()
+        .replace("berth-live-test-", "berth-live-volume-");
+    let label = "dev.berth.integration-test";
+    let _cleanup = VolumeCleanup {
+        runtime: &runtime,
+        docker: &docker,
+        name: name.clone(),
+    };
+    runtime
+        .block_on(docker.create_volume(VolumeCreateOptions {
+            name: Some(name.clone()),
+            labels: Some(std::collections::HashMap::from([(
+                label.into(),
+                name.clone(),
+            )])),
+            ..Default::default()
+        }))
+        .unwrap();
+    let volumes = block_on(engine.list_volumes()).unwrap();
+    let volume = volumes
+        .iter()
+        .find(|v| v.name == name)
+        .ok_or("throwaway volume not listed")
+        .unwrap();
+    assert!(volume.labels.contains(&(label.into(), name.clone())));
+    assert_eq!((volume.size, volume.ref_count), (None, None));
+    let usage = block_on(engine.disk_usage()).unwrap();
+    let volume = usage
+        .volumes
+        .iter()
+        .find(|v| v.name == name)
+        .ok_or("throwaway volume missing from disk usage")
+        .unwrap();
+    assert_eq!(volume.size, Some(0));
+    assert_eq!(volume.ref_count, Some(0));
+    assert!(volume.labels.contains(&(label.into(), name.clone())));
+    let images = block_on(engine.list_images()).unwrap();
+    assert!(
+        images
+            .iter()
+            .all(|i| !i.repo_tags.iter().any(|tag| tag == "<none>:<none>"))
+    );
+    block_on(engine.remove_volume(&name, false)).unwrap();
+    assert!(
+        !block_on(engine.list_volumes())
+            .unwrap()
+            .iter()
+            .any(|v| v.name == name)
+    );
+    // Explicitly authorized by the test brief. Never exercise broader prunes
+    // against the user's engine; their filters are covered by the HTTP tests.
+    assert!(block_on(engine.prune_images(ImagePrune::Dangling)).is_ok());
 }

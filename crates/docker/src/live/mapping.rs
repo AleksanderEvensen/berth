@@ -5,9 +5,109 @@ use bollard::models as api;
 use chrono::{DateTime, Utc};
 
 use crate::{
-    ComposeRef, Container, ContainerState, Endpoint, EngineError, EngineEvent, EngineInfo,
-    EngineKind, EventAction, Mount, MountKind, ObjectKind, PortBinding, Protocol,
+    ComposeRef, Container, ContainerState, DiskUsage, Endpoint, EngineError, EngineEvent,
+    EngineInfo, EngineKind, EventAction, Image, Mount, MountKind, ObjectKind, PortBinding,
+    Protocol, PruneReport, Volume,
 };
+
+pub(super) fn image(value: api::ImageSummary) -> Image {
+    Image {
+        id: value.id,
+        repo_tags: value
+            .repo_tags
+            .into_iter()
+            .filter(|tag| tag != "<none>:<none>")
+            .collect(),
+        size: u64::try_from(value.size).unwrap_or_default(),
+        created: value.created,
+        containers: u32::try_from(value.containers).ok(),
+        labels: labels(Some(value.labels)),
+    }
+}
+
+pub(super) fn volume(value: api::Volume) -> Volume {
+    let (size, ref_count) = value.usage_data.map_or((None, None), |usage| {
+        (
+            u64::try_from(usage.size).ok(),
+            u32::try_from(usage.ref_count).ok(),
+        )
+    });
+    Volume {
+        name: value.name,
+        driver: value.driver,
+        mountpoint: value.mountpoint,
+        created: value.created_at.map(|date| date.to_rfc3339()),
+        labels: labels(Some(value.labels)),
+        size,
+        ref_count,
+    }
+}
+
+pub(super) fn disk_usage(value: api::SystemDataUsageResponse) -> DiskUsage {
+    let records = value.build_cache.unwrap_or_default();
+    let bytes = |record: &api::BuildCache| {
+        u64::try_from(record.size.unwrap_or_default()).unwrap_or_default()
+    };
+    DiskUsage {
+        images: value
+            .images
+            .unwrap_or_default()
+            .into_iter()
+            .map(image)
+            .collect(),
+        volumes: value
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(volume)
+            .collect(),
+        build_cache_bytes: records
+            .iter()
+            .fold(0_u64, |sum, record| sum.saturating_add(bytes(record))),
+        // Shared records occupy image layers and do not reclaim space on their own.
+        build_cache_reclaimable_bytes: records
+            .iter()
+            .filter(|record| record.in_use == Some(false) && record.shared != Some(true))
+            .fold(0_u64, |sum, record| sum.saturating_add(bytes(record))),
+    }
+}
+
+fn prune_report(deleted: Option<Vec<String>>, bytes: Option<i64>) -> PruneReport {
+    PruneReport {
+        deleted: deleted.unwrap_or_default(),
+        reclaimed_bytes: u64::try_from(bytes.unwrap_or_default()).unwrap_or_default(),
+    }
+}
+
+pub(super) fn pruned_containers(value: api::ContainerPruneResponse) -> PruneReport {
+    prune_report(value.containers_deleted, value.space_reclaimed)
+}
+
+pub(super) fn pruned_images(value: api::ImagePruneResponse) -> PruneReport {
+    prune_report(
+        Some(
+            value
+                .images_deleted
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|entry| entry.deleted.or(entry.untagged))
+                .collect(),
+        ),
+        value.space_reclaimed,
+    )
+}
+
+pub(super) fn pruned_volumes(value: api::VolumePruneResponse) -> PruneReport {
+    prune_report(value.volumes_deleted, value.space_reclaimed)
+}
+
+pub(super) fn pruned_networks(value: api::NetworkPruneResponse) -> PruneReport {
+    prune_report(value.networks_deleted, None)
+}
+
+pub(super) fn pruned_build_cache(value: api::BuildPruneResponse) -> PruneReport {
+    prune_report(value.caches_deleted, value.space_reclaimed)
+}
 
 pub(super) fn state(value: &str) -> ContainerState {
     match value {
@@ -64,7 +164,7 @@ fn mounts(values: Option<Vec<api::MountPoint>>) -> Vec<Mount> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|m| {
-            let kind = match m.typ.as_deref()? {
+            let kind = match m.typ.as_ref()?.as_ref() {
                 "volume" => MountKind::Volume,
                 "bind" => MountKind::Bind,
                 "tmpfs" => MountKind::Tmpfs,
