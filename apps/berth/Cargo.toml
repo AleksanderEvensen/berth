@@ -1,6 +1,15 @@
 [package]
 name = "berth"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [dependencies]
+berth-ui.workspace = true
+berth-docker.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-base.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true

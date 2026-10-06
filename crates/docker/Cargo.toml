@@ -1,0 +1,10 @@
+[package]
+name = "berth-docker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Engine-facing domain model. The live client (bollard) lands here in M1;
+# for now it only carries the model and fixture data for the UI prototype.
+[dependencies]

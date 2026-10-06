@@ -1,8 +1,44 @@
 [workspace]
 resolver = "2"
 members = [
-    "apps/berth"
-    # Add crates here in the future like ui crate for components etc
-    # and some for services and wrapping docker
-    # "crates/<>"
+    "apps/berth",
+    "crates/ui",
+    "crates/docker",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+berth-ui = { path = "crates/ui" }
+berth-docker = { path = "crates/docker" }
+
+# gpui — the published `gpui-pre` snapshot of zed, which is what GPUI Kit's
+# `gpui-base` is built against. Keep these three versions in lockstep.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = [
+    "wayland",
+    "x11",
+    "font-kit",
+] }
+# Behaviour-only foundations (inputs, focus, virtual lists, popovers). We style
+# everything ourselves — see docs/plan/04-design-system.md.
+gpui-base = "=0.7.1"
+
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"
+
+[profile.dev]
+opt-level = 0
+
+# gpui is very slow unoptimized; optimize dependencies even in dev builds.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
