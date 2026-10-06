@@ -207,3 +207,33 @@ fn cancellation_wakes_quiet_timer_and_aborts_blocked_send() {
         rx.recv_timeout(Duration::from_secs(2)).unwrap();
     }
 }
+
+#[test]
+fn million_line_mode_generates_only_requested_tail() {
+    let (engine, id) = engine();
+    let engine = engine.with_log_history_lines(1_000_000);
+    let tail = history(&engine, &id, Some(1), None);
+    let c = block_on(engine.inspect_container(&id)).unwrap();
+    assert_eq!(
+        tail,
+        [log_line(
+            &c,
+            999_999,
+            c.created
+                .saturating_add(999_999)
+                .saturating_mul(1_000_000_000)
+        )]
+    );
+}
+
+#[test]
+fn overflowing_event_subscription_ends_for_resync() {
+    let (engine, id) = engine();
+    let events = engine.events();
+    for _ in 0..80 {
+        block_on(engine.container_action(&id, ContainerAction::Start)).unwrap();
+    }
+    let buffered = block_on(events.collect::<Vec<_>>());
+    assert!(buffered.len() <= 65);
+    assert!(buffered.iter().all(Result::is_ok));
+}
