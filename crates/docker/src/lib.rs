@@ -4,9 +4,11 @@
 //! fixtures (tests, screenshots, design work) exactly as it runs against a
 //! live engine. See docs/plan/03-architecture.md.
 
+mod engine;
 pub mod fixtures;
 mod model;
 mod tree;
 
+pub use engine::*;
 pub use model::*;
 pub use tree::*;

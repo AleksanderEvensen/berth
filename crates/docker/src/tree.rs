@@ -13,7 +13,10 @@ pub struct Stack<'a> {
 
 impl Stack<'_> {
     pub fn active_count(&self) -> usize {
-        self.containers.iter().filter(|c| c.state.is_active()).count()
+        self.containers
+            .iter()
+            .filter(|c| c.state.is_active())
+            .count()
     }
 
     /// A stack belongs to the "Running" section if any service is active.
@@ -120,10 +123,7 @@ mod tests {
             }
         }
         let tree = ContainerTree::build(&containers);
-        let Some(Node::Stack(stack)) = tree
-            .running
-            .iter()
-            .find(|n| n.sort_key() == "photon_dev")
+        let Some(Node::Stack(stack)) = tree.running.iter().find(|n| n.sort_key() == "photon_dev")
         else {
             panic!("photon_dev should be running");
         };

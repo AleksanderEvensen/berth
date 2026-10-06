@@ -591,6 +591,10 @@ dependencies = [
 [[package]]
 name = "berth-docker"
 version = "0.1.0"
+dependencies = [
+ "futures",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "berth-ui"

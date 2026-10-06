@@ -166,9 +166,9 @@ impl Theme {
     /// A deterministic, theme-tuned tint for an arbitrary key (image name,
     /// volume name) — used for monogram badges.
     pub fn tint_for(&self, key: &str) -> Hsla {
-        let hash = key
-            .bytes()
-            .fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193));
+        let hash = key.bytes().fold(0x811c9dc5u32, |h, b| {
+            (h ^ b as u32).wrapping_mul(0x01000193)
+        });
         let hue = (hash % 360) as f32;
         match self.appearance {
             Appearance::Dark => oklch(0.74, 0.12, hue),

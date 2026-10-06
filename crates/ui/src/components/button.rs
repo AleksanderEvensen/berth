@@ -176,7 +176,12 @@ impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::of(cx);
         let (bg, fg, border, hover_bg) = match (self.solid, self.tone) {
-            (true, _) => (theme.solid, theme.on_solid, theme.solid, theme.solid.opacity(0.88)),
+            (true, _) => (
+                theme.solid,
+                theme.on_solid,
+                theme.solid,
+                theme.solid.opacity(0.88),
+            ),
             (false, ButtonTone::Default) => (
                 theme.row_hover,
                 theme.text,

@@ -95,6 +95,12 @@ pub struct Container {
     pub mounts: Vec<Mount>,
     pub labels: Vec<(String, String)>,
     pub compose: Option<ComposeRef>,
+    /// Creation time, unix seconds.
+    pub created: i64,
+    /// Command line, as the engine reports it (entrypoint + args).
+    pub command: Option<String>,
+    /// `KEY=value` pairs. Only populated by inspect; `None` from list calls.
+    pub env: Option<Vec<String>>,
 }
 
 impl Container {

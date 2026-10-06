@@ -1,6 +1,5 @@
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*,
-    px,
+    AnyElement, App, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px,
 };
 
 use crate::Theme;
@@ -79,7 +78,9 @@ impl Cell {
         let d = div().min_w_0().truncate().child(self.text);
         match self.style {
             CellStyle::Plain => d.text_color(theme.text),
-            CellStyle::Mono => d.text_color(theme.text).font_family(theme.font_mono.clone()),
+            CellStyle::Mono => d
+                .text_color(theme.text)
+                .font_family(theme.font_mono.clone()),
             CellStyle::Link => d.text_color(theme.accent).cursor_pointer(),
             CellStyle::Muted => d.text_color(theme.text_faint),
         }
@@ -109,7 +110,8 @@ impl KeyValueCard {
     }
 
     pub fn row(mut self, label: impl Into<SharedString>, value: Cell) -> Self {
-        self.rows.push((label.into(), CellElement(value).into_any_element()));
+        self.rows
+            .push((label.into(), CellElement(value).into_any_element()));
         self
     }
 
@@ -132,30 +134,23 @@ impl RenderOnce for CellElement {
 impl RenderOnce for KeyValueCard {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::of(cx);
-        card(theme).children(self.rows.into_iter().enumerate().map(|(ix, (label, value))| {
-            div()
-                .h(px(38.0))
-                .px(px(Theme::SPACE_MD))
-                .flex()
-                .items_center()
-                .gap(px(Theme::SPACE_LG))
-                .text_size(px(Theme::TEXT_MD))
-                .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
-                .child(
+        card(theme).children(
+            self.rows
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (label, value))| {
                     div()
-                        .flex_none()
-                        .text_color(theme.text_muted)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
+                        .h(px(38.0))
+                        .px(px(Theme::SPACE_MD))
                         .flex()
-                        .justify_end()
-                        .child(value),
-                )
-        }))
+                        .items_center()
+                        .gap(px(Theme::SPACE_LG))
+                        .text_size(px(Theme::TEXT_MD))
+                        .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
+                        .child(div().flex_none().text_color(theme.text_muted).child(label))
+                        .child(div().flex_1().min_w_0().flex().justify_end().child(value))
+                }),
+        )
     }
 }
 
@@ -199,9 +194,7 @@ impl RenderOnce for DataTable {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::of(cx);
         let weights: Vec<f32> = self.columns.iter().map(|(_, w)| *w).collect();
-        let column = |weight: f32| {
-            div().flex_basis(px(0.0)).flex_grow(weight).min_w_0()
-        };
+        let column = |weight: f32| div().flex_basis(px(0.0)).flex_grow(weight).min_w_0();
 
         let header = div()
             .h(px(30.0))
@@ -245,9 +238,12 @@ impl RenderOnce for DataTable {
                         .gap(px(Theme::SPACE_MD))
                         .text_size(px(Theme::TEXT_MD))
                         .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
-                        .children(cells.into_iter().zip(weights.iter()).map(|(cell, w)| {
-                            column(*w).child(cell.render(theme))
-                        }))
+                        .children(
+                            cells
+                                .into_iter()
+                                .zip(weights.iter())
+                                .map(|(cell, w)| column(*w).child(cell.render(theme))),
+                        )
                 })
                 .collect()
         };
@@ -257,7 +253,11 @@ impl RenderOnce for DataTable {
 }
 
 /// Centered empty-state message for a pane.
-pub fn empty_state(title: impl Into<SharedString>, detail: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
+pub fn empty_state(
+    title: impl Into<SharedString>,
+    detail: impl Into<SharedString>,
+    theme: &Theme,
+) -> gpui::Div {
     div()
         .size_full()
         .flex()

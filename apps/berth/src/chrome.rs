@@ -127,12 +127,14 @@ pub fn window_frame(content: AnyElement, window: &mut Window, cx: &App) -> impl 
                         .when(!tiling.left, |d| d.border_l_1())
                         .when(!tiling.right, |d| d.border_r_1())
                         .when(!tiling.is_tiled(), |d| {
-                            d.shadow(vec![gpui::BoxShadow::new(
-                                px(0.0),
-                                px(2.0),
-                                gpui::hsla(0.0, 0.0, 0.0, 0.45),
-                            )
-                            .blur_radius(FRAME_INSET / 1.5)])
+                            d.shadow(vec![
+                                gpui::BoxShadow::new(
+                                    px(0.0),
+                                    px(2.0),
+                                    gpui::hsla(0.0, 0.0, 0.0, 0.45),
+                                )
+                                .blur_radius(FRAME_INSET / 1.5),
+                            ])
                         }),
                 })
                 .on_mouse_move(|_, _, cx| cx.stop_propagation())

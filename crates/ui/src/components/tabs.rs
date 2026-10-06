@@ -80,9 +80,7 @@ impl RenderOnce for SegmentedTabs {
                         }
                     })
                     .child(label)
-                    .when_some(on_select, |d, f| {
-                        d.on_click(move |_, w, cx| f(&ix, w, cx))
-                    })
+                    .when_some(on_select, |d, f| d.on_click(move |_, w, cx| f(&ix, w, cx)))
             }))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
     }

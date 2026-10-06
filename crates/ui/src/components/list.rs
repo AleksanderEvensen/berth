@@ -118,7 +118,11 @@ impl RenderOnce for SectionLabel {
             .text_color(theme.text_faint)
             .child(self.label)
             .when_some(self.count, |d, n| {
-                d.child(div().text_color(theme.text_faint.opacity(0.7)).child(n.to_string()))
+                d.child(
+                    div()
+                        .text_color(theme.text_faint.opacity(0.7))
+                        .child(n.to_string()),
+                )
             })
     }
 }

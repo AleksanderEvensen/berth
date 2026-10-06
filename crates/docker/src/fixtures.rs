@@ -1,6 +1,17 @@
 //! Realistic fixture data for UI prototyping and tests.
 
-use crate::{ComposeRef, Container, ContainerState, Mount, MountKind, PortBinding, Protocol};
+use std::sync::{Arc, Mutex};
+
+use futures::channel::mpsc;
+use futures::future::{self, BoxFuture};
+use futures::stream::BoxStream;
+use futures::{FutureExt as _, StreamExt as _};
+
+use crate::{
+    ComposeRef, Container, ContainerAction, ContainerState, Endpoint, Engine, EngineError,
+    EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, Mount, MountKind, ObjectKind,
+    PortBinding, Protocol, RemoveOptions,
+};
 
 fn port(host: u16, container: u16) -> PortBinding {
     PortBinding {
@@ -74,6 +85,11 @@ impl Spec<'_> {
             mounts: self.mounts,
             labels,
             compose,
+            created: 1_791_000_000,
+            command: None,
+            env: Some(vec![
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+            ]),
         }
     }
 }
@@ -105,7 +121,10 @@ pub fn containers() -> Vec<Container> {
             ports: vec![port(9000, 9000), port(9001, 9001)],
             mounts: vec![volume("rustfs_data", "/data")],
             labels: vec![
-                s("description", "RustFS is a distributed object storage system written in Rust"),
+                s(
+                    "description",
+                    "RustFS is a distributed object storage system written in Rust",
+                ),
                 s("license", "Apache-2.0"),
                 s("maintainer", "RustFS Team <dev@rustfs.com>"),
                 s("org.opencontainers.image.title", "RustFS"),
@@ -125,8 +144,15 @@ pub fn containers() -> Vec<Container> {
             status: "Up 2 days",
             ip: Some("172.21.0.4"),
             ports: vec![port(8080, 80)],
-            mounts: vec![bind("/home/dev/code/berth-dev/nginx.conf", "/etc/nginx/nginx.conf", true)],
-            labels: vec![s("maintainer", "NGINX Docker Maintainers <docker-maint@nginx.com>")],
+            mounts: vec![bind(
+                "/home/dev/code/berth-dev/nginx.conf",
+                "/etc/nginx/nginx.conf",
+                true,
+            )],
+            labels: vec![s(
+                "maintainer",
+                "NGINX Docker Maintainers <docker-maint@nginx.com>",
+            )],
             compose: Some(("berth-dev", "web", "/home/dev/code/berth-dev")),
         }
         .build(),
@@ -222,4 +248,206 @@ pub fn containers() -> Vec<Container> {
         }
         .build(),
     ]
+}
+
+/// An in-memory [`Engine`] over [`containers`]. Actions mutate the fixtures
+/// and emit the same events a real engine would, so the UI's event-driven
+/// store can be built and tested without Docker.
+pub struct FixtureEngine {
+    state: Arc<Mutex<FixtureState>>,
+}
+
+#[derive(Default)]
+struct FixtureState {
+    containers: Vec<Container>,
+    subscribers: Vec<mpsc::UnboundedSender<EngineResult<EngineEvent>>>,
+}
+
+impl FixtureState {
+    fn emit(&mut self, id: &str, action: EventAction) {
+        let event = EngineEvent {
+            kind: ObjectKind::Container,
+            id: id.to_string(),
+            action,
+            time_nanos: 0,
+        };
+        self.subscribers
+            .retain(|tx| tx.unbounded_send(Ok(event.clone())).is_ok());
+    }
+}
+
+impl Default for FixtureEngine {
+    fn default() -> Self {
+        Self::new(containers())
+    }
+}
+
+impl FixtureEngine {
+    pub fn new(containers: Vec<Container>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FixtureState {
+                containers,
+                subscribers: Vec::new(),
+            })),
+        }
+    }
+
+    fn with_state<T>(&self, f: impl FnOnce(&mut FixtureState) -> T) -> T {
+        f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+impl Engine for FixtureEngine {
+    fn info(&self) -> BoxFuture<'static, EngineResult<EngineInfo>> {
+        future::ready(Ok(EngineInfo {
+            kind: EngineKind::Docker,
+            name: "Fixture Engine".into(),
+            version: "28.4.0".into(),
+            api_version: "1.51".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            rootless: false,
+            endpoint: Endpoint::Unix("/dev/null".into()),
+        }))
+        .boxed()
+    }
+
+    fn list_containers(&self) -> BoxFuture<'static, EngineResult<Vec<Container>>> {
+        let list = self.with_state(|s| {
+            s.containers
+                .iter()
+                .cloned()
+                .map(|mut c| {
+                    c.env = None;
+                    c
+                })
+                .collect()
+        });
+        future::ready(Ok(list)).boxed()
+    }
+
+    fn inspect_container(&self, id: &str) -> BoxFuture<'static, EngineResult<Container>> {
+        let found = self.with_state(|s| s.containers.iter().find(|c| c.id == id).cloned());
+        future::ready(found.ok_or_else(|| EngineError::NotFound(id.to_string()))).boxed()
+    }
+
+    fn container_action(
+        &self,
+        id: &str,
+        action: ContainerAction,
+    ) -> BoxFuture<'static, EngineResult<()>> {
+        let result = self.with_state(|s| {
+            let c = s
+                .containers
+                .iter_mut()
+                .find(|c| c.id == id)
+                .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+            let (state, status, event) = match action {
+                ContainerAction::Start => (
+                    ContainerState::Running,
+                    "Up Less than a second",
+                    EventAction::Start,
+                ),
+                ContainerAction::Restart { .. } => (
+                    ContainerState::Running,
+                    "Up Less than a second",
+                    EventAction::Restart,
+                ),
+                ContainerAction::Stop { .. } => (
+                    ContainerState::Exited,
+                    "Exited (0) Less than a second ago",
+                    EventAction::Die,
+                ),
+                ContainerAction::Kill => (
+                    ContainerState::Exited,
+                    "Exited (137) Less than a second ago",
+                    EventAction::Kill,
+                ),
+                ContainerAction::Pause => {
+                    (ContainerState::Paused, "Up (Paused)", EventAction::Pause)
+                }
+                ContainerAction::Unpause => (ContainerState::Running, "Up", EventAction::Unpause),
+            };
+            c.state = state;
+            c.status = status.into();
+            if !state.is_active() {
+                c.ip = None;
+            }
+            let id = c.id.clone();
+            s.emit(&id, event);
+            Ok(())
+        });
+        future::ready(result).boxed()
+    }
+
+    fn remove_container(
+        &self,
+        id: &str,
+        options: RemoveOptions,
+    ) -> BoxFuture<'static, EngineResult<()>> {
+        let result = self.with_state(|s| {
+            let ix = s
+                .containers
+                .iter()
+                .position(|c| c.id == id)
+                .ok_or_else(|| EngineError::NotFound(id.to_string()))?;
+            if s.containers[ix].state.is_active() && !options.force {
+                return Err(EngineError::Conflict(format!(
+                    "cannot remove container {}: container is running",
+                    s.containers[ix].name
+                )));
+            }
+            let removed = s.containers.remove(ix);
+            s.emit(&removed.id, EventAction::Destroy);
+            Ok(())
+        });
+        future::ready(result).boxed()
+    }
+
+    fn events(&self) -> BoxStream<'static, EngineResult<EngineEvent>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.with_state(|s| s.subscribers.push(tx));
+        rx.boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt as _;
+    use futures::executor::block_on;
+
+    #[test]
+    fn actions_emit_events_and_respect_conflicts() {
+        let engine = FixtureEngine::default();
+        let mut events = engine.events();
+        let rustfs = "e3a58e962b46d1c0f9a7b8e2d4c6a1f3e5b7d9c0a2f4e6b8d1c3a5f7e9b0d2c4";
+
+        let err = block_on(engine.remove_container(rustfs, RemoveOptions::default()));
+        assert!(matches!(err, Err(EngineError::Conflict(_))));
+
+        block_on(engine.container_action(rustfs, ContainerAction::Stop { timeout_secs: None }))
+            .unwrap();
+        let ev = block_on(events.next()).unwrap().unwrap();
+        assert_eq!((ev.id.as_str(), ev.action), (rustfs, EventAction::Die));
+        assert_eq!(
+            block_on(engine.inspect_container(rustfs)).unwrap().state,
+            ContainerState::Exited
+        );
+
+        block_on(engine.remove_container(rustfs, RemoveOptions::default())).unwrap();
+        let ev = block_on(events.next()).unwrap().unwrap();
+        assert_eq!(ev.action, EventAction::Destroy);
+        assert!(matches!(
+            block_on(engine.inspect_container(rustfs)),
+            Err(EngineError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn list_omits_env() {
+        let engine = FixtureEngine::default();
+        let list = block_on(engine.list_containers()).unwrap();
+        assert!(list.iter().all(|c| c.env.is_none()));
+    }
 }

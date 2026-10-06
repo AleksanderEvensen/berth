@@ -7,13 +7,11 @@ use std::collections::HashSet;
 
 use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack, fixtures};
 use berth_ui::{
-    Badge, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
-    ResourceRow, SectionLabel, SegmentedTabs, Status, Theme, empty_state, icon, icons,
-    status_dot,
+    Badge, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader, ResourceRow,
+    SectionLabel, SegmentedTabs, Status, Theme, empty_state, icon, icons, status_dot,
 };
 use gpui::{
-    AnyElement, Context, FontWeight, IntoElement, Render, SharedString, Window, div, prelude::*,
-    px,
+    AnyElement, Context, FontWeight, IntoElement, Render, SharedString, Window, div, prelude::*, px,
 };
 
 use crate::chrome;
@@ -53,7 +51,10 @@ impl ContainersScreen {
     }
 
     pub fn running_count(&self) -> usize {
-        self.containers.iter().filter(|c| c.state.is_active()).count()
+        self.containers
+            .iter()
+            .filter(|c| c.state.is_active())
+            .count()
     }
 
     /// Layout facts owned by the shell: clearance for the floating sidebar
@@ -113,7 +114,11 @@ impl ContainersScreen {
 
         let mut rows: Vec<AnyElement> = Vec::new();
         if !tree.running.is_empty() {
-            rows.push(SectionLabel::new("Running").count(running).into_any_element());
+            rows.push(
+                SectionLabel::new("Running")
+                    .count(running)
+                    .into_any_element(),
+            );
             for node in &tree.running {
                 self.push_node(node, &mut rows, cx);
             }
@@ -202,22 +207,29 @@ impl ContainersScreen {
             cx.listener(move |this, _, _, cx| this.select(Selection::Stack(project.clone()), cx))
         };
 
-        ResourceRow::new(SharedString::from(format!("stack-{project}")), project.clone())
-            .leading(
-                Badge::icon(project.clone(), icons::LAYERS)
-                    .status(if active { Status::Running } else { Status::Stopped })
-                    .dimmed(!active),
-            )
-            .subtitle(match stack.active_count() {
-                0 => format!("{total} services"),
-                n => format!("{n} of {total} running"),
-            })
-            .disclosure(expanded, toggle)
-            .selected(selected)
-            .dimmed(!active)
-            .action(lifecycle_button(&project, active).on_click(lifecycle))
-            .action(delete_button(&project).on_click(delete))
-            .on_click(select)
+        ResourceRow::new(
+            SharedString::from(format!("stack-{project}")),
+            project.clone(),
+        )
+        .leading(
+            Badge::icon(project.clone(), icons::LAYERS)
+                .status(if active {
+                    Status::Running
+                } else {
+                    Status::Stopped
+                })
+                .dimmed(!active),
+        )
+        .subtitle(match stack.active_count() {
+            0 => format!("{total} services"),
+            n => format!("{n} of {total} running"),
+        })
+        .disclosure(expanded, toggle)
+        .selected(selected)
+        .dimmed(!active)
+        .action(lifecycle_button(&project, active).on_click(lifecycle))
+        .action(delete_button(&project).on_click(delete))
+        .on_click(select)
     }
 
     fn container_row(&self, c: &Container, depth: usize, cx: &mut Context<Self>) -> ResourceRow {
@@ -283,11 +295,14 @@ impl ContainersScreen {
                 theme,
             )
             .into_any_element(),
-            (Some(Selection::Container(id)), 0) => match self.containers.iter().find(|c| &c.id == id)
-            {
-                Some(c) => scroll_page(container_info(c, theme)).into_any_element(),
-                None => empty_state("Gone", "This container was removed.", theme).into_any_element(),
-            },
+            (Some(Selection::Container(id)), 0) => {
+                match self.containers.iter().find(|c| &c.id == id) {
+                    Some(c) => scroll_page(container_info(c, theme)).into_any_element(),
+                    None => {
+                        empty_state("Gone", "This container was removed.", theme).into_any_element()
+                    }
+                }
+            }
             (Some(Selection::Stack(project)), 0) => {
                 let stack = tree
                     .running
@@ -299,15 +314,22 @@ impl ContainersScreen {
                     });
                 match stack {
                     Some(stack) => scroll_page(stack_info(stack, theme)).into_any_element(),
-                    None => empty_state("Gone", "This stack was removed.", theme)
-                        .into_any_element(),
+                    None => {
+                        empty_state("Gone", "This stack was removed.", theme).into_any_element()
+                    }
                 }
             }
             (Some(_), tab) => {
                 let (title, detail) = match tab {
-                    1 => ("Stats", "Live CPU, memory, network and disk graphs land in M3."),
+                    1 => (
+                        "Stats",
+                        "Live CPU, memory, network and disk graphs land in M3.",
+                    ),
                     2 => ("Logs", "Streaming, searchable logs land in M3."),
-                    3 => ("Terminal", "An interactive shell into the container lands in M3."),
+                    3 => (
+                        "Terminal",
+                        "An interactive shell into the container lands in M3.",
+                    ),
                     _ => ("Files", "Browsing the container filesystem is planned."),
                 };
                 empty_state(title, detail, theme).into_any_element()
@@ -376,7 +398,9 @@ fn status_of(state: ContainerState) -> Status {
 fn image_name(image: &str) -> String {
     let without_digest = image.split_once('@').map_or(image, |(name, _)| name);
     let last = without_digest.rsplit('/').next().unwrap_or(without_digest);
-    last.split_once(':').map_or(last, |(name, _)| name).to_string()
+    last.split_once(':')
+        .map_or(last, |(name, _)| name)
+        .to_string()
 }
 
 fn scroll_page(content: impl IntoElement) -> impl IntoElement {
@@ -425,19 +449,23 @@ fn container_info(c: &Container, theme: &Theme) -> impl IntoElement {
             .row("Service", Cell::plain(compose.service.clone()));
     }
 
-    let ports = DataTable::new([("Host port", 1.0), ("Container port", 1.0), ("Protocol", 1.0)])
-        .empty("No published ports")
-        .rows(c.ports.iter().map(|p| {
-            vec![
-                match p.host_port {
-                    Some(port) if c.state.is_active() => Cell::link(port.to_string()),
-                    Some(port) => Cell::plain(port.to_string()),
-                    None => Cell::muted("—"),
-                },
-                Cell::plain(p.container_port.to_string()),
-                Cell::muted(p.protocol.label()),
-            ]
-        }));
+    let ports = DataTable::new([
+        ("Host port", 1.0),
+        ("Container port", 1.0),
+        ("Protocol", 1.0),
+    ])
+    .empty("No published ports")
+    .rows(c.ports.iter().map(|p| {
+        vec![
+            match p.host_port {
+                Some(port) if c.state.is_active() => Cell::link(port.to_string()),
+                Some(port) => Cell::plain(port.to_string()),
+                None => Cell::muted("—"),
+            },
+            Cell::plain(p.container_port.to_string()),
+            Cell::muted(p.protocol.label()),
+        ]
+    }));
 
     let mounts = DataTable::new([("Source", 1.2), ("Destination", 1.0)])
         .empty("No mounts")
@@ -542,8 +570,17 @@ fn stack_info(stack: &Stack<'_>, theme: &Theme) -> impl IntoElement {
                         .gap(px(Theme::SPACE_SM + 2.0))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.row_hover))
-                        .child(icon(icons::FOLDER).size(px(16.0)).text_color(theme.text_muted))
-                        .child(div().flex_1().text_color(theme.text).child("Open in file manager"))
+                        .child(
+                            icon(icons::FOLDER)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(theme.text)
+                                .child("Open in file manager"),
+                        )
                         .child(
                             div()
                                 .text_size(px(Theme::TEXT_SM))

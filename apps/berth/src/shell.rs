@@ -1,8 +1,8 @@
 //! The window root: sidebar + active screen + chrome.
 
 use berth_ui::{
-    IconButton, PANEL_SPRING, Sidebar, SidebarItem, SidebarSection, Status, Theme, icons, sidebar_glyph,
-    status_dot,
+    IconButton, PANEL_SPRING, Sidebar, SidebarItem, SidebarSection, Status, Theme, icons,
+    sidebar_glyph, status_dot,
 };
 use gpui::{
     AnimationExt as _, Context, Entity, FocusHandle, FontWeight, IntoElement, Render,
@@ -87,7 +87,11 @@ impl Shell {
                             .trailing(running.to_string())
                             .active(true),
                     )
-                    .item(SidebarItem::new("nav-volumes", icons::HARD_DRIVE, "Volumes"))
+                    .item(SidebarItem::new(
+                        "nav-volumes",
+                        icons::HARD_DRIVE,
+                        "Volumes",
+                    ))
                     .item(SidebarItem::new("nav-images", icons::DISC, "Images"))
                     .item(SidebarItem::new("nav-networks", icons::NETWORK, "Networks")),
             )
@@ -122,9 +126,9 @@ impl Shell {
                 move |this, t: f32| this.child(sidebar_glyph(t, 18.0, color)),
             ))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.toggle_sidebar(&ToggleSidebar, window, cx)
-            }))
+            .on_click(
+                cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
+            )
     }
 }
 
@@ -156,7 +160,13 @@ impl Render for Shell {
             .text_color(theme.text)
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
-            .child(div().flex_1().min_w_0().h_full().child(self.containers.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.containers.clone()),
+            )
             .child(self.render_sidebar_toggle(cx))
             .when_some(captions, |d, captions| {
                 d.child(

@@ -1,6 +1,6 @@
 use gpui::{
-    AnimationExt as _, AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Hsla, IntoElement, RenderOnce,
-    SharedString, SpringAnimation, SpringConfig, Window, div, prelude::*, px,
+    AnimationExt as _, AnyElement, App, ClickEvent, Div, ElementId, FontWeight, Hsla, IntoElement,
+    RenderOnce, SharedString, SpringAnimation, SpringConfig, Window, div, prelude::*, px,
 };
 
 use super::{ClickHandler, icon};
@@ -192,7 +192,11 @@ pub struct SidebarItem {
 }
 
 impl SidebarItem {
-    pub fn new(id: impl Into<ElementId>, icon: &'static str, label: impl Into<SharedString>) -> Self {
+    pub fn new(
+        id: impl Into<ElementId>,
+        icon: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Self {
         Self {
             id: id.into(),
             icon,
@@ -244,15 +248,11 @@ impl RenderOnce for SidebarItem {
                         .hover(move |s| s.bg(row_hover))
                 }
             })
-            .child(
-                icon(self.icon)
-                    .size(px(16.0))
-                    .text_color(if self.active {
-                        theme.text
-                    } else {
-                        theme.text_muted
-                    }),
-            )
+            .child(icon(self.icon).size(px(16.0)).text_color(if self.active {
+                theme.text
+            } else {
+                theme.text_muted
+            }))
             .child(div().flex_1().min_w_0().truncate().child(self.label))
             .when_some(self.trailing, |d, t| {
                 d.child(
