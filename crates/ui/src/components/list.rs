@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, Hsla, IntoElement, RenderOnce,
-    SharedString, Window, div, prelude::*, px,
+    SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
 };
 
 use super::{ClickHandler, Spinner, icon};
@@ -428,9 +428,19 @@ impl RenderOnce for ResourceRow {
         // Bound display indentation before converting to an exactly representable float.
         let depth = f32::from(u16::try_from(self.depth).unwrap_or(u16::MAX));
 
+        // Actions float over the row's right edge instead of reserving width,
+        // so titles and subtitles use the full row until it is hovered. The
+        // plate is the opaque colour the row shows when hovered/selected.
+        let plate = theme.surface.blend(if self.selected {
+            theme.row_selected
+        } else {
+            theme.row_hover
+        });
+
         div()
             .id(self.id)
             .group(group.clone())
+            .relative()
             .h(px(Theme::RESOURCE_ROW_HEIGHT))
             .flex_none()
             .flex()
@@ -499,18 +509,43 @@ impl RenderOnce for ResourceRow {
                 )
             })
             .when(!busy && !self.actions.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .when(!self.selected, |d| {
-                            d.opacity(0.0).group_hover(group, |s| s.opacity(1.0))
-                        })
-                        .children(self.actions),
-                )
+                d.child(actions_overlay(self.actions, plate, self.selected, group))
             })
             .when_some(on_click, |d, f| d.on_click(move |e, w, cx| f(e, w, cx)))
     }
+}
+
+/// Row actions floating over the row's right edge: a short fade into an
+/// opaque `plate`, revealed on hover (always shown when `selected`).
+fn actions_overlay(
+    actions: Vec<AnyElement>,
+    plate: Hsla,
+    selected: bool,
+    group: SharedString,
+) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right_0()
+        .flex()
+        .when(!selected, |d| {
+            d.opacity(0.0).group_hover(group, |s| s.opacity(1.0))
+        })
+        .child(div().w(px(20.0)).h_full().bg(linear_gradient(
+            90.0,
+            linear_color_stop(plate.opacity(0.0), 0.0),
+            linear_color_stop(plate, 1.0),
+        )))
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .pr(px(Theme::SPACE_XS + 2.0))
+                .rounded_r(px(Theme::ROW_RADIUS))
+                .bg(plate)
+                .children(actions),
+        )
 }
