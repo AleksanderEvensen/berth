@@ -8,5 +8,8 @@ mod emulator;
 mod input;
 mod view;
 
-pub use emulator::{Emulator, GridSize};
+/// The ANSI parser the emulator uses, for other views that parse escape
+/// sequences (log lines) without pinning a second `vte` version.
+pub use alacritty_terminal::vte;
+pub use emulator::{Emulator, GridSize, sgr_color};
 pub use view::{TerminalEvent, TerminalView};

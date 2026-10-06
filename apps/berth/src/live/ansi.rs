@@ -1,13 +1,15 @@
 //! ANSI SGR → styled spans for log lines.
 //!
-//! Lines are parsed once, on arrival: the plain text (what search and copy
-//! see) plus style spans over it. Colour/attribute SGR codes become spans;
-//! every other escape sequence (cursor moves, OSC titles, …) is dropped, as
-//! are carriage returns and other control characters. Tabs expand to the
-//! next multiple of eight columns.
+//! Lines are parsed once, on arrival, by `vte` (the parser behind the
+//! terminal): the plain text (what search and copy see) plus style spans
+//! over it. Colour/attribute SGR codes become spans; every other escape
+//! sequence and control character is dropped. Tabs expand to the next
+//! multiple of eight columns.
 
 use std::ops::Range;
 
+use berth_terminal::sgr_color;
+use berth_terminal::vte::ansi::{Attr, Handler, Processor};
 use berth_ui::ansi::AnsiColor;
 
 /// Text attributes from SGR codes.
@@ -47,110 +49,78 @@ const TAB: usize = 8;
 
 /// Split `line` into plain text and style spans.
 pub fn parse(line: &str) -> (String, Vec<Span>) {
-    let mut text = String::with_capacity(line.len());
-    let mut spans: Vec<Span> = Vec::new();
-    let mut style = SgrStyle::default();
-    let mut column = 0usize;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                Some('[') => {
-                    let mut params = String::new();
-                    for p in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&p) {
-                            if p == 'm' {
-                                apply_sgr(&mut style, &params);
-                            }
-                            break;
-                        }
-                        params.push(p);
-                    }
-                }
-                // OSC: up to BEL or ST (ESC \).
-                Some(']') => {
-                    while let Some(p) = chars.next() {
-                        if p == '\x07' || (p == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\t' => {
-                let pad = TAB.saturating_sub(column % TAB);
-                push(&mut text, &mut spans, style, &" ".repeat(pad));
-                column = column.saturating_add(pad);
-            }
-            c if c.is_control() => {}
-            c => {
-                let mut buf = [0u8; 4];
-                push(&mut text, &mut spans, style, c.encode_utf8(&mut buf));
-                column = column.saturating_add(1);
-            }
-        }
-    }
-    (text, spans)
+    let mut collector = Collector {
+        text: String::with_capacity(line.len()),
+        ..Collector::default()
+    };
+    let mut parser: Processor = Processor::new();
+    parser.advance(&mut collector, line.as_bytes());
+    (collector.text, collector.spans)
 }
 
-fn push(text: &mut String, spans: &mut Vec<Span>, style: SgrStyle, s: &str) {
-    let start = u32::try_from(text.len()).unwrap_or(u32::MAX);
-    text.push_str(s);
-    let end = u32::try_from(text.len()).unwrap_or(u32::MAX);
-    if style.is_plain() {
-        return;
-    }
-    match spans.last_mut() {
-        Some(last) if last.end == start && last.style == style => last.end = end,
-        _ => spans.push(Span { start, end, style }),
+/// Receives `vte`'s decoded output for one line.
+#[derive(Default)]
+struct Collector {
+    text: String,
+    spans: Vec<Span>,
+    style: SgrStyle,
+    column: usize,
+}
+
+impl Collector {
+    fn push(&mut self, s: &str) {
+        let start = u32::try_from(self.text.len()).unwrap_or(u32::MAX);
+        self.text.push_str(s);
+        let end = u32::try_from(self.text.len()).unwrap_or(u32::MAX);
+        if self.style.is_plain() {
+            return;
+        }
+        match self.spans.last_mut() {
+            Some(last) if last.end == start && last.style == self.style => last.end = end,
+            _ => self.spans.push(Span {
+                start,
+                end,
+                style: self.style,
+            }),
+        }
     }
 }
 
-fn apply_sgr(style: &mut SgrStyle, params: &str) {
-    let mut codes = params.split([';', ':']).map(|p| {
-        if p.is_empty() {
-            Some(0)
-        } else {
-            p.parse::<u16>().ok()
+impl Handler for Collector {
+    fn input(&mut self, c: char) {
+        let mut buf = [0u8; 4];
+        self.push(c.encode_utf8(&mut buf));
+        self.column = self.column.saturating_add(1);
+    }
+
+    fn put_tab(&mut self, count: u16) {
+        for _ in 0..count {
+            let pad = TAB.saturating_sub(self.column % TAB);
+            self.push(&" ".repeat(pad));
+            self.column = self.column.saturating_add(pad);
         }
-    });
-    while let Some(code) = codes.next() {
-        let Some(code) = code else { return };
-        match code {
-            0 => *style = SgrStyle::default(),
-            1 => style.bold = true,
-            2 => style.dim = true,
-            3 => style.italic = true,
-            4 => style.underline = true,
-            22 => (style.bold, style.dim) = (false, false),
-            23 => style.italic = false,
-            24 => style.underline = false,
-            30..=37 => style.fg = indexed(code, 30),
-            90..=97 => style.fg = indexed(code, 82),
-            40..=47 => style.bg = indexed(code, 40),
-            100..=107 => style.bg = indexed(code, 92),
-            39 => style.fg = None,
-            49 => style.bg = None,
-            38 => style.fg = extended(&mut codes),
-            48 => style.bg = extended(&mut codes),
+    }
+
+    fn terminal_attribute(&mut self, attr: Attr) {
+        let style = &mut self.style;
+        match attr {
+            Attr::Reset => *style = SgrStyle::default(),
+            Attr::Bold => style.bold = true,
+            Attr::Dim => style.dim = true,
+            Attr::Italic => style.italic = true,
+            Attr::Underline
+            | Attr::DoubleUnderline
+            | Attr::Undercurl
+            | Attr::DottedUnderline
+            | Attr::DashedUnderline => style.underline = true,
+            Attr::CancelBold => style.bold = false,
+            Attr::CancelBoldDim => (style.bold, style.dim) = (false, false),
+            Attr::CancelItalic => style.italic = false,
+            Attr::CancelUnderline => style.underline = false,
+            Attr::Foreground(color) => style.fg = sgr_color(color),
+            Attr::Background(color) => style.bg = sgr_color(color),
             _ => {}
         }
-    }
-}
-
-fn indexed(code: u16, base: u16) -> Option<AnsiColor> {
-    u8::try_from(code.checked_sub(base)?)
-        .ok()
-        .map(AnsiColor::Indexed)
-}
-
-/// `5;n` (256-colour) or `2;r;g;b` (truecolour) after a 38/48.
-fn extended(codes: &mut impl Iterator<Item = Option<u16>>) -> Option<AnsiColor> {
-    let mut next = || codes.next().flatten().and_then(|v| u8::try_from(v).ok());
-    match next()? {
-        5 => next().map(AnsiColor::Indexed),
-        2 => Some(AnsiColor::Rgb(next()?, next()?, next()?)),
-        _ => None,
     }
 }
 
@@ -219,6 +189,16 @@ mod tests {
         let (text, spans) = parse("\x1b]0;title\x07a\x1b[2Kb\r\x1b]8;;x\x1b\\c\x01");
         assert_eq!(text, "abc");
         assert_eq!(spans.len(), 0);
+    }
+
+    #[test]
+    fn default_colour_and_underline_variants() {
+        let (text, spans) = parse("\x1b[31ma\x1b[39mb\x1b[4:3mc\x1b[24md");
+        assert_eq!(text, "abcd");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].range(), 0..1);
+        assert_eq!(spans[1].range(), 2..3);
+        assert!(spans[1].style.underline);
     }
 
     #[test]

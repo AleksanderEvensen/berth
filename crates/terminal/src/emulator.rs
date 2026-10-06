@@ -61,18 +61,20 @@ pub enum CellColor {
 
 fn map_color(color: Color) -> CellColor {
     match color {
-        Color::Spec(Rgb { r, g, b }) => CellColor::Ansi(AnsiColor::Rgb(r, g, b)),
-        Color::Indexed(ix) => CellColor::Ansi(AnsiColor::Indexed(ix)),
-        Color::Named(named) => named_index(named).map_or_else(
-            || {
-                if named == NamedColor::Background {
-                    CellColor::Background
-                } else {
-                    CellColor::Foreground
-                }
-            },
-            |ix| CellColor::Ansi(AnsiColor::Indexed(ix)),
-        ),
+        Color::Named(NamedColor::Background) => CellColor::Background,
+        color => sgr_color(color).map_or(CellColor::Foreground, CellColor::Ansi),
+    }
+}
+
+/// A parsed SGR colour as an [`AnsiColor`]; `None` for the default
+/// foreground/background. Shared with the log view so both resolve colours
+/// the same way.
+#[must_use]
+pub fn sgr_color(color: Color) -> Option<AnsiColor> {
+    match color {
+        Color::Spec(Rgb { r, g, b }) => Some(AnsiColor::Rgb(r, g, b)),
+        Color::Indexed(ix) => Some(AnsiColor::Indexed(ix)),
+        Color::Named(named) => named_index(named).map(AnsiColor::Indexed),
     }
 }
 
