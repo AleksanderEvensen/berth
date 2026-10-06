@@ -55,3 +55,13 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 strip = "symbols"
+
+# CI checks correctness without paying for interactive performance or debug info.
+# Use the same profile for Clippy, builds, and tests to share compilation artifacts.
+[profile.ci]
+inherits = "dev"
+debug = 0
+incremental = false
+
+[profile.ci.package."*"]
+opt-level = 0
