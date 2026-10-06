@@ -3,7 +3,8 @@
 //! Reads the [`Store`]; lifecycle actions go through it, destructive ones are
 //! confirmed first via a [`ConfirmRequest`] that the shell presents.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack};
@@ -14,8 +15,9 @@ use berth_ui::{
     status_dot,
 };
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, Render,
-    SharedString, Subscription, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent,
+    ListAlignment, ListState, Render, SharedString, Subscription, Window, div, list, prelude::*,
+    px,
 };
 use gpui_base::input::{InputEvent, InputState};
 
@@ -24,6 +26,15 @@ use crate::dialogs::ConfirmRequest;
 use crate::store::{Connection, Op, Store};
 
 const TABS: [&str; 5] = ["Info", "Stats", "Logs", "Terminal", "Files"];
+
+/// One line of the (virtualized) container list. Descriptors only: rows are
+/// built from the store when they scroll into view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Row {
+    Section { running: bool, count: usize },
+    Stack { project: String },
+    Container { id: String, depth: usize },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Selection {
@@ -43,6 +54,12 @@ pub struct ContainersScreen {
     header_inset: f32,
     left_radius: f32,
     right_radius: f32,
+    list_state: ListState,
+    rows: Vec<Row>,
+    /// Compose project → member container ids, in service order.
+    stack_members: HashMap<String, Vec<String>>,
+    /// Container id → index into the store's container list.
+    index: HashMap<String, usize>,
 }
 
 impl EventEmitter<ConfirmRequest> for ContainersScreen {}
@@ -64,7 +81,105 @@ impl ContainersScreen {
             header_inset: 0.0,
             left_radius: 0.0,
             right_radius: 0.0,
+            list_state: ListState::new(0, ListAlignment::Top, px(400.0)),
+            rows: Vec::new(),
+            stack_members: HashMap::new(),
+            index: HashMap::new(),
         }
+    }
+
+    /// Rebuild row descriptors from the current tree and splice only the
+    /// changed range into the list state, so the scroll position survives
+    /// containers moving between sections.
+    fn sync_rows(&mut self, tree: &ContainerTree<'_>, store: &Store) {
+        let mut rows = Vec::new();
+        let mut stack_members = HashMap::new();
+        for (running, nodes) in [(true, &tree.running), (false, &tree.stopped)] {
+            if nodes.is_empty() {
+                continue;
+            }
+            let count = if running {
+                tree.running_container_count()
+            } else {
+                0
+            };
+            rows.push(Row::Section { running, count });
+            for node in nodes {
+                match node {
+                    Node::Container(c) => rows.push(Row::Container {
+                        id: c.id.clone(),
+                        depth: 0,
+                    }),
+                    Node::Stack(stack) => {
+                        let project = stack.project.to_string();
+                        let members: Vec<String> =
+                            stack.containers.iter().map(|c| c.id.clone()).collect();
+                        rows.push(Row::Stack {
+                            project: project.clone(),
+                        });
+                        let expanded = !self.query.is_empty() || !self.collapsed.contains(&project);
+                        if expanded {
+                            rows.extend(members.iter().map(|id| Row::Container {
+                                id: id.clone(),
+                                depth: 1,
+                            }));
+                        }
+                        stack_members.insert(project, members);
+                    }
+                }
+            }
+        }
+        if let Some((range, count)) = splice_range(&self.rows, &rows) {
+            self.list_state.splice(range, count);
+        }
+        self.rows = rows;
+        self.stack_members = stack_members;
+        self.index = store
+            .containers()
+            .iter()
+            .enumerate()
+            .map(|(ix, c)| (c.id.clone(), ix))
+            .collect();
+    }
+
+    fn render_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
+        let store = self.store.read(cx);
+        let containers = store.containers();
+        let lookup = |id: &String| self.index.get(id).and_then(|&ix| containers.get(ix));
+        let row = match self.rows.get(ix) {
+            None => return div().into_any_element(),
+            Some(Row::Section {
+                running: true,
+                count,
+            }) => SectionLabel::new("Running")
+                .count(*count)
+                .into_any_element(),
+            Some(Row::Section { running: false, .. }) => {
+                SectionLabel::new("Stopped").into_any_element()
+            }
+            Some(Row::Stack { project }) => {
+                let stack = Stack {
+                    project,
+                    containers: self
+                        .stack_members
+                        .get(project)
+                        .map(|ids| ids.iter().filter_map(lookup).collect())
+                        .unwrap_or_default(),
+                };
+                let expanded = !self.query.is_empty() || !self.collapsed.contains(project);
+                self.stack_row(store, &stack, expanded, cx)
+                    .into_any_element()
+            }
+            Some(Row::Container { id, depth }) => lookup(id).map_or_else(
+                || div().into_any_element(),
+                |c| self.container_row(store, c, *depth, cx).into_any_element(),
+            ),
+        };
+        div()
+            .px(px(Theme::SPACE_SM))
+            .pb(px(2.0))
+            .child(row)
+            .into_any_element()
     }
 
     /// Layout facts owned by the shell: clearance for the floating sidebar
@@ -161,24 +276,6 @@ impl ContainersScreen {
         let theme = Theme::of(cx);
         let running = tree.running_container_count();
 
-        let mut rows: Vec<AnyElement> = Vec::new();
-        if !tree.running.is_empty() {
-            rows.push(
-                SectionLabel::new("Running")
-                    .count(running)
-                    .into_any_element(),
-            );
-            for node in &tree.running {
-                self.push_node(store, node, &mut rows, cx);
-            }
-        }
-        if !tree.stopped.is_empty() {
-            rows.push(SectionLabel::new("Stopped").into_any_element());
-            for node in &tree.stopped {
-                self.push_node(store, node, &mut rows, cx);
-            }
-        }
-
         let subtitle = match store.connection() {
             Connection::Connecting => "Connecting…".to_string(),
             Connection::Disconnected { .. } => "Not connected".to_string(),
@@ -201,21 +298,17 @@ impl ContainersScreen {
             )
             .action(IconButton::new("new-container", icons::PLUS));
 
-        let body: AnyElement = if rows.is_empty() {
+        let body: AnyElement = if self.rows.is_empty() {
             self.render_list_placeholder(store, cx)
         } else {
-            div()
-                .id("container-list")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px(px(Theme::SPACE_SM))
-                .pb(px(Theme::SPACE_MD))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .children(rows)
-                .into_any_element()
+            list(
+                self.list_state.clone(),
+                cx.processor(|this, ix: usize, _, cx| this.render_row(ix, cx)),
+            )
+            .flex_1()
+            .min_h_0()
+            .pb(px(Theme::SPACE_MD))
+            .into_any_element()
         };
 
         div()
@@ -307,30 +400,6 @@ impl ContainersScreen {
                     "Run a container or `docker compose up` and it shows up here.".into(),
                 ))
                 .into_any_element(),
-        }
-    }
-
-    fn push_node(
-        &self,
-        store: &Store,
-        node: &Node<'_>,
-        rows: &mut Vec<AnyElement>,
-        cx: &Context<Self>,
-    ) {
-        match node {
-            Node::Container(c) => rows.push(self.container_row(store, c, 0, cx).into_any_element()),
-            Node::Stack(stack) => {
-                let expanded = !self.query.is_empty() || !self.collapsed.contains(stack.project);
-                rows.push(
-                    self.stack_row(store, stack, expanded, cx)
-                        .into_any_element(),
-                );
-                if expanded {
-                    for c in &stack.containers {
-                        rows.push(self.container_row(store, c, 1, cx).into_any_element());
-                    }
-                }
-            }
         }
     }
 
@@ -598,10 +667,34 @@ impl Render for ContainersScreen {
             &filtered
         };
         let tree = ContainerTree::build(containers);
+        let store = self.store.clone();
+        let store = store.read(cx);
+        self.sync_rows(&tree, store);
         let list = self.render_list(store, &tree, cx).into_any_element();
         let detail = self.render_detail(store, &tree, cx).into_any_element();
         div().size_full().flex().child(list).child(detail)
     }
+}
+
+/// The minimal splice turning `old` into `new`: the changed middle between
+/// the common prefix and suffix. `None` when nothing changed.
+fn splice_range(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
+    if old == new {
+        return None;
+    }
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()).saturating_sub(prefix);
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    Some((
+        prefix..old.len().saturating_sub(suffix),
+        new.len().saturating_sub(prefix).saturating_sub(suffix),
+    ))
 }
 
 /// Case-insensitive match on name, image, compose project and service.
@@ -845,7 +938,41 @@ fn stack_info(stack: &Stack<'_>, theme: &Theme) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::image_name;
+    use super::{Row, image_name, splice_range};
+
+    fn c(id: &str) -> Row {
+        Row::Container {
+            id: id.into(),
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn splice_covers_only_the_changed_middle() {
+        let old = [c("a"), c("b"), c("c"), c("d")];
+        assert_eq!(splice_range(&old, &old), None);
+        // b moves out: one row removed at index 1.
+        assert_eq!(
+            splice_range(&old, &[c("a"), c("c"), c("d")]),
+            Some((1..2, 0))
+        );
+        // Insert in the middle.
+        assert_eq!(
+            splice_range(&old, &[c("a"), c("b"), c("x"), c("c"), c("d")]),
+            Some((2..2, 1))
+        );
+        // Replace everything.
+        assert_eq!(splice_range(&old, &[c("x")]), Some((0..4, 1)));
+        // From empty.
+        assert_eq!(splice_range(&[], &[c("a")]), Some((0..0, 1)));
+    }
+
+    #[test]
+    fn splice_handles_repeated_rows_without_overlap() {
+        // Prefix and suffix must not double-count the shared element.
+        let old = [c("a"), c("a")];
+        assert_eq!(splice_range(&old, &[c("a")]), Some((1..2, 0)));
+    }
 
     #[test]
     fn image_names() {
