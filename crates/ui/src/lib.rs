@@ -3,6 +3,7 @@
 //! Behaviour-heavy primitives (inputs, popovers, virtual lists) come from
 //! `gpui-base`; everything visible is styled here from [`Theme`] tokens.
 
+pub mod ansi;
 mod assets;
 pub mod components;
 pub mod theme;

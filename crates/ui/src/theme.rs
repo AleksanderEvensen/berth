@@ -66,6 +66,10 @@ pub struct Theme {
     /// Dims the window behind a modal.
     pub scrim: Hsla,
 
+    /// ANSI 0–15 for logs and the terminal: black, red, green, yellow, blue,
+    /// magenta, cyan, white, then the bright variants.
+    pub ansi: [Hsla; 16],
+
     pub font_sans: SharedString,
     pub font_mono: SharedString,
 }
@@ -131,6 +135,24 @@ impl Theme {
             danger_wash: oklch(0.704, 0.191, 22.216).opacity(0.14),
             danger_strong: oklch(0.58, 0.16, 25.0),
             scrim: hsla(0.0, 0.0, 0.0, 0.60),
+            ansi: [
+                neutral(0.37),
+                oklch(0.704, 0.191, 22.216),
+                oklch(0.792, 0.209, 151.711),
+                oklch(0.852, 0.199, 91.936),
+                oklch(0.707, 0.165, 254.624),
+                oklch(0.714, 0.203, 305.504),
+                oklch(0.789, 0.154, 211.53),
+                neutral(0.87),
+                neutral(0.556),
+                oklch(0.808, 0.114, 19.571),
+                oklch(0.871, 0.15, 154.449),
+                oklch(0.905, 0.182, 98.111),
+                oklch(0.809, 0.105, 251.813),
+                oklch(0.827, 0.119, 306.383),
+                oklch(0.865, 0.127, 207.078),
+                neutral(0.985),
+            ],
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
         }
@@ -168,6 +190,24 @@ impl Theme {
             danger_wash: oklch(0.577, 0.245, 27.325).opacity(0.10),
             danger_strong: oklch(0.577, 0.245, 27.325),
             scrim: hsla(0.0, 0.0, 0.0, 0.28),
+            ansi: [
+                neutral(0.205),
+                oklch(0.577, 0.245, 27.325),
+                oklch(0.527, 0.154, 150.069),
+                oklch(0.554, 0.135, 66.442),
+                oklch(0.546, 0.245, 262.881),
+                oklch(0.558, 0.288, 302.321),
+                oklch(0.52, 0.105, 223.128),
+                neutral(0.556),
+                neutral(0.439),
+                oklch(0.505, 0.213, 27.518),
+                oklch(0.448, 0.119, 151.328),
+                oklch(0.476, 0.114, 61.907),
+                oklch(0.488, 0.243, 264.376),
+                oklch(0.496, 0.265, 301.924),
+                oklch(0.45, 0.085, 224.283),
+                neutral(0.708),
+            ],
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
         }
@@ -242,7 +282,7 @@ fn gamma_encode(x: f32) -> f32 {
     clippy::float_cmp,
     reason = "identify the channel that supplied the maximum"
 )]
-fn rgb_to_hsl(red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_hsl(red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
     let max = red.max(green).max(blue);
     let min = red.min(green).min(blue);
     let lightness = f32::midpoint(max, min);

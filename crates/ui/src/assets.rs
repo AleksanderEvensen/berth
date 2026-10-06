@@ -70,6 +70,8 @@ icon_assets![
     (SPINNER, "spinner"),
     (CHECK, "check"),
     (DANGER, "danger-circle"),
+    (CLOCK, "clock-circle"),
+    (ARROW_DOWN, "arrow-down"),
 ];
 
 const FONTS: &[&[u8]] = &[

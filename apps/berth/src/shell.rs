@@ -131,11 +131,14 @@ impl Shell {
 
     fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
         self.route = route;
+        self.containers.update(cx, |screen, cx| {
+            screen.set_visible(route == Route::Containers, cx);
+        });
         cx.notify();
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.route = Route::Containers;
+        self.navigate(Route::Containers, cx);
         self.containers
             .update(cx, |screen, cx| screen.open_search(window, cx));
     }

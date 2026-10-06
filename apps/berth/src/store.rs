@@ -103,6 +103,11 @@ impl Store {
         }
     }
 
+    /// The connected engine, for views that open their own streams.
+    pub fn engine(&self) -> Option<Arc<dyn Engine>> {
+        self.engine.clone()
+    }
+
     pub const fn connection(&self) -> &Connection {
         &self.connection
     }

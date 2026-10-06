@@ -4,6 +4,7 @@ members = [
     "apps/berth",
     "crates/ui",
     "crates/docker",
+    "crates/terminal",
 ]
 
 [workspace.package]
@@ -32,6 +33,7 @@ as_conversions = "deny"
 [workspace.dependencies]
 berth-ui = { path = "crates/ui" }
 berth-docker = { path = "crates/docker" }
+berth-terminal = { path = "crates/terminal" }
 
 # gpui — the published `gpui-pre` snapshot of zed, which is what GPUI Kit's
 # `gpui-base` is built against. Keep these three versions in lockstep.
@@ -45,6 +47,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = 
 # everything ourselves — see docs/plan/04-design-system.md.
 gpui-base = "=0.7.1"
 
+alacritty_terminal = "0.26"
 anyhow = "1"
 futures = "0.3"
 thiserror = "2"
@@ -59,6 +62,7 @@ log = "0.4"
 bollard = { version = "=0.19.4", features = ["ssl", "chrono"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+num-traits = "0.2"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

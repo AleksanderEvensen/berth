@@ -1,0 +1,16 @@
+[package]
+name = "berth-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Embedded terminal: alacritty_terminal's grid + a gpui element that paints it.
+# Engine-agnostic: callers feed output bytes in and take input bytes out.
+[dependencies]
+berth-ui.workspace = true
+gpui.workspace = true
+alacritty_terminal.workspace = true
+
+[lints]
+workspace = true

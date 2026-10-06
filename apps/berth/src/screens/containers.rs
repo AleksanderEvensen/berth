@@ -21,6 +21,7 @@ use gpui_base::input::{InputEvent, InputState};
 
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
+use crate::live::{Live, LiveKey, LiveTab};
 use crate::store::{Connection, Op, Store};
 use crate::virtual_rows::VirtualRows;
 
@@ -58,6 +59,10 @@ pub struct ContainersScreen {
     stack_members: HashMap<String, Vec<String>>,
     /// Container id → index into the store's container list.
     index: HashMap<String, usize>,
+    /// The open Stats/Logs/Terminal view, streaming only while shown.
+    live: Live,
+    /// Whether the shell is showing this screen.
+    visible: bool,
 }
 
 impl EventEmitter<ConfirmRequest> for ContainersScreen {}
@@ -82,7 +87,42 @@ impl ContainersScreen {
             rows: VirtualRows::new(),
             stack_members: HashMap::new(),
             index: HashMap::new(),
+            live: Live::default(),
+            visible: true,
         }
+    }
+
+    /// The shell shows or hides this screen; live streams stop while hidden.
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible != visible {
+            self.visible = visible;
+            // A hidden screen doesn't render, so close the stream here.
+            if !visible {
+                self.live = Live::default();
+            }
+            cx.notify();
+        }
+    }
+
+    /// The live view the current state calls for, if any.
+    fn live_key(&self, store: &Store) -> Option<LiveKey> {
+        let tab = match self.tab {
+            1 => LiveTab::Stats,
+            2 => LiveTab::Logs,
+            3 => LiveTab::Terminal,
+            _ => return None,
+        };
+        let Some(Selection::Container(id)) = self.selection.as_ref().filter(|_| self.visible)
+        else {
+            return None;
+        };
+        let container = store.containers().iter().find(|c| &c.id == id)?;
+        Some(LiveKey {
+            tab,
+            container: id.clone(),
+            running: container.state == ContainerState::Running,
+            engine: store.engine()?,
+        })
     }
 
     /// Rebuild row descriptors from the current tree and splice only the
@@ -604,21 +644,13 @@ impl ContainersScreen {
                     |stack| scroll_page(stack_info(stack, theme)).into_any_element(),
                 )
             }
-            (Some(_), tab) => {
-                let (title, detail) = match tab {
-                    1 => (
-                        "Stats",
-                        "Live CPU, memory, network and disk graphs land in M3.",
-                    ),
-                    2 => ("Logs", "Streaming, searchable logs land in M3."),
-                    3 => (
-                        "Terminal",
-                        "An interactive shell into the container lands in M3.",
-                    ),
-                    _ => ("Files", "Browsing the container filesystem is planned."),
-                };
-                empty_state(title, detail, theme).into_any_element()
-            }
+            (Some(selection), tab) => self.live.view().map_or_else(
+                || {
+                    let (title, detail) = live_placeholder(selection, tab, store);
+                    empty_state(title, detail, theme).into_any_element()
+                },
+                gpui::AnyView::into_any_element,
+            ),
         };
 
         div()
@@ -646,7 +678,11 @@ impl ContainersScreen {
 }
 
 impl Render for ContainersScreen {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let want = self.live_key(self.store.read(cx));
+        let mut live = std::mem::take(&mut self.live);
+        live.sync(want, window, cx);
+        self.live = live;
         let store = self.store.read(cx);
         let filtered: Vec<Container>;
         let containers = if self.query.is_empty() {
@@ -667,6 +703,35 @@ impl Render for ContainersScreen {
         let list = self.render_list(store, &tree, cx).into_any_element();
         let detail = self.render_detail(store, &tree, cx).into_any_element();
         div().size_full().flex().child(list).child(detail)
+    }
+}
+
+/// Why a live tab shows nothing: stacks have no single stream, stopped
+/// containers have nothing to sample or exec into.
+fn live_placeholder(selection: &Selection, tab: usize, store: &Store) -> (&'static str, String) {
+    let paused = match selection {
+        Selection::Stack(_) => None,
+        Selection::Container(id) => store
+            .containers()
+            .iter()
+            .find(|c| &c.id == id)
+            .map(|c| c.state == ContainerState::Paused),
+    };
+    match (tab, paused) {
+        (4, _) => (
+            "Files",
+            "Browsing the container filesystem is planned.".into(),
+        ),
+        (_, None) if matches!(selection, Selection::Stack(_)) => (
+            TABS.get(tab).copied().unwrap_or_default(),
+            "Select a container in the stack to see this.".into(),
+        ),
+        (_, Some(true)) => ("Paused", "Unpause the container to continue.".into()),
+        (_, Some(false)) => (
+            "Not running",
+            "Start the container to see live usage or open a shell.".into(),
+        ),
+        _ => ("Not connected", "Waiting for the engine…".into()),
     }
 }
 

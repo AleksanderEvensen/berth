@@ -3,6 +3,7 @@
 
 mod button;
 mod card;
+mod chart;
 mod feedback;
 mod field;
 mod list;
@@ -11,6 +12,7 @@ mod tabs;
 
 pub use button::*;
 pub use card::*;
+pub use chart::*;
 pub use feedback::*;
 pub use field::*;
 pub use list::*;

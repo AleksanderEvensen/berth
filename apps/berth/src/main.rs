@@ -1,6 +1,7 @@
 mod chrome;
 mod dialogs;
 mod format;
+mod live;
 mod screens;
 mod selection;
 mod shell;
@@ -70,7 +71,8 @@ fn main() {
 }
 
 /// How the store obtains an engine. `BERTH_FIXTURES=1` runs on in-memory
-/// fixture data (`BERTH_FIXTURE_LATENCY_MS` simulates a slow engine);
+/// fixture data (`BERTH_FIXTURE_LATENCY_MS` simulates a slow engine,
+/// `BERTH_FIXTURE_LOG_LINES` sets per-container log history, e.g. 1000000);
 /// otherwise each connect discovers the endpoint (`DOCKER_HOST`, Docker
 /// context, default sockets) and opens a live client.
 fn connector() -> Connector {
@@ -79,10 +81,15 @@ fn connector() -> Connector {
             .ok()
             .and_then(|ms| ms.parse().ok())
             .unwrap_or(600);
+        let log_lines = std::env::var("BERTH_FIXTURE_LOG_LINES")
+            .ok()
+            .and_then(|n| n.parse().ok());
         return Arc::new(move || {
-            Ok(Arc::new(
-                FixtureEngine::default().with_latency(Duration::from_millis(latency)),
-            ))
+            let engine = FixtureEngine::default().with_latency(Duration::from_millis(latency));
+            Ok(Arc::new(match log_lines {
+                Some(lines) => engine.with_log_history_lines(lines),
+                None => engine,
+            }))
         });
     }
     Arc::new(|| {
