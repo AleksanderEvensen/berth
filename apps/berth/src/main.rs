@@ -14,7 +14,7 @@ use gpui::{
     WindowOptions, px, size,
 };
 
-use shell::{Quit, Shell, ToggleSidebar};
+use shell::{FocusSearch, Quit, Shell, ToggleSidebar};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -28,6 +28,8 @@ fn main() {
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
+                KeyBinding::new("ctrl-f", FocusSearch, None),
+                KeyBinding::new("cmd-f", FocusSearch, None),
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("enter", dialogs::Confirm, Some(dialogs::CONFIRM_CONTEXT)),

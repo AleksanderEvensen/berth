@@ -18,7 +18,7 @@ use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
 use crate::store::{Connection, Store, StoreEvent};
 use crate::{chrome, screens::containers::ContainersScreen};
 
-actions!(berth, [ToggleSidebar, Quit]);
+actions!(berth, [ToggleSidebar, FocusSearch, Quit]);
 
 /// Space the floating sidebar toggle occupies in the list header when the
 /// sidebar is collapsed.
@@ -79,6 +79,11 @@ impl Shell {
             toasts: Vec::new(),
             next_toast_id: 0,
         }
+    }
+
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.containers
+            .update(cx, |screen, cx| screen.open_search(window, cx));
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -314,6 +319,7 @@ impl Render for Shell {
             .track_focus(&self.focus)
             .key_context("Shell")
             .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::focus_search))
             .relative()
             .size_full()
             .flex()

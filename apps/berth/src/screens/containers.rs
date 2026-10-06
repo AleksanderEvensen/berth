@@ -7,15 +7,17 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack};
+use berth_ui::SearchField;
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
     ResourceRow, SectionLabel, SegmentedTabs, Spinner, Status, Theme, empty_state, icon, icons,
     status_dot,
 };
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString,
-    Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
+use gpui_base::input::{InputEvent, InputState};
 
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
@@ -35,6 +37,9 @@ pub struct ContainersScreen {
     collapsed: HashSet<String>,
     selection: Option<Selection>,
     tab: usize,
+    search: Option<(Entity<InputState>, Subscription)>,
+    /// Lower-cased, trimmed search query; empty = no filter.
+    query: String,
     header_inset: f32,
     left_radius: f32,
     right_radius: f32,
@@ -54,6 +59,8 @@ impl ContainersScreen {
             collapsed: HashSet::new(),
             selection: None,
             tab: 0,
+            search: None,
+            query: String::new(),
             header_inset: 0.0,
             left_radius: 0.0,
             right_radius: 0.0,
@@ -69,6 +76,36 @@ impl ContainersScreen {
             self.right_radius = right;
             cx.notify();
         }
+    }
+
+    /// Show (or refocus) the search field.
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder("Filter containers"));
+            let subscription = cx.subscribe_in(
+                &state,
+                window,
+                |this, state, event: &InputEvent, _, cx| match event {
+                    InputEvent::Change => {
+                        this.query = state.read(cx).value().trim().to_lowercase();
+                        cx.notify();
+                    }
+                    InputEvent::Blur if this.query.is_empty() => this.close_search(cx),
+                    _ => {}
+                },
+            );
+            self.search = Some((state, subscription));
+        }
+        if let Some((state, _)) = &self.search {
+            state.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.search = None;
+        self.query.clear();
+        cx.notify();
     }
 
     fn drop_stale_selection(&mut self, containers: &[Container]) {
@@ -151,7 +188,17 @@ impl ContainersScreen {
         let header = ListHeader::new("Containers")
             .subtitle(subtitle)
             .leading_inset(self.header_inset)
-            .action(IconButton::new("search", icons::SEARCH))
+            .action(
+                IconButton::new("search", icons::SEARCH)
+                    .active(self.search.is_some())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.search.is_some() {
+                            this.close_search(cx)
+                        } else {
+                            this.open_search(window, cx)
+                        }
+                    })),
+            )
             .action(IconButton::new("new-container", icons::PLUS));
 
         let body: AnyElement = if rows.is_empty() {
@@ -183,6 +230,26 @@ impl ContainersScreen {
             .border_r_1()
             .border_color(theme.border)
             .child(chrome::drag_region("list-titlebar", div().child(header)))
+            .when_some(self.search.as_ref(), |d, (state, _)| {
+                d.child(
+                    div()
+                        .px(px(Theme::SPACE_SM + 2.0))
+                        .pb(px(Theme::SPACE_XS))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            if event.keystroke.key == "escape" {
+                                cx.stop_propagation();
+                                this.close_search(cx);
+                            }
+                        }))
+                        .child(SearchField::new(state).on_clear(cx.listener(
+                            |this, _, window, cx| {
+                                if let Some((state, _)) = &this.search {
+                                    state.update(cx, |state, cx| state.set_value("", window, cx));
+                                }
+                            },
+                        ))),
+                )
+            })
             .child(body)
     }
 
@@ -227,6 +294,13 @@ impl ContainersScreen {
                     })),
                 ))
                 .into_any_element(),
+            Connection::Connected(_) if !self.query.is_empty() => column
+                .child(title("No matches"))
+                .child(detail(format!(
+                    "Nothing matches “{}” by name, image or project.",
+                    self.query
+                )))
+                .into_any_element(),
             Connection::Connected(_) => column
                 .child(title("No containers"))
                 .child(detail(
@@ -246,7 +320,7 @@ impl ContainersScreen {
         match node {
             Node::Container(c) => rows.push(self.container_row(store, c, 0, cx).into_any_element()),
             Node::Stack(stack) => {
-                let expanded = !self.collapsed.contains(stack.project);
+                let expanded = !self.query.is_empty() || !self.collapsed.contains(stack.project);
                 rows.push(
                     self.stack_row(store, stack, expanded, cx)
                         .into_any_element(),
@@ -515,11 +589,34 @@ impl ContainersScreen {
 impl Render for ContainersScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
-        let tree = ContainerTree::build(store.containers());
+        let filtered: Vec<Container>;
+        let containers = if self.query.is_empty() {
+            store.containers()
+        } else {
+            filtered = store
+                .containers()
+                .iter()
+                .filter(|c| matches_query(c, &self.query))
+                .cloned()
+                .collect();
+            &filtered
+        };
+        let tree = ContainerTree::build(containers);
         let list = self.render_list(store, &tree, cx).into_any_element();
         let detail = self.render_detail(store, &tree, cx).into_any_element();
         div().size_full().flex().child(list).child(detail)
     }
+}
+
+/// Case-insensitive match on name, image, compose project and service.
+/// `query` is already lower-cased.
+fn matches_query(c: &Container, query: &str) -> bool {
+    let hit = |s: &str| s.to_lowercase().contains(query);
+    hit(&c.name)
+        || hit(&c.image)
+        || c.compose
+            .as_ref()
+            .is_some_and(|cr| hit(&cr.project) || hit(&cr.service))
 }
 
 fn lifecycle_button(key: &str, active: bool) -> IconButton {
