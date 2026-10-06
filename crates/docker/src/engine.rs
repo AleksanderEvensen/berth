@@ -12,7 +12,9 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
@@ -134,6 +136,160 @@ pub enum EventAction {
     Other(String),
 }
 
+/// Which output stream a log line came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogStream {
+    Stdout,
+    Stderr,
+}
+
+/// One line of container output.
+///
+/// For non-TTY containers the engine multiplexes stdout and stderr into
+/// frames; implementations demultiplex them and reassemble lines that span
+/// frames. TTY containers have a single combined stream, reported as
+/// [`LogStream::Stdout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub stream: LogStream,
+    /// Unix time in nanoseconds, as stamped by the engine. `None` if the
+    /// engine sent no (or an unparseable) timestamp.
+    pub timestamp: Option<i64>,
+    /// Text without the trailing `\n` (or `\r\n`). Invalid UTF-8 is replaced
+    /// lossily. ANSI escape sequences are passed through untouched.
+    pub line: String,
+}
+
+/// What to fetch from a container's log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogOptions {
+    /// Keep the stream open and deliver new lines as they are written.
+    /// Without it the stream ends after the existing log.
+    pub follow: bool,
+    /// Only the last `n` existing lines; `None` = the whole log.
+    pub tail: Option<u32>,
+    /// Only lines written at or after this unix time (seconds).
+    pub since: Option<i64>,
+}
+
+impl Default for LogOptions {
+    /// Follow, starting from the last 1 000 lines.
+    fn default() -> Self {
+        Self {
+            follow: true,
+            tail: Some(1000),
+            since: None,
+        }
+    }
+}
+
+/// One resource-usage sample, about once a second while streaming.
+///
+/// Network and block I/O are cumulative counters since the container
+/// started; consumers derive rates from consecutive samples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatsSample {
+    /// Unix time in nanoseconds when the engine took the sample.
+    pub time_nanos: i64,
+    /// Computed as the Docker CLI does: `Δcontainer_cpu / Δsystem_cpu ×
+    /// online_cpus × 100`, so a container using two full cores reads 200.
+    /// `0.0` when there is no previous reading to diff against.
+    pub cpu_percent: f64,
+    /// CPUs available to the container; `cpu_percent` tops out at
+    /// `online_cpus × 100`.
+    pub online_cpus: u32,
+    /// Memory in use excluding page cache (Docker CLI semantics:
+    /// `usage − inactive_file`).
+    pub mem_used: u64,
+    /// The cgroup memory limit, or host memory if unlimited.
+    pub mem_limit: u64,
+    /// Bytes received/sent, summed over all interfaces.
+    pub net_rx: u64,
+    pub net_tx: u64,
+    /// Bytes read/written by block devices.
+    pub blk_read: u64,
+    pub blk_write: u64,
+}
+
+/// Terminal size in character cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TtySize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A process to run inside a container, attached to a TTY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOptions {
+    /// Program and arguments. See [`ExecOptions::shell`].
+    pub cmd: Vec<String>,
+    /// Extra `KEY=value` pairs on top of the container's environment.
+    pub env: Vec<String>,
+    /// Defaults to the container's working directory.
+    pub working_dir: Option<String>,
+    /// Defaults to the container's user.
+    pub user: Option<String>,
+    /// Initial TTY size, applied before any output is produced.
+    pub size: TtySize,
+}
+
+impl ExecOptions {
+    /// An interactive login shell: the first available of `bash`, `sh` (B8).
+    #[must_use]
+    pub fn shell(size: TtySize) -> Self {
+        let pick = "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi";
+        Self {
+            cmd: vec!["/bin/sh".into(), "-c".into(), pick.into()],
+            env: vec!["TERM=xterm-256color".into(), "COLORTERM=truecolor".into()],
+            working_dir: None,
+            user: None,
+            size,
+        }
+    }
+}
+
+/// Resizes the TTY of a running exec. Cheap to clone and non-blocking:
+/// implementations coalesce bursts so only the latest size is sent.
+#[derive(Clone)]
+pub struct TtyResizer(Arc<dyn Fn(TtySize) + Send + Sync>);
+
+impl TtyResizer {
+    pub fn new(resize: impl Fn(TtySize) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(resize))
+    }
+
+    pub fn resize(&self, size: TtySize) {
+        (self.0)(size);
+    }
+}
+
+impl fmt::Debug for TtyResizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TtyResizer")
+    }
+}
+
+/// A running exec with a TTY.
+///
+/// Dropping `stdout` cancels the session: the engine-side task stops and
+/// the process loses its terminal. Dropping `stdin` sends EOF.
+pub struct ExecSession {
+    /// Raw bytes to the process (keystrokes, pastes). Bounded: a full
+    /// channel applies backpressure to the sender.
+    pub stdin: mpsc::Sender<Vec<u8>>,
+    /// Raw TTY output (stdout and stderr combined, as a TTY does). Chunks
+    /// are arbitrary; they may split UTF-8 and escape sequences. The stream
+    /// ends when the process exits.
+    pub stdout: BoxStream<'static, EngineResult<Vec<u8>>>,
+    pub resizer: TtyResizer,
+}
+
+impl fmt::Debug for ExecSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExecSession").finish_non_exhaustive()
+    }
+}
+
 /// Why connecting to an engine failed — specific enough to show a fix.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectError {
@@ -211,4 +367,21 @@ pub trait Engine: Send + Sync + 'static {
     /// Live change notifications. The stream ends on disconnect; the caller
     /// resyncs and resubscribes.
     fn events(&self) -> BoxStream<'static, EngineResult<EngineEvent>>;
+
+    // Live views (M3). Streams are produced on bounded channels, so a slow
+    // consumer slows the producer rather than growing memory; dropping a
+    // stream cancels its engine-side work.
+
+    /// A container's log. With `follow` the stream stays open until the
+    /// container stops or the stream is dropped. Unknown containers yield
+    /// a single [`EngineError::NotFound`].
+    fn logs(&self, id: &str, options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>>;
+
+    /// Resource usage samples for a running container until it stops or the
+    /// stream is dropped.
+    fn stats(&self, id: &str) -> BoxStream<'static, EngineResult<StatsSample>>;
+
+    /// Start `options.cmd` in a running container with a TTY attached.
+    fn exec(&self, id: &str, options: ExecOptions)
+    -> BoxFuture<'static, EngineResult<ExecSession>>;
 }

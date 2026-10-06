@@ -24,7 +24,8 @@ use tokio::task::AbortHandle;
 
 use crate::{
     ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
-    EngineEvent, EngineInfo, EngineResult, Image, ImagePrune, PruneReport, RemoveOptions, Volume,
+    EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, Image, ImagePrune, LogLine,
+    LogOptions, PruneReport, RemoveOptions, StatsSample, Volume,
 };
 
 /// A live engine whose Tokio work never depends on the caller's executor.
@@ -471,6 +472,27 @@ impl Engine for BollardEngine {
             _task: AbortOnDrop(task.abort_handle()),
         }
         .boxed()
+    }
+
+    // M3 stubs: replaced by the real implementations.
+    fn logs(&self, _id: &str, _options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>> {
+        futures::stream::once(async { Err(EngineError::Transport("logs: not implemented".into())) })
+            .boxed()
+    }
+
+    fn stats(&self, _id: &str) -> BoxStream<'static, EngineResult<StatsSample>> {
+        futures::stream::once(async {
+            Err(EngineError::Transport("stats: not implemented".into()))
+        })
+        .boxed()
+    }
+
+    fn exec(
+        &self,
+        _id: &str,
+        _options: ExecOptions,
+    ) -> BoxFuture<'static, EngineResult<ExecSession>> {
+        async { Err(EngineError::Transport("exec: not implemented".into())) }.boxed()
     }
 }
 

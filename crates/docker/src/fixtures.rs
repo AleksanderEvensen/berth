@@ -11,8 +11,9 @@ use futures::{FutureExt as _, StreamExt as _};
 
 use crate::{
     ComposeRef, Container, ContainerAction, ContainerState, DiskUsage, Endpoint, Engine,
-    EngineError, EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, Image, ImagePrune,
-    Mount, MountKind, ObjectKind, PortBinding, Protocol, PruneReport, RemoveOptions, Volume,
+    EngineError, EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, ExecOptions,
+    ExecSession, Image, ImagePrune, LogLine, LogOptions, Mount, MountKind, ObjectKind, PortBinding,
+    Protocol, PruneReport, RemoveOptions, StatsSample, Volume,
 };
 
 fn port(host: u16, container: u16) -> PortBinding {
@@ -857,6 +858,27 @@ impl Engine for FixtureEngine {
         let (tx, rx) = mpsc::unbounded();
         self.with_state(|s| s.subscribers.push(tx));
         rx.boxed()
+    }
+
+    // M3 stubs: replaced by the real implementations.
+    fn logs(&self, _id: &str, _options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>> {
+        futures::stream::once(async { Err(EngineError::Transport("logs: not implemented".into())) })
+            .boxed()
+    }
+
+    fn stats(&self, _id: &str) -> BoxStream<'static, EngineResult<StatsSample>> {
+        futures::stream::once(async {
+            Err(EngineError::Transport("stats: not implemented".into()))
+        })
+        .boxed()
+    }
+
+    fn exec(
+        &self,
+        _id: &str,
+        _options: ExecOptions,
+    ) -> BoxFuture<'static, EngineResult<ExecSession>> {
+        async { Err(EngineError::Transport("exec: not implemented".into())) }.boxed()
     }
 }
 
