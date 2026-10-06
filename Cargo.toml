@@ -57,7 +57,7 @@ log = "0.4"
 # Retain the /system/df wire shape used by Docker 23–28 and Podman.
 # Docker 29 still returns these fields; Bollard 0.20+ uses incompatible stubs.
 bollard = { version = "=0.19.4", features = ["ssl", "chrono"] }
-tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }

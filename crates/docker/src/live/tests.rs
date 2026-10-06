@@ -9,9 +9,9 @@ use std::sync::{
 
 /// Small HTTP daemon substitute: verifies the public trait without Docker or
 /// a Tokio context on the test thread, including actions and stream EOF.
-struct TestServer {
-    endpoint: Endpoint,
-    requests: Arc<Mutex<Vec<String>>>,
+pub(super) struct TestServer {
+    pub(super) endpoint: Endpoint,
+    pub(super) requests: Arc<Mutex<Vec<String>>>,
     stopping: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -19,7 +19,7 @@ trait ReadWrite: std::io::Read + std::io::Write {}
 impl<T: std::io::Read + std::io::Write> ReadWrite for T {}
 
 impl TestServer {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_tls(None)
     }
 

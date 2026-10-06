@@ -438,7 +438,7 @@ struct FixtureState {
     volumes: Vec<Volume>,
     networks: Vec<String>,
     build_cache: Vec<(String, u64, bool)>,
-    subscribers: Vec<mpsc::UnboundedSender<EngineResult<EngineEvent>>>,
+    subscribers: Vec<mpsc::Sender<EngineResult<EngineEvent>>>,
 }
 
 impl FixtureState {
@@ -456,7 +456,7 @@ impl FixtureState {
             time_nanos: 0,
         };
         self.subscribers
-            .retain(|tx| tx.unbounded_send(Ok(event.clone())).is_ok());
+            .retain_mut(|tx| tx.try_send(Ok(event.clone())).is_ok());
     }
 }
 
@@ -858,7 +858,9 @@ impl Engine for FixtureEngine {
     }
 
     fn events(&self) -> BoxStream<'static, EngineResult<EngineEvent>> {
-        let (tx, rx) = mpsc::unbounded();
+        // Overflow closes this subscription so consumers can resync rather
+        // than retaining an unbounded event backlog or missing events silently.
+        let (tx, rx) = mpsc::channel(64);
         self.with_state(|s| s.subscribers.push(tx));
         rx.boxed()
     }
