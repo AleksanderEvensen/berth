@@ -4,6 +4,7 @@
 //! thread. All [`Engine`] futures and streams can then run on any executor.
 //! Dropping a result cancels its task; dropping the engine cancels remaining
 //! work and shuts down the runtime without joining its threads.
+mod m3;
 mod mapping;
 mod tls;
 
@@ -474,25 +475,20 @@ impl Engine for BollardEngine {
         .boxed()
     }
 
-    // M3 stubs: replaced by the real implementations.
-    fn logs(&self, _id: &str, _options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>> {
-        futures::stream::once(async { Err(EngineError::Transport("logs: not implemented".into())) })
-            .boxed()
+    fn logs(&self, id: &str, options: LogOptions) -> BoxStream<'static, EngineResult<LogLine>> {
+        self.live_logs(id, options)
     }
 
-    fn stats(&self, _id: &str) -> BoxStream<'static, EngineResult<StatsSample>> {
-        futures::stream::once(async {
-            Err(EngineError::Transport("stats: not implemented".into()))
-        })
-        .boxed()
+    fn stats(&self, id: &str) -> BoxStream<'static, EngineResult<StatsSample>> {
+        self.live_stats(id)
     }
 
     fn exec(
         &self,
-        _id: &str,
-        _options: ExecOptions,
+        id: &str,
+        options: ExecOptions,
     ) -> BoxFuture<'static, EngineResult<ExecSession>> {
-        async { Err(EngineError::Transport("exec: not implemented".into())) }.boxed()
+        self.live_exec(id, options)
     }
 }
 
