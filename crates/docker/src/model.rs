@@ -143,8 +143,111 @@ impl Container {
     }
 }
 
+/// A locally stored image, including references from stopped containers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    pub id: String,
+    pub repo_tags: Vec<String>,
+    pub size: u64,
+    pub created: i64,
+    /// Containers (running or not) using this image; unknown if not reported.
+    pub containers: Option<u32>,
+    /// Sorted by key.
+    pub labels: Vec<(String, String)>,
+}
+
+impl Image {
+    #[must_use]
+    pub const fn is_dangling(&self) -> bool {
+        self.repo_tags.is_empty()
+    }
+
+    #[must_use]
+    pub fn short_id(&self) -> &str {
+        let id = self.id.strip_prefix("sha256:").unwrap_or(&self.id);
+        id.get(..id.floor_char_boundary(id.len().min(12)))
+            .unwrap_or(id)
+    }
+
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        self.repo_tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.short_id().to_owned())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Volume {
+    pub name: String,
+    pub driver: String,
+    pub mountpoint: String,
+    /// RFC3339 creation time reported by the engine.
+    pub created: Option<String>,
+    pub labels: Vec<(String, String)>,
+    /// From `/system/df`; unknown until disk usage is fetched.
+    pub size: Option<u64>,
+    /// Containers referencing this volume; unknown if not reported.
+    pub ref_count: Option<u32>,
+}
+
+impl Volume {
+    #[must_use]
+    pub fn compose_project(&self) -> Option<&str> {
+        self.labels
+            .iter()
+            .find(|(key, _)| key == "com.docker.compose.project")
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskUsage {
+    pub images: Vec<Image>,
+    pub volumes: Vec<Volume>,
+    pub build_cache_bytes: u64,
+    pub build_cache_reclaimable_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    pub deleted: Vec<String>,
+    pub reclaimed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImagePrune {
+    Dangling,
+    AllUnused,
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_names_and_volume_projects() {
+        let mut image = crate::fixtures::images().into_iter().next().unwrap();
+        assert!(!image.is_dangling());
+        assert_eq!(image.display_name(), *image.repo_tags.first().unwrap());
+        image.repo_tags.clear();
+        image.id = "sha256:0123456789abcdef".into();
+        assert!(image.is_dangling());
+        assert_eq!(image.short_id(), "0123456789ab");
+        assert_eq!(image.display_name(), "0123456789ab");
+        for (id, expected) in [
+            ("sha256:abc", "abc"),
+            ("", ""),
+            ("sha256:01234567890é", "01234567890"),
+        ] {
+            image.id = id.into();
+            assert_eq!(image.short_id(), expected);
+        }
+        let mut volume = crate::fixtures::volumes().into_iter().next().unwrap();
+        assert_eq!(volume.compose_project(), Some("tihlde-voting"));
+        volume.labels.clear();
+        assert_eq!(volume.compose_project(), None);
+    }
+
     #[test]
     fn short_ids_preserve_utf8_boundaries() {
         let mut container = crate::fixtures::containers().into_iter().next().unwrap();

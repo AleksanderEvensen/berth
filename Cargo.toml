@@ -54,7 +54,9 @@ sha2 = "0.10"
 tempfile = "3"
 env_logger = "0.11"
 log = "0.4"
-bollard = { version = "0.21.1", features = ["ssl", "chrono"] }
+# Retain the /system/df wire shape used by Docker 23–28 and Podman.
+# Docker 29 still returns these fields; Bollard 0.20+ uses incompatible stubs.
+bollard = { version = "=0.19.4", features = ["ssl", "chrono"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
