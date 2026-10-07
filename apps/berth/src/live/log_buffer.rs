@@ -12,7 +12,7 @@ use berth_docker::{LogLine, LogStream};
 
 use aho_corasick::AhoCorasick;
 
-use super::ansi::{self, Span};
+use super::ansi::{self, SgrStyle, Span};
 
 pub const CAPACITY: usize = 1_000_000;
 
@@ -27,8 +27,11 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
-    pub fn new(line: &LogLine) -> Self {
-        let (text, spans) = ansi::parse(&line.line);
+    /// `style` is the SGR state its stream ended the previous line in; it is
+    /// updated, since colours set on one line carry over to the next.
+    pub fn new(line: &LogLine, style: &mut SgrStyle) -> Self {
+        let (text, spans, end) = ansi::parse(&line.line, *style);
+        *style = end;
         Self {
             stream: line.stream,
             timestamp: line.timestamp,
@@ -40,8 +43,41 @@ impl LogEntry {
 
 struct Filter {
     needle: Needle,
-    /// Sequence numbers of matching entries, ascending.
+    /// Matches among the history present when the filter was set, found by
+    /// [`LogBuffer::scan`] in bounded steps; ascending.
     matches: VecDeque<u64>,
+    /// Matches among lines pushed since; ascending, all ≥ `scan_end`.
+    live: VecDeque<u64>,
+    /// Next history entry to check, and where history ends.
+    scan_from: u64,
+    scan_end: u64,
+}
+
+impl Filter {
+    fn len(&self) -> usize {
+        self.matches.len().saturating_add(self.live.len())
+    }
+
+    fn get(&self, ix: usize) -> Option<u64> {
+        ix.checked_sub(self.matches.len()).map_or_else(
+            || self.matches.get(ix).copied(),
+            |live| self.live.get(live).copied(),
+        )
+    }
+
+    /// Drop the match for `seq` if it is the oldest; returns whether it was.
+    fn evict(&mut self, seq: u64) -> bool {
+        let list = if self.matches.is_empty() {
+            &mut self.live
+        } else {
+            &mut self.matches
+        };
+        let hit = list.front() == Some(&seq);
+        if hit {
+            list.pop_front();
+        }
+        hit
+    }
 }
 
 pub struct LogBuffer {
@@ -62,23 +98,27 @@ impl LogBuffer {
         }
     }
 
-    pub fn push(&mut self, entry: LogEntry) {
+    /// Append a line, evicting the oldest at capacity. Returns whether the
+    /// evicted line was shown, i.e. every shown row moved up by one.
+    pub fn push(&mut self, entry: LogEntry) -> bool {
+        let mut evicted_shown = false;
         if self.entries.len() >= self.capacity.max(1) {
             self.entries.pop_front();
+            let evicted = self.first_seq;
             self.first_seq = self.first_seq.saturating_add(1);
+            evicted_shown = self.filter.as_mut().is_none_or(|f| f.evict(evicted));
             if let Some(filter) = &mut self.filter {
-                while filter.matches.front().is_some_and(|&s| s < self.first_seq) {
-                    filter.matches.pop_front();
-                }
+                filter.scan_from = filter.scan_from.max(self.first_seq);
             }
         }
         let seq = self.next_seq();
         if let Some(filter) = &mut self.filter
             && filter.needle.is_match(&entry.text)
         {
-            filter.matches.push_back(seq);
+            filter.live.push_back(seq);
         }
         self.entries.push_back(entry);
+        evicted_shown
     }
 
     fn next_seq(&self) -> u64 {
@@ -91,6 +131,9 @@ impl LogBuffer {
         self.entries.clear();
         if let Some(filter) = &mut self.filter {
             filter.matches.clear();
+            filter.live.clear();
+            filter.scan_from = self.first_seq;
+            filter.scan_end = self.first_seq;
         }
     }
 
@@ -100,21 +143,48 @@ impl LogBuffer {
     }
 
     /// Show only lines containing `query` (case-insensitive); empty clears.
-    /// Rescans the whole buffer, so callers debounce keystrokes.
+    /// The existing history is checked by [`Self::scan`], so a million lines
+    /// never block the UI in one go; new lines are checked as they arrive.
     pub fn set_filter(&mut self, query: &str) {
-        let Some(needle) = Needle::new(query) else {
-            self.filter = None;
-            return;
+        self.filter = Needle::new(query).map(|needle| Filter {
+            needle,
+            matches: VecDeque::new(),
+            live: VecDeque::new(),
+            scan_from: self.first_seq,
+            scan_end: self.next_seq(),
+        });
+    }
+
+    /// Check up to `budget` history lines against the filter. Returns
+    /// `true` once the history is fully scanned (or there is no filter).
+    pub fn scan(&mut self, budget: usize) -> bool {
+        let Some(filter) = &mut self.filter else {
+            return true;
         };
-        let first = self.first_seq;
-        let matches = self
+        let start =
+            usize::try_from(filter.scan_from.saturating_sub(self.first_seq)).unwrap_or(usize::MAX);
+        let end = usize::try_from(filter.scan_end.saturating_sub(self.first_seq))
+            .unwrap_or(usize::MAX)
+            .min(self.entries.len());
+        let stop = start.saturating_add(budget).min(end);
+        for (entry, seq) in self
             .entries
-            .iter()
-            .zip(first..)
-            .filter(|(entry, _)| needle.is_match(&entry.text))
-            .map(|(_, seq)| seq)
-            .collect();
-        self.filter = Some(Filter { needle, matches });
+            .range(start.min(stop)..stop)
+            .zip(filter.scan_from..)
+        {
+            if filter.needle.is_match(&entry.text) {
+                filter.matches.push_back(seq);
+            }
+        }
+        let checked = u64::try_from(stop.saturating_sub(start)).unwrap_or(u64::MAX);
+        filter.scan_from = filter.scan_from.saturating_add(checked);
+        filter.scan_from >= filter.scan_end
+    }
+
+    pub fn scanning(&self) -> bool {
+        self.filter
+            .as_ref()
+            .is_some_and(|f| f.scan_from < f.scan_end)
     }
 
     pub fn needle(&self) -> Option<&Needle> {
@@ -123,9 +193,7 @@ impl LogBuffer {
 
     /// Lines currently shown (after the filter).
     pub fn len(&self) -> usize {
-        self.filter
-            .as_ref()
-            .map_or(self.entries.len(), |f| f.matches.len())
+        self.filter.as_ref().map_or(self.entries.len(), Filter::len)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -137,7 +205,7 @@ impl LogBuffer {
         let offset = match &self.filter {
             None => ix,
             Some(filter) => {
-                let seq = *filter.matches.get(ix)?;
+                let seq = filter.get(ix)?;
                 usize::try_from(seq.checked_sub(self.first_seq)?).ok()?
             }
         };
@@ -203,11 +271,19 @@ mod tests {
     use super::*;
 
     fn entry(text: &str) -> LogEntry {
-        LogEntry::new(&LogLine {
-            stream: LogStream::Stdout,
-            timestamp: None,
-            line: text.into(),
-        })
+        LogEntry::new(
+            &LogLine {
+                stream: LogStream::Stdout,
+                timestamp: None,
+                line: text.into(),
+            },
+            &mut SgrStyle::default(),
+        )
+    }
+
+    fn filter(buffer: &mut LogBuffer, query: &str) {
+        buffer.set_filter(query);
+        assert!(buffer.scan(usize::MAX));
     }
 
     fn shown(buffer: &LogBuffer) -> Vec<String> {
@@ -230,14 +306,14 @@ mod tests {
         for text in ["GET /a", "post /b", "GET /c"] {
             buffer.push(entry(text));
         }
-        buffer.set_filter("get");
+        filter(&mut buffer, "get");
         assert_eq!(shown(&buffer), ["GET /a", "GET /c"]);
         buffer.push(entry("get /d"));
         buffer.push(entry("noise"));
         // "GET /a" was evicted.
         assert_eq!(shown(&buffer), ["GET /c", "get /d"]);
         assert_eq!(buffer.total(), 4);
-        buffer.set_filter("");
+        filter(&mut buffer, "");
         assert_eq!(buffer.len(), 4);
     }
 
@@ -245,9 +321,9 @@ mod tests {
     fn filter_ignores_escape_codes() {
         let mut buffer = LogBuffer::new(10);
         buffer.push(entry("\x1b[32mINFO\x1b[0m ok"));
-        buffer.set_filter("32m");
+        filter(&mut buffer, "32m");
         assert_eq!(buffer.len(), 0);
-        buffer.set_filter("info ok");
+        filter(&mut buffer, "info ok");
         assert_eq!(buffer.len(), 1);
     }
 
@@ -255,7 +331,7 @@ mod tests {
     fn clear_keeps_the_filter_active() {
         let mut buffer = LogBuffer::new(10);
         buffer.push(entry("a"));
-        buffer.set_filter("a");
+        filter(&mut buffer, "a");
         buffer.clear();
         assert_eq!(buffer.len(), 0);
         buffer.push(entry("ab"));
@@ -275,6 +351,36 @@ mod tests {
     }
 
     #[test]
+    fn chunked_scan_interleaves_with_new_lines() {
+        let mut buffer = LogBuffer::new(100);
+        for n in 0..10 {
+            buffer.push(entry(&format!("hit {n}")));
+        }
+        buffer.set_filter("hit");
+        assert!(buffer.scanning());
+        assert!(!buffer.scan(4));
+        buffer.push(entry("hit new"));
+        assert_eq!(buffer.len(), 5, "4 scanned + 1 live");
+        assert!(buffer.scan(100));
+        assert!(!buffer.scanning());
+        let shown: Vec<_> = buffer.shown().map(|e| e.text.to_string()).collect();
+        assert_eq!(shown.first().map(String::as_str), Some("hit 0"));
+        assert_eq!(shown.last().map(String::as_str), Some("hit new"));
+        assert_eq!(shown.len(), 11);
+    }
+
+    #[test]
+    fn push_reports_evicting_a_shown_row() {
+        let mut buffer = LogBuffer::new(2);
+        assert!(!buffer.push(entry("a")));
+        assert!(!buffer.push(entry("b")));
+        assert!(buffer.push(entry("c")), "unfiltered: every row is shown");
+        filter(&mut buffer, "c");
+        assert!(!buffer.push(entry("d")), "evicted b wasn't shown");
+        assert!(buffer.push(entry("e")), "evicted c was shown");
+    }
+
+    #[test]
     fn holds_a_million_lines() {
         let mut buffer = LogBuffer::new(CAPACITY);
         for n in 0..CAPACITY + 10 {
@@ -290,7 +396,7 @@ mod tests {
             });
         }
         assert_eq!(buffer.total(), CAPACITY);
-        buffer.set_filter("hit");
+        filter(&mut buffer, "hit");
         assert_eq!(buffer.len(), 1000);
     }
 }

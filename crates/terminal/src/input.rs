@@ -96,7 +96,12 @@ fn control_bytes(key: &str) -> Option<Vec<u8>> {
 /// one sequence that could break out of a bracketed paste is stripped.
 #[must_use]
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let sanitized = text.replace("\x1b[201~", "");
+    // Repeat until stable: removing one terminator can splice a new one
+    // together (`\x1b[20\x1b[201~1~`).
+    let mut sanitized = text.to_owned();
+    while sanitized.contains("\x1b[201~") {
+        sanitized = sanitized.replace("\x1b[201~", "");
+    }
     if bracketed {
         let mut out = b"\x1b[200~".to_vec();
         out.extend_from_slice(sanitized.as_bytes());
@@ -178,6 +183,10 @@ mod tests {
         assert_eq!(
             paste_bytes("a\x1b[201~b", true),
             b"\x1b[200~ab\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            paste_bytes("\x1b[20\x1b[201~1~\necho injected\n", true),
+            b"\x1b[200~\necho injected\n\x1b[201~".to_vec()
         );
     }
 }

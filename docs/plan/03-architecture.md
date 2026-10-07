@@ -97,10 +97,12 @@ This is lifted from how zeron does it (`crates/ui/src/lib.rs`, `shell.rs`
 On failure, the UI shows the disconnected state with the specific reason
 (missing socket vs EACCES) and remediation text.
 
-TLS endpoints use Bollard's own rustls transport (`connect_with_ssl`): mutual
-TLS with `cert.pem`/`key.pem`, the daemon verified against `ca.pem`. Docker
-contexts with `SkipTLSVerify` are rejected with an explanatory error, since
-Bollard has no unverified mode and we don't maintain our own TLS code.
+TLS endpoints use rustls through Bollard's custom-transport hook: mutual TLS
+with `cert.pem`/`key.pem`, the daemon verified against `ca.pem` *only*, like
+the Docker CLI. (Bollard's `connect_with_ssl` also trusts the public web
+roots, so a publicly-issued certificate for the daemon's name would pass.)
+Docker contexts with `SkipTLSVerify` are rejected with an explanatory error;
+we don't maintain a custom certificate verifier.
 
 ## Testing
 - `berth-docker` fixtures power both unit tests of grouping/sorting logic and

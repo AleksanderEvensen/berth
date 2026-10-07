@@ -18,15 +18,21 @@ futures-timer.workspace = true
 bollard = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+hyper-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The integration tests' direct client may need TLS for a tcp:// DOCKER_HOST.
+bollard = { workspace = true, features = ["ssl"] }
 tempfile.workspace = true
 mockito.workspace = true
 
 [features]
 default = ["live"]
-live = ["dep:bollard", "dep:tokio", "dep:tokio-util", "dep:chrono"]
+live = ["dep:bollard", "dep:tokio", "dep:tokio-util", "dep:chrono", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types"]
 
 [lints]
 workspace = true

@@ -298,3 +298,88 @@ fn live_exec_shell_echo_initial_size_resize_and_exit() {
 
 #[cfg(unix)]
 mod cancellation;
+
+#[test]
+#[ignore = "requires a real engine and a throwaway alpine container"]
+fn live_logs_join_long_records_and_keep_a_tty_final_fragment() {
+    let endpoint = endpoint().unwrap();
+    let engine = BollardEngine::connect(&endpoint).unwrap();
+    let (runtime, docker) = test_client(&endpoint).unwrap();
+    ensure_test_image(&runtime, &docker).unwrap();
+    // Docker splits lines over 16 KiB into records, each with a timestamp.
+    let long = test_container_name().unwrap();
+    let _long = Cleanup {
+        runtime: &runtime,
+        docker: &docker,
+        name: long.clone(),
+    };
+    let id = create(
+        &runtime,
+        &docker,
+        &long,
+        "head -c 40000 /dev/zero | tr '\\0' x; printf '\\nshort\\n'",
+    );
+    timed(
+        &runtime,
+        engine.container_action(&id, ContainerAction::Start),
+    )
+    .unwrap();
+    timed(&runtime, async {
+        while docker
+            .inspect_container(&id, None::<query::InspectContainerOptions>)
+            .await
+            .ok()
+            .and_then(|c| c.state)
+            .and_then(|s| s.running)
+            .unwrap_or(false)
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    let lines = logs(&runtime, engine.logs(&id, options(false, None)));
+    assert_eq!(
+        lines.len(),
+        2,
+        "{:?}",
+        lines.iter().map(|l| l.line.len()).collect::<Vec<_>>()
+    );
+    assert_eq!(lines[0].line, "x".repeat(40_000));
+    assert_eq!(lines[1].line, "short");
+
+    // A TTY container whose last output has no newline.
+    let tty = test_container_name().unwrap();
+    let _tty = Cleanup {
+        runtime: &runtime,
+        docker: &docker,
+        name: tty.clone(),
+    };
+    let id = runtime
+        .block_on(docker.create_container(
+            Some(query::CreateContainerOptions {
+                name: Some(tty),
+                ..Default::default()
+            }),
+            ContainerCreateBody {
+                image: Some("alpine:latest".into()),
+                tty: Some(true),
+                cmd: Some(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf 'line\\npartial'".into(),
+                ]),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .id;
+    timed(
+        &runtime,
+        engine.container_action(&id, ContainerAction::Start),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let stream = engine.logs(&id, options(false, None));
+    let items: Vec<_> = timed(&runtime, stream.collect::<Vec<_>>());
+    assert!(items.iter().all(Result::is_ok), "{items:?}");
+    assert_eq!(items[0].as_ref().unwrap().line, "line");
+}

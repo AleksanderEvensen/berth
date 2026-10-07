@@ -27,6 +27,8 @@ const ROW_HEIGHT: f32 = 18.0;
 const BATCH: usize = 4096;
 const FRAME: Duration = Duration::from_millis(16);
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(120);
+/// History lines checked per frame while a new filter is applied.
+const FILTER_SLICE: usize = 25_000;
 /// History requested when the tab opens.
 const TAIL: u32 = 10_000;
 
@@ -42,6 +44,8 @@ pub struct LogsView {
     /// Pinned to the newest line; scrolling up pauses it.
     follow: bool,
     timestamps: bool,
+    /// SGR state each stream (stdout, stderr) ended its last line in.
+    styles: [SgrStyle; 2],
     search: Entity<InputState>,
     state: StreamState,
     _search: Subscription,
@@ -74,6 +78,7 @@ impl LogsView {
             scroll: UniformListScrollHandle::new(),
             follow: true,
             timestamps: false,
+            styles: [SgrStyle::default(); 2],
             search,
             state: StreamState::Streaming,
             _search: subscription,
@@ -102,14 +107,33 @@ impl LogsView {
     }
 
     fn append(&mut self, batch: Vec<berth_docker::EngineResult<LogLine>>, cx: &mut Context<Self>) {
+        let mut evicted = 0u32;
         for item in batch {
             match item {
-                Ok(line) => self.buffer.push(LogEntry::new(&line)),
+                Ok(line) => {
+                    let style = match line.stream {
+                        LogStream::Stdout => &mut self.styles[0],
+                        LogStream::Stderr => &mut self.styles[1],
+                    };
+                    if self.buffer.push(LogEntry::new(&line, style)) {
+                        evicted = evicted.saturating_add(1);
+                    }
+                }
                 Err(err) => self.state = StreamState::Failed(err.to_string()),
             }
         }
         if self.follow {
             self.scroll.scroll_to_bottom();
+        } else if evicted > 0 {
+            // Rows moved up as the oldest were evicted: keep the same lines
+            // under the reader instead of drifting with new output.
+            let handle = &self.scroll.0.borrow().base_handle;
+            let offset = handle.offset();
+            let shift = f32::from(u16::try_from(evicted).unwrap_or(u16::MAX)) * ROW_HEIGHT;
+            handle.set_offset(gpui::point(
+                offset.x,
+                px((f32::from(offset.y) + shift).min(0.0)),
+            ));
         }
         cx.notify();
     }
@@ -117,13 +141,31 @@ impl LogsView {
     fn schedule_filter(&mut self, query: String, cx: &Context<Self>) {
         self.filter_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(FILTER_DEBOUNCE).await;
-            this.update(cx, |view, cx| {
+            let started = this.update(cx, |view, cx| {
                 view.buffer.set_filter(&query);
                 view.follow = true;
                 view.scroll.scroll_to_bottom();
                 cx.notify();
-            })
-            .ok();
+            });
+            if started.is_err() {
+                return;
+            }
+            // Scan the history a slice at a time so typing and rendering
+            // stay responsive over a million lines.
+            loop {
+                let done = this.update(cx, |view, cx| {
+                    let done = view.buffer.scan(FILTER_SLICE);
+                    if view.follow {
+                        view.scroll.scroll_to_bottom();
+                    }
+                    cx.notify();
+                    done
+                });
+                if done.unwrap_or(true) {
+                    return;
+                }
+                cx.background_executor().timer(FRAME).await;
+            }
         }));
     }
 
@@ -173,6 +215,7 @@ impl LogsView {
     fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         let status = match &self.state {
+            _ if self.buffer.scanning() => format!("Filtering… {}", count_label(&self.buffer)),
             StreamState::Streaming => count_label(&self.buffer),
             StreamState::Ended => format!("{} · ended", count_label(&self.buffer)),
             StreamState::Failed(err) => err.clone(),

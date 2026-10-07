@@ -14,6 +14,10 @@ pub(super) const fn after_since(line: &LogLine, since: Option<i64>) -> bool {
     }
 }
 
+/// Longest line kept whole. A process writing without newlines can't make
+/// the assembler buffer without bound; longer runs are emitted in pieces.
+const MAX_LINE: usize = 256 * 1024;
+
 #[derive(Default)]
 struct Pending {
     bytes: Vec<u8>,
@@ -26,10 +30,18 @@ pub(super) struct Assembler {
     sequence: u64,
 }
 impl Assembler {
-    pub(super) fn push(&mut self, stream: LogStream, bytes: &[u8]) -> Vec<LogLine> {
+    /// Feed one chunk of output. `record` marks a multiplexed frame, which
+    /// Docker writes per log record: when it continues a partial line (Docker
+    /// splits long lines into 16 KiB records), its own timestamp is dropped.
+    pub(super) fn push(&mut self, stream: LogStream, bytes: &[u8], record: bool) -> Vec<LogLine> {
         let pending = match stream {
             LogStream::Stdout => &mut self.stdout,
             LogStream::Stderr => &mut self.stderr,
+        };
+        let bytes = if record && !pending.bytes.is_empty() {
+            strip_timestamp(bytes)
+        } else {
+            bytes
         };
         let mut lines = Vec::new();
         for part in bytes.split_inclusive(|byte| *byte == b'\n') {
@@ -40,6 +52,8 @@ impl Assembler {
             pending.bytes.extend_from_slice(part);
             if pending.bytes.last() == Some(&b'\n') {
                 pending.bytes.pop();
+                lines.push(line(stream, std::mem::take(&mut pending.bytes)));
+            } else if pending.bytes.len() >= MAX_LINE {
                 lines.push(line(stream, std::mem::take(&mut pending.bytes)));
             }
         }
@@ -58,32 +72,34 @@ impl Assembler {
             .collect()
     }
 }
+/// Split Docker's `<RFC3339Nano> ` prefix off a record. `Some(None)` is a
+/// timestamp-shaped prefix that doesn't parse (dropped all the same).
+fn split_timestamp(bytes: &[u8]) -> Option<(Option<i64>, &[u8])> {
+    let space = bytes.iter().take(64).position(|b| *b == b' ')?;
+    let (prefix, rest) = (bytes.get(..space)?, bytes.get(space.saturating_add(1)..)?);
+    let shaped = prefix.get(4) == Some(&b'-')
+        && prefix.get(7) == Some(&b'-')
+        && prefix.get(10) == Some(&b'T');
+    let timestamp = std::str::from_utf8(prefix)
+        .ok()
+        .and_then(|p| chrono::DateTime::parse_from_rfc3339(p).ok())
+        .and_then(|time| time.timestamp_nanos_opt());
+    (timestamp.is_some() || shaped).then_some((timestamp, rest))
+}
+
+fn strip_timestamp(bytes: &[u8]) -> &[u8] {
+    split_timestamp(bytes).map_or(bytes, |(_, rest)| rest)
+}
+
 fn line(stream: LogStream, mut bytes: Vec<u8>) -> LogLine {
     if bytes.last() == Some(&b'\r') {
         bytes.pop();
     }
-    let text = String::from_utf8_lossy(&bytes);
-    let (timestamp, text) = text.split_once(' ').map_or_else(
-        || (None, text.as_ref()),
-        |(prefix, rest)| {
-            let timestamp = chrono::DateTime::parse_from_rfc3339(prefix)
-                .ok()
-                .and_then(|time| time.timestamp_nanos_opt());
-            if timestamp.is_some()
-                || (prefix.as_bytes().get(4) == Some(&b'-')
-                    && prefix.as_bytes().get(7) == Some(&b'-')
-                    && prefix.as_bytes().get(10) == Some(&b'T'))
-            {
-                (timestamp, rest)
-            } else {
-                (None, text.as_ref())
-            }
-        },
-    );
+    let (timestamp, text) = split_timestamp(&bytes).unwrap_or((None, &bytes));
     LogLine {
         stream,
         timestamp,
-        line: text.into(),
+        line: String::from_utf8_lossy(text).into_owned(),
     }
 }
 
@@ -91,13 +107,45 @@ fn line(stream: LogStream, mut bytes: Vec<u8>) -> LogLine {
 mod tests {
     use super::*;
     #[test]
+    fn continuation_records_drop_their_timestamp() {
+        let mut a = Assembler::default();
+        assert_eq!(
+            a.push(LogStream::Stdout, b"2026-10-06T12:00:00Z abc", true),
+            []
+        );
+        let lines = a.push(LogStream::Stdout, b"2026-10-06T12:00:00.5Z def\n", true);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].line, "abcdef");
+        assert_eq!(lines[0].timestamp, Some(1_791_288_000_000_000_000));
+        // TTY output isn't record-framed: a mid-line timestamp is text.
+        a.push(LogStream::Stdout, b"x ", false);
+        let lines = a.push(LogStream::Stdout, b"2026-10-06T12:00:00Z y\n", false);
+        assert_eq!(lines[0].line, "x 2026-10-06T12:00:00Z y");
+    }
+    #[test]
+    fn unterminated_output_is_emitted_in_bounded_pieces() {
+        let mut a = Assembler::default();
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut emitted = Vec::new();
+        for _ in 0..10 {
+            emitted.extend(a.push(LogStream::Stdout, &chunk, false));
+        }
+        assert_eq!(emitted.len(), 2);
+        assert!(emitted.iter().all(|l| l.line.len() == MAX_LINE));
+        assert_eq!(a.finish()[0].line.len(), 2 * 64 * 1024);
+    }
+    #[test]
     fn partial_frames_multiline_crlf_and_independent_streams() {
         let mut a = Assembler::default();
         assert_eq!(
-            a.push(LogStream::Stdout, b"2026-10-06T12:00:00.123456789Z hel"),
+            a.push(
+                LogStream::Stdout,
+                b"2026-10-06T12:00:00.123456789Z hel",
+                false
+            ),
             []
         );
-        let stderr = a.push(LogStream::Stderr, b"error\r\nnext\n");
+        let stderr = a.push(LogStream::Stderr, b"error\r\nnext\n", false);
         assert_eq!(
             stderr.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
             ["error", "next"]
@@ -106,6 +154,7 @@ mod tests {
         let stdout = a.push(
             LogStream::Stdout,
             b"lo\r\n\x1b[32mgreen\x1b[0m\n\npartial\r",
+            false,
         );
         assert_eq!(
             stdout.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
@@ -120,9 +169,9 @@ mod tests {
     #[test]
     fn utf8_split_lossy_bytes_and_remainders() {
         let mut a = Assembler::default();
-        a.push(LogStream::Stderr, b"\xf0\x9f");
-        a.push(LogStream::Stdout, b"last stdout");
-        a.push(LogStream::Stderr, b"\x98\x80\xff");
+        a.push(LogStream::Stderr, b"\xf0\x9f", false);
+        a.push(LogStream::Stdout, b"last stdout", false);
+        a.push(LogStream::Stderr, b"\x98\x80\xff", false);
         let lines = a.finish();
         assert_eq!(
             lines.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),

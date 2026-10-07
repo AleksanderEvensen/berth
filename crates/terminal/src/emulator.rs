@@ -8,16 +8,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
 use berth_ui::ansi::AnsiColor;
 
 pub use alacritty_terminal::index::Side;
+pub use alacritty_terminal::vte::ansi::Rgb;
 
 /// Scrollback kept in the emulator, in lines.
 pub const SCROLLBACK_LINES: usize = 10_000;
@@ -103,10 +104,12 @@ const fn named_index(named: NamedColor) -> Option<u8> {
 }
 
 /// One rendered cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools, reason = "mirrors cell flags")]
 pub struct CellSnapshot {
     pub ch: char,
+    /// Combining marks drawn on top of `ch` (accents, ZWJ sequences).
+    pub combining: Option<Box<[char]>>,
     pub fg: CellColor,
     pub bg: CellColor,
     pub bold: bool,
@@ -124,6 +127,7 @@ impl Default for CellSnapshot {
     fn default() -> Self {
         Self {
             ch: ' ',
+            combining: None,
             fg: CellColor::Foreground,
             bg: CellColor::Background,
             bold: false,
@@ -135,6 +139,23 @@ impl Default for CellSnapshot {
             selected: false,
         }
     }
+}
+
+/// What the emulator asks its embedder when a program queries the terminal.
+pub struct Host<'a> {
+    /// RGB for a palette index (0–255), 256 = foreground, 257 = background,
+    /// 258 = cursor.
+    pub color: &'a dyn Fn(usize) -> Option<Rgb>,
+    /// One cell in pixels.
+    pub cell_px: (u16, u16),
+}
+
+impl Host<'_> {
+    /// Answers nothing beyond plain text replies; for tests and headless use.
+    pub const NONE: Host<'static> = Host {
+        color: &|_| None,
+        cell_px: (0, 0),
+    };
 }
 
 /// Cursor in viewport coordinates (row 0 = top of the visible grid).
@@ -190,13 +211,28 @@ impl Emulator {
 
     /// Advance over TTY output. Returns bytes the terminal wants written
     /// back (DSR/DA query responses).
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+    pub fn feed(&mut self, bytes: &[u8], host: &Host<'_>) -> Vec<u8> {
         self.parser.advance(&mut self.term, bytes);
         let mut responses = Vec::new();
         for event in self.capture.events.borrow_mut().drain(..) {
-            if let Event::PtyWrite(text) = event {
-                responses.extend_from_slice(text.as_bytes());
-            }
+            let reply = match event {
+                Event::PtyWrite(text) => text,
+                // OSC 4/10/11/12 colour queries: 0–255 palette, then the
+                // default foreground, background and cursor.
+                Event::ColorRequest(index, format) => match (host.color)(index) {
+                    Some(color) => format(color),
+                    None => continue,
+                },
+                // CSI 14 t / 18 t: text area size in pixels and cells.
+                Event::TextAreaSizeRequest(format) => format(WindowSize {
+                    num_lines: self.size.rows,
+                    num_cols: self.size.cols,
+                    cell_width: host.cell_px.0,
+                    cell_height: host.cell_px.1,
+                }),
+                _ => continue,
+            };
+            responses.extend_from_slice(reply.as_bytes());
         }
         responses
     }
@@ -301,6 +337,10 @@ impl Emulator {
             let hidden = flags.contains(Flags::HIDDEN);
             *slot = CellSnapshot {
                 ch: if hidden { ' ' } else { cell.c },
+                combining: cell
+                    .zerowidth()
+                    .filter(|_| !hidden)
+                    .map(Box::<[char]>::from),
                 fg,
                 bg,
                 bold: flags.contains(Flags::BOLD),
@@ -356,7 +396,7 @@ mod tests {
     #[test]
     fn crlf_and_wrap() {
         let mut e = emu(5, 3);
-        e.feed(b"ab\r\ncdefgh");
+        e.feed(b"ab\r\ncdefgh", &Host::NONE);
         let s = e.snapshot();
         assert_eq!(row_text(&s, 0), "ab");
         assert_eq!(row_text(&s, 1), "cdefg");
@@ -367,7 +407,10 @@ mod tests {
     #[test]
     fn sgr_colours_and_attributes() {
         let mut e = emu(10, 1);
-        e.feed(b"\x1b[1;31mA\x1b[0m\x1b[38;5;196mB\x1b[38;2;1;2;3mC\x1b[7mD");
+        e.feed(
+            b"\x1b[1;31mA\x1b[0m\x1b[38;5;196mB\x1b[38;2;1;2;3mC\x1b[7mD",
+            &Host::NONE,
+        );
         let row = &e.snapshot().rows[0];
         assert_eq!(row[0].fg, CellColor::Ansi(AnsiColor::Indexed(1)));
         assert!(row[0].bold);
@@ -377,15 +420,39 @@ mod tests {
     }
 
     #[test]
+    fn colour_and_size_queries_are_answered() {
+        let mut e = emu(10, 3);
+        let host = Host {
+            color: &|ix| (ix == 257).then_some(Rgb { r: 1, g: 2, b: 3 }),
+            cell_px: (8, 18),
+        };
+        let reply = String::from_utf8(e.feed(b"\x1b]11;?\x07", &host)).unwrap();
+        assert!(reply.starts_with("\x1b]11;rgb:0101/0202/0303"), "{reply:?}");
+        let reply = String::from_utf8(e.feed(b"\x1b[14t", &host)).unwrap();
+        assert_eq!(reply, "\x1b[4;54;80t");
+        assert_eq!(e.feed(b"\x1b]10;?\x07", &host), b"");
+    }
+
+    #[test]
+    fn combining_marks_are_kept() {
+        let mut e = emu(5, 1);
+        e.feed("e\u{301}x".as_bytes(), &Host::NONE);
+        let row = &e.snapshot().rows[0];
+        assert_eq!(row[0].ch, 'e');
+        assert_eq!(row[0].combining.as_deref(), Some(&['\u{301}'][..]));
+        assert_eq!(row[1].ch, 'x');
+    }
+
+    #[test]
     fn dsr_produces_a_response() {
         let mut e = emu(10, 3);
-        assert_eq!(e.feed(b"\x1b[6n"), b"\x1b[1;1R".to_vec());
+        assert_eq!(e.feed(b"\x1b[6n", &Host::NONE), b"\x1b[1;1R".to_vec());
     }
 
     #[test]
     fn scrollback_and_resize() {
         let mut e = emu(10, 2);
-        e.feed(b"1\r\n2\r\n3");
+        e.feed(b"1\r\n2\r\n3", &Host::NONE);
         assert_eq!(row_text(&e.snapshot(), 0), "2");
         e.scroll(1);
         assert_eq!(row_text(&e.snapshot(), 0), "1");
@@ -399,7 +466,7 @@ mod tests {
     #[test]
     fn selection_yields_text() {
         let mut e = emu(10, 2);
-        e.feed(b"hello world");
+        e.feed(b"hello world", &Host::NONE);
         e.start_selection(false, 0, 0, Side::Left);
         e.update_selection(0, 4, Side::Right);
         assert_eq!(e.selection_text().as_deref(), Some("hello"));
@@ -411,7 +478,7 @@ mod tests {
     #[test]
     fn wide_chars_take_two_cells() {
         let mut e = emu(6, 1);
-        e.feed("界x".as_bytes());
+        e.feed("界x".as_bytes(), &Host::NONE);
         let row = &e.snapshot().rows[0];
         assert!(row[0].wide);
         assert!(row[1].wide_spacer);

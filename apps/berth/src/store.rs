@@ -83,6 +83,9 @@ pub struct Store {
     containers: Vec<Container>,
     /// In-flight operations, keyed by container/image id or volume name.
     pending: HashMap<String, Op>,
+    /// Start events seen per container, so views can tell a restart apart
+    /// even when every inspect reports "running".
+    starts: HashMap<String, u64>,
     storage: Storage,
     session: Task<()>,
 }
@@ -98,6 +101,7 @@ impl Store {
             connection: Connection::Connecting,
             containers: Vec::new(),
             pending: HashMap::new(),
+            starts: HashMap::new(),
             storage: Storage::default(),
             session,
         }
@@ -114,6 +118,11 @@ impl Store {
 
     pub fn containers(&self) -> &[Container] {
         &self.containers
+    }
+
+    /// How many times the container has (re)started since the store saw it.
+    pub fn start_count(&self, id: &str) -> u64 {
+        self.starts.get(id).copied().unwrap_or_default()
     }
 
     pub fn pending(&self, id: &str) -> Option<Op> {
@@ -209,6 +218,7 @@ impl Store {
     fn forget(&mut self, id: &str) {
         self.containers.retain(|c| c.id != id);
         self.pending.remove(id);
+        self.starts.remove(id);
     }
 
     fn upsert(&mut self, container: Container) {
@@ -361,8 +371,13 @@ async fn handle_event(
             })
             .is_ok();
     }
+    let started = matches!(event.action, EventAction::Start | EventAction::Restart);
     let result = engine.inspect_container(&event.id).await;
     this.update(cx, |store, cx| {
+        if started {
+            let count = store.starts.entry(event.id.clone()).or_default();
+            *count = count.saturating_add(1);
+        }
         store.apply_inspect(&event.id, result);
         cx.notify();
     })

@@ -47,15 +47,17 @@ impl Span {
 
 const TAB: usize = 8;
 
-/// Split `line` into plain text and style spans.
-pub fn parse(line: &str) -> (String, Vec<Span>) {
+/// Split `line` into plain text and style spans, starting in `style` (where
+/// the stream's previous line left off). Returns the style the line ends in.
+pub fn parse(line: &str, style: SgrStyle) -> (String, Vec<Span>, SgrStyle) {
     let mut collector = Collector {
         text: String::with_capacity(line.len()),
+        style,
         ..Collector::default()
     };
     let mut parser: Processor = Processor::new();
     parser.advance(&mut collector, line.as_bytes());
-    (collector.text, collector.spans)
+    (collector.text, collector.spans, collector.style)
 }
 
 /// Receives `vte`'s decoded output for one line.
@@ -158,14 +160,29 @@ pub fn segments(
 mod tests {
     use super::*;
 
+    fn plain(line: &str) -> (String, Vec<Span>) {
+        let (text, spans, _) = parse(line, SgrStyle::default());
+        (text, spans)
+    }
+
+    #[test]
+    fn styles_carry_across_lines() {
+        let (_, first, open) = parse("\x1b[31mred", SgrStyle::default());
+        assert_eq!(first.len(), 1);
+        let (_, second, closed) = parse("still red\x1b[0m", open);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].style.fg, Some(AnsiColor::Indexed(1)));
+        assert_eq!(closed, SgrStyle::default());
+    }
+
     #[test]
     fn plain_text_passes_through() {
-        assert_eq!(parse("hello"), ("hello".into(), vec![]));
+        assert_eq!(plain("hello"), ("hello".into(), vec![]));
     }
 
     #[test]
     fn colours_and_reset() {
-        let (text, spans) = parse("\x1b[32mINFO\x1b[0m ready \x1b[1;31mERR\x1b[m");
+        let (text, spans) = plain("\x1b[32mINFO\x1b[0m ready \x1b[1;31mERR\x1b[m");
         assert_eq!(text, "INFO ready ERR");
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].range(), 0..4);
@@ -177,7 +194,7 @@ mod tests {
 
     #[test]
     fn bright_256_and_truecolour() {
-        let (_, spans) = parse("\x1b[91ma\x1b[38;5;208mb\x1b[48;2;1;2;3mc\x1b[38:2:9:8:7md");
+        let (_, spans) = plain("\x1b[91ma\x1b[38;5;208mb\x1b[48;2;1;2;3mc\x1b[38:2:9:8:7md");
         assert_eq!(spans[0].style.fg, Some(AnsiColor::Indexed(9)));
         assert_eq!(spans[1].style.fg, Some(AnsiColor::Indexed(208)));
         assert_eq!(spans[2].style.bg, Some(AnsiColor::Rgb(1, 2, 3)));
@@ -186,14 +203,14 @@ mod tests {
 
     #[test]
     fn other_sequences_and_controls_are_dropped() {
-        let (text, spans) = parse("\x1b]0;title\x07a\x1b[2Kb\r\x1b]8;;x\x1b\\c\x01");
+        let (text, spans) = plain("\x1b]0;title\x07a\x1b[2Kb\r\x1b]8;;x\x1b\\c\x01");
         assert_eq!(text, "abc");
         assert_eq!(spans.len(), 0);
     }
 
     #[test]
     fn default_colour_and_underline_variants() {
-        let (text, spans) = parse("\x1b[31ma\x1b[39mb\x1b[4:3mc\x1b[24md");
+        let (text, spans) = plain("\x1b[31ma\x1b[39mb\x1b[4:3mc\x1b[24md");
         assert_eq!(text, "abcd");
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].range(), 0..1);
@@ -203,20 +220,20 @@ mod tests {
 
     #[test]
     fn tabs_expand_to_eight_columns() {
-        assert_eq!(parse("ab\tc").0, "ab      c");
-        assert_eq!(parse("\x1b[1mab\x1b[0m\tc").0, "ab      c");
+        assert_eq!(plain("ab\tc").0, "ab      c");
+        assert_eq!(plain("\x1b[1mab\x1b[0m\tc").0, "ab      c");
     }
 
     #[test]
     fn unicode_offsets_are_bytes() {
-        let (text, spans) = parse("é\x1b[4mü\x1b[0m");
+        let (text, spans) = plain("é\x1b[4mü\x1b[0m");
         assert_eq!(text, "éü");
         assert_eq!(spans[0].range(), 2..4);
     }
 
     #[test]
     fn segments_split_on_every_boundary() {
-        let (_, spans) = parse("\x1b[31mabcdef\x1b[0mgh");
+        let (_, spans) = plain("\x1b[31mabcdef\x1b[0mgh");
         let matches = [4..8, 8..8];
         let segs = segments(&spans, &matches);
         let shape: Vec<_> = segs

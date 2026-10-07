@@ -121,6 +121,7 @@ impl ContainersScreen {
             tab,
             container: id.clone(),
             running: container.state == ContainerState::Running,
+            starts: store.start_count(id),
             engine: store.engine()?,
         })
     }

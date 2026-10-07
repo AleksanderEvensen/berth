@@ -34,6 +34,8 @@ pub struct LiveKey {
     pub container: String,
     /// Restart streams when the container starts or stops.
     pub running: bool,
+    /// Also when it restarts faster than its state is observed to change.
+    pub starts: u64,
     pub engine: Arc<dyn Engine>,
 }
 
@@ -42,6 +44,7 @@ impl PartialEq for LiveKey {
         self.tab == other.tab
             && self.container == other.container
             && self.running == other.running
+            && self.starts == other.starts
             && Arc::ptr_eq(&self.engine, &other.engine)
     }
 }

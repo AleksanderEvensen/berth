@@ -6,6 +6,7 @@
 //! work and shuts down the runtime without joining its threads.
 mod m3;
 mod mapping;
+mod tls;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +26,7 @@ use tokio_util::task::{AbortOnDrop, AbortOnDropHandle};
 use crate::{
     ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
     EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, Image, ImagePrune, LogLine,
-    LogOptions, PruneReport, RemoveOptions, StatsSample, TlsConfig, Volume,
+    LogOptions, PruneReport, RemoveOptions, StatsSample, Volume,
 };
 
 /// A live engine whose Tokio work never depends on the caller's executor.
@@ -166,7 +167,7 @@ fn client(endpoint: &Endpoint) -> Result<Docker, ConnectError> {
         Endpoint::Tcp {
             url,
             tls: Some(config),
-        } => return tls_client(url, config, endpoint),
+        } => return tls::client(url, config),
         Endpoint::Tcp { url, tls: None } => {
             if url.starts_with("https://") {
                 return Err(ConnectError::InvalidConfig(
@@ -182,42 +183,6 @@ fn client(endpoint: &Endpoint) -> Result<Docker, ConnectError> {
         }
     };
     result.map_err(|e| connect_error(&e, endpoint))
-}
-
-/// Mutual TLS through Bollard's rustls transport: the client certificate
-/// from `cert.pem`/`key.pem`, the daemon verified against `ca.pem`.
-fn tls_client(url: &str, config: &TlsConfig, endpoint: &Endpoint) -> Result<Docker, ConnectError> {
-    let invalid = ConnectError::InvalidConfig;
-    if !config.verify {
-        // Bollard always verifies the daemon; we don't ship our own verifier.
-        return Err(invalid(
-            "connecting without TLS verification (SkipTLSVerify) isn't supported; \
-             trust the daemon's CA in ca.pem instead"
-                .into(),
-        ));
-    }
-    let host = ["tcp://", "http://", "https://"]
-        .iter()
-        .find_map(|scheme| url.strip_prefix(scheme))
-        .ok_or_else(|| invalid("TLS endpoint must use tcp://, http:// or https://".into()))?;
-    let file = |name: &str| {
-        let path = config.cert_dir.join(name);
-        if path.is_file() {
-            Ok(path)
-        } else {
-            Err(invalid(format!("{} not found", path.display())))
-        }
-    };
-    let (key, cert, ca) = (file("key.pem")?, file("cert.pem")?, file("ca.pem")?);
-    Docker::connect_with_ssl(
-        &format!("tcp://{host}"),
-        &key,
-        &cert,
-        &ca,
-        120,
-        API_DEFAULT_VERSION,
-    )
-    .map_err(|e| connect_error(&e, endpoint))
 }
 
 impl Engine for BollardEngine {

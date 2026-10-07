@@ -61,12 +61,16 @@ env_logger = "0.11"
 log = "0.4"
 # Retain the /system/df wire shape used by Docker 23–28 and Podman.
 # Docker 29 still returns these fields; Bollard 0.20+ uses incompatible stubs.
-# `webpki`: rustls with ring and bundled roots, so connecting never depends
-# on the system trust store (Docker TLS trusts the daemon's own ca.pem).
-bollard = { version = "=0.19.4", features = ["ssl", "webpki", "chrono"] }
+bollard = { version = "=0.19.4", features = ["chrono"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "io-util"] }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# TLS client config for Bollard's custom transport: only the context's
+# ca.pem is trusted (Bollard's built-in TLS also trusts public roots).
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 num-traits = "0.2"
 aho-corasick = "1"
 # Colour-space maths for theme tokens (oklch → sRGB).

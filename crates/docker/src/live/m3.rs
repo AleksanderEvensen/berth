@@ -108,16 +108,26 @@ async fn pump_logs(
     while let Some(frame) = output.next().await {
         let frame = match frame {
             Ok(frame) => frame,
+            // Bollard's TTY decoder reports an unterminated final line as an
+            // error and drops it; end the stream cleanly instead.
+            Err(bollard::errors::Error::IOError { err })
+                if err.to_string() == "bytes remaining on stream" =>
+            {
+                break;
+            }
             Err(error) => {
                 failure = Some(mapping::error(error));
                 break;
             }
         };
-        let stream = match frame {
-            LogOutput::StdErr { .. } => crate::LogStream::Stderr,
-            _ => crate::LogStream::Stdout,
+        let (stream, record) = match frame {
+            LogOutput::StdErr { .. } => (crate::LogStream::Stderr, true),
+            LogOutput::StdOut { .. } => (crate::LogStream::Stdout, true),
+            LogOutput::Console { .. } | LogOutput::StdIn { .. } => {
+                (crate::LogStream::Stdout, false)
+            }
         };
-        for line in assembler.push(stream, frame.as_ref()) {
+        for line in assembler.push(stream, frame.as_ref(), record) {
             if logs::after_since(&line, options.since) && sender.send(Ok(line)).await.is_err() {
                 return Ok(());
             }
@@ -135,6 +145,11 @@ async fn pump_stats(
     id: &str,
     sender: &mut mpsc::Sender<EngineResult<StatsSample>>,
 ) -> EngineResult<()> {
+    // Events are requested from this instant, so a stop or pause between
+    // the inspect and the subscription is replayed rather than missed.
+    let subscribed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let inspected = docker
         .inspect_container(id, None::<query::InspectContainerOptions>)
         .await
@@ -163,6 +178,11 @@ async fn pump_stats(
         ),
     ]);
     let mut events = docker.events(Some(query::EventsOptions {
+        since: Some(format!(
+            "{}.{:09}",
+            subscribed.as_secs(),
+            subscribed.subsec_nanos()
+        )),
         filters: Some(filters),
         ..Default::default()
     }));

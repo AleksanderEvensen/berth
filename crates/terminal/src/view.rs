@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use berth_ui::Theme;
-use berth_ui::ansi::ansi_color;
+use berth_ui::ansi::{AnsiColor, ansi_color};
 use gpui::{
     App, Bounds, ClipboardItem, Context, Element, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, Font, FontFeatures, FontStyle, FontWeight, GlobalElementId, Hsla,
@@ -23,7 +23,7 @@ use gpui::{
 };
 use num_traits::ToPrimitive as _;
 
-use crate::emulator::{CellColor, CellSnapshot, Emulator, GridSize, Side, Snapshot};
+use crate::emulator::{CellColor, CellSnapshot, Emulator, GridSize, Host, Rgb, Side, Snapshot};
 use crate::input::{keystroke_bytes, paste_bytes};
 
 const FONT_SIZE: f32 = 13.0;
@@ -50,6 +50,8 @@ pub struct TerminalView {
     focus: FocusHandle,
     geometry: Option<Geometry>,
     selecting: bool,
+    /// Fractional scroll lines not yet applied.
+    scroll_carry: f32,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -67,6 +69,7 @@ impl TerminalView {
             focus: cx.focus_handle(),
             geometry: None,
             selecting: false,
+            scroll_carry: 0.0,
         }
     }
 
@@ -77,7 +80,17 @@ impl TerminalView {
 
     /// Feed process output.
     pub fn feed(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        let replies = self.emulator.feed(bytes);
+        let theme = Theme::of(cx);
+        let color = |index: usize| palette_rgb(index, theme);
+        let cell_w = self.geometry.map_or(FONT_SIZE * 0.6, |g| g.cell_w);
+        let host = Host {
+            color: &color,
+            cell_px: (
+                whole(cell_w.round(), MAX_CELLS),
+                whole(LINE_HEIGHT, MAX_CELLS),
+            ),
+        };
+        let replies = self.emulator.feed(bytes, &host);
         if !replies.is_empty() {
             cx.emit(TerminalEvent::Input(replies));
         }
@@ -179,14 +192,20 @@ impl TerminalView {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let dy = f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
-        let lines = i32::from(whole(dy.abs().round(), MAX_CELLS));
+        // Trackpads send many sub-line deltas; carry the remainder so they
+        // add up instead of each rounding to zero.
+        self.scroll_carry += f32::from(event.delta.pixel_delta(px(LINE_HEIGHT)).y) / LINE_HEIGHT;
+        let lines = i32::from(whole(self.scroll_carry.abs(), MAX_CELLS));
         if lines > 0 {
-            let lines = if dy > 0.0 {
-                lines
+            let (lines, step) = if self.scroll_carry > 0.0 {
+                (lines, f32::from(whole(self.scroll_carry, MAX_CELLS)))
             } else {
-                lines.saturating_neg()
+                (
+                    lines.saturating_neg(),
+                    -f32::from(whole(-self.scroll_carry, MAX_CELLS)),
+                )
             };
+            self.scroll_carry -= step;
             self.emulator.scroll(lines);
             cx.notify();
         }
@@ -373,6 +392,22 @@ fn mono_font(theme: &Theme) -> Font {
     mono
 }
 
+/// The theme colour behind a terminal query index, as 8-bit RGB.
+fn palette_rgb(index: usize, theme: &Theme) -> Option<Rgb> {
+    let color = match index {
+        256 | 258 => theme.text,
+        257 => theme.bg,
+        ix => ansi_color(AnsiColor::Indexed(u8::try_from(ix).ok()?), theme),
+    };
+    let rgba = gpui::Rgba::from(color);
+    let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round().to_u8();
+    Some(Rgb {
+        r: byte(rgba.r)?,
+        g: byte(rgba.g)?,
+        b: byte(rgba.b)?,
+    })
+}
+
 fn resolve(color: CellColor, theme: &Theme) -> Hsla {
     match color {
         CellColor::Foreground => theme.text,
@@ -491,7 +526,7 @@ fn shape_row(
         if cell.wide_spacer {
             continue;
         }
-        let pinned = !cell.ch.is_ascii() || cell.wide;
+        let pinned = !cell.ch.is_ascii() || cell.wide || cell.combining.is_some();
         if pinned {
             flush(&mut text, &mut text_runs, start);
         }
@@ -500,6 +535,7 @@ fn shape_row(
         }
         let run = cell_run(cell, theme, mono);
         text.push(cell.ch);
+        text.extend(cell.combining.iter().flat_map(|marks| marks.iter()));
         match text_runs.last_mut() {
             Some(last)
                 if last.color == run.color
@@ -535,7 +571,13 @@ fn cell_run(cell: &CellSnapshot, theme: &Theme, mono: &Font) -> TextRun {
         FontStyle::Normal
     };
     TextRun {
-        len: cell.ch.len_utf8(),
+        len: cell
+            .combining
+            .iter()
+            .flat_map(|marks| marks.iter())
+            .fold(cell.ch.len_utf8(), |len, mark| {
+                len.saturating_add(mark.len_utf8())
+            }),
         font: cell_font,
         color,
         background_color: None,
