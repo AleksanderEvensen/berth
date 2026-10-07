@@ -4,6 +4,7 @@ use gpui::{
     App, ElementId, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px,
 };
 
+use super::tab_stop;
 use crate::Theme;
 
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
@@ -43,9 +44,19 @@ impl SegmentedTabs {
 }
 
 impl RenderOnce for SegmentedTabs {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus: Vec<_> = (0..self.labels.len())
+            .map(|ix| {
+                let key = ElementId::NamedInteger(
+                    format!("{}-segment", self.id).into(),
+                    u64::try_from(ix).unwrap_or_default(),
+                );
+                tab_stop(key, window, cx)
+            })
+            .collect();
         let theme = Theme::of(cx);
         let text_hover = theme.text;
+        let ring = theme.border_strong;
         div()
             .id(self.id)
             .flex()
@@ -62,6 +73,12 @@ impl RenderOnce for SegmentedTabs {
                 let on_select = self.on_select.clone();
                 div()
                     .id(ix)
+                    .when_some(focus.get(ix), |d, focus| {
+                        d.track_focus(focus)
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .focus_visible(move |s| s.border_color(ring))
+                    })
                     .h(px(26.0))
                     .px(px(Theme::SPACE_MD))
                     .flex()

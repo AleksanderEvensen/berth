@@ -79,7 +79,7 @@ impl RenderOnce for Sidebar {
         let theme = Theme::of(cx);
         let target = if self.collapsed { 0.0 } else { self.width };
 
-        div()
+        let column = div()
             .id(self.id.clone())
             .flex_none()
             .h_full()
@@ -120,7 +120,11 @@ impl RenderOnce for Sidebar {
                                 .child(footer),
                         )
                     }),
-            )
+            );
+        if theme.reduce_motion {
+            return column.w(px(target)).into_any_element();
+        }
+        column
             .with_spring(
                 self.id,
                 SpringAnimation::new(PANEL_SPRING)
@@ -128,6 +132,7 @@ impl RenderOnce for Sidebar {
                     .with_epsilon(0.5),
                 gpui::Styled::w,
             )
+            .into_any_element()
     }
 }
 

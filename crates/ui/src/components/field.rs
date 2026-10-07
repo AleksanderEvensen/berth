@@ -73,3 +73,64 @@ impl RenderOnce for SearchField {
             })
     }
 }
+
+/// A single-line text field over a `gpui-base` input; the border takes the
+/// accent while focused, or the danger colour when `invalid`.
+#[derive(IntoElement)]
+#[must_use]
+pub struct TextField {
+    state: Entity<InputState>,
+    mono: bool,
+    invalid: bool,
+}
+
+impl TextField {
+    pub fn new(state: &Entity<InputState>) -> Self {
+        Self {
+            state: state.clone(),
+            mono: false,
+            invalid: false,
+        }
+    }
+
+    pub const fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
+
+    pub const fn invalid(mut self, invalid: bool) -> Self {
+        self.invalid = invalid;
+        self
+    }
+}
+
+impl RenderOnce for TextField {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
+        div()
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .px(px(Theme::SPACE_SM + 2.0))
+            .rounded(px(Theme::ROW_RADIUS))
+            .bg(theme.row_hover)
+            .border_1()
+            .border_color(if self.invalid {
+                theme.danger.opacity(0.7)
+            } else if focused {
+                theme.accent.opacity(0.55)
+            } else {
+                theme.border
+            })
+            .text_size(px(Theme::TEXT_MD))
+            .text_color(theme.text)
+            .when(self.mono, |d| d.font_family(theme.font_mono.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(gpui_base::Input::new(&self.state)),
+            )
+    }
+}

@@ -3,7 +3,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::{ClickHandler, icon};
+use super::{ClickHandler, icon, tab_stop};
 use crate::{Theme, icons};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -175,8 +175,10 @@ impl Button {
 }
 
 impl RenderOnce for Button {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = tab_stop(self.id.clone(), window, cx);
         let theme = Theme::of(cx);
+        let ring = theme.accent;
         let (bg, fg, border, hover_background) = match (self.solid, self.tone) {
             (true, ButtonTone::Danger) => (
                 theme.danger_strong,
@@ -206,6 +208,8 @@ impl RenderOnce for Button {
         let on_click = self.on_click;
         div()
             .id(self.id)
+            .track_focus(&focus)
+            .focus_visible(move |s| s.border_color(ring))
             .h(px(30.0))
             .px(px(12.0))
             .flex()

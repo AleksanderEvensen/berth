@@ -8,13 +8,24 @@
 //! **Numbers drive layout, colors are paint**: layout constants live here as
 //! plain numbers and never depend on the appearance.
 
-use gpui::{App, Global, Hsla, SharedString, hsla};
+pub use berth_settings::Accent;
+use gpui::{App, Global, Hsla, SharedString, WindowAppearance, hsla};
 use palette::{FromColor as _, LinSrgb, Oklch, Srgb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Appearance {
     Dark,
     Light,
+}
+
+impl Appearance {
+    #[must_use]
+    pub const fn from_window(appearance: WindowAppearance) -> Self {
+        match appearance {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::Light,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::Dark,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +67,8 @@ pub struct Theme {
     pub on_solid: Hsla,
 
     // ---- accents & status ----
+    /// The accent family `accent` and `accent_wash` were built from.
+    pub accent_family: Accent,
     pub accent: Hsla,
     pub accent_wash: Hsla,
     pub success: Hsla,
@@ -73,6 +86,10 @@ pub struct Theme {
 
     pub font_sans: SharedString,
     pub font_mono: SharedString,
+
+    /// Skip decorative animations (panel springs, glyph morphs); state
+    /// changes land on the next frame instead (NFR-U4).
+    pub reduce_motion: bool,
 }
 
 impl Global for Theme {}
@@ -106,9 +123,37 @@ impl Theme {
         cx.global::<Self>()
     }
 
+    /// The palette for `appearance` with `accent` swapped in.
+    #[must_use]
+    pub fn new(appearance: Appearance, accent: Accent) -> Self {
+        let theme = match appearance {
+            Appearance::Dark => Self::dark(),
+            Appearance::Light => Self::light(),
+        };
+        theme.with_accent(accent)
+    }
+
+    #[must_use]
+    pub fn with_accent(mut self, accent: Accent) -> Self {
+        let tone = accent_tone(accent, self.appearance);
+        self.accent_family = accent;
+        self.accent = tone;
+        self.accent_wash = tone.opacity(match self.appearance {
+            Appearance::Dark => 0.14,
+            Appearance::Light => 0.10,
+        });
+        self
+    }
+
+    #[must_use]
+    pub const fn with_reduce_motion(mut self, reduce_motion: bool) -> Self {
+        self.reduce_motion = reduce_motion;
+        self
+    }
+
     #[must_use]
     pub fn dark() -> Self {
-        let accent = oklch(0.673, 0.182, 276.935);
+        let accent = accent_tone(Accent::Indigo, Appearance::Dark);
         Self {
             appearance: Appearance::Dark,
             bg: grey(6),
@@ -128,6 +173,7 @@ impl Theme {
             text_faint: neutral(0.556),
             solid: neutral(0.922),
             on_solid: grey(0x0e),
+            accent_family: Accent::Indigo,
             accent,
             accent_wash: accent.opacity(0.14),
             success: oklch(0.765, 0.177, 163.223),
@@ -156,6 +202,7 @@ impl Theme {
             ],
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            reduce_motion: false,
         }
     }
 
@@ -163,7 +210,7 @@ impl Theme {
     /// content plane white, chrome grey, accents one step darker.
     #[must_use]
     pub fn light() -> Self {
-        let accent = oklch(0.511, 0.262, 276.966);
+        let accent = accent_tone(Accent::Indigo, Appearance::Light);
         Self {
             appearance: Appearance::Light,
             bg: grey(0xff),
@@ -183,6 +230,7 @@ impl Theme {
             text_faint: neutral(0.556),
             solid: neutral(0.205),
             on_solid: grey(0xfa),
+            accent_family: Accent::Indigo,
             accent,
             accent_wash: accent.opacity(0.10),
             success: oklch(0.596, 0.145, 163.225),
@@ -211,6 +259,7 @@ impl Theme {
             ],
             font_sans: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            reduce_motion: false,
         }
     }
 
@@ -228,6 +277,29 @@ impl Theme {
             Appearance::Light => oklch(0.52, 0.14, hue),
         }
     }
+}
+
+/// Authored accent tones (zeron's accent presets): the 400-ish step in dark,
+/// the 600-ish step in light so text and focus rings keep AA contrast.
+fn accent_tone(accent: Accent, appearance: Appearance) -> Hsla {
+    let dark = appearance == Appearance::Dark;
+    let (lightness, chroma, hue) = match accent {
+        Accent::Indigo if dark => (0.673, 0.182, 276.935),
+        Accent::Indigo => (0.511, 0.262, 276.966),
+        Accent::Orange if dark => (0.75, 0.18, 55.0),
+        Accent::Orange => (0.50, 0.19, 55.0),
+        Accent::Amber if dark => (0.80, 0.17, 84.0),
+        Accent::Amber => (0.48, 0.14, 84.0),
+        Accent::Green if dark => (0.75, 0.17, 150.0),
+        Accent::Green => (0.46, 0.14, 150.0),
+        Accent::Cyan if dark => (0.76, 0.13, 205.0),
+        Accent::Cyan => (0.45, 0.11, 205.0),
+        Accent::Blue if dark => (0.70, 0.17, 255.0),
+        Accent::Blue => (0.47, 0.21, 255.0),
+        Accent::Pink if dark => (0.72, 0.18, 350.0),
+        Accent::Pink => (0.48, 0.20, 350.0),
+    };
+    oklch(lightness, chroma, hue)
 }
 
 /// An exact achromatic tone from an 8-bit channel value (`grey(13)` ≡ `#0d0d0d`).
@@ -271,6 +343,20 @@ mod tests {
     fn neutral_950_is_0a0a0a() {
         let c = gpui::Rgba::from(neutral(0.145));
         assert!(f32::mul_add(c.r, 255.0, -10.0).abs() < 1.0, "{c:?}");
+    }
+
+    #[test]
+    fn new_swaps_only_the_accent() {
+        let base = Theme::light();
+        let green = Theme::new(Appearance::Light, Accent::Green);
+        assert_eq!(green.accent_family, Accent::Green);
+        assert_ne!(green.accent, base.accent);
+        assert_eq!(green.bg, base.bg);
+        assert_eq!(green.danger, base.danger);
+        assert_eq!(
+            Theme::new(Appearance::Dark, Accent::Indigo).accent,
+            Theme::dark().accent
+        );
     }
 
     #[test]

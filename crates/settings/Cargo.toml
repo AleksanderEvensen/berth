@@ -1,0 +1,20 @@
+[package]
+name = "berth-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Persisted user settings: plain serde data plus load/save. No gpui — the app
+# owns the in-memory store and decides when to write.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

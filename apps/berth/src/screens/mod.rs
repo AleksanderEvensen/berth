@@ -2,12 +2,33 @@ pub mod activity;
 pub mod cleanup;
 pub mod containers;
 pub mod images;
+pub mod settings;
 pub mod volumes;
 
-use berth_ui::{ListHeader, Theme};
-use gpui::{AnyElement, Div, IntoElement, div, prelude::*, px};
+use berth_ui::{ListHeader, Status, Theme};
+use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px};
 
 use crate::chrome;
+use crate::store::Connection;
+
+/// Status, title and detail line describing the engine connection.
+pub fn engine_summary(connection: &Connection) -> (Status, SharedString, SharedString) {
+    match connection {
+        Connection::Connecting => (
+            Status::Transitioning,
+            "Connecting…".into(),
+            "Looking for an engine".into(),
+        ),
+        Connection::Connected(info) => (
+            Status::Running,
+            format!("{} {}", info.name, info.version).into(),
+            info.endpoint.to_string().into(),
+        ),
+        Connection::Disconnected { error } => {
+            (Status::Error, "Not connected".into(), error.clone().into())
+        }
+    }
+}
 
 /// Layout facts the shell hands each screen: clearance for the floating
 /// sidebar toggle and the window's outer corner radii.

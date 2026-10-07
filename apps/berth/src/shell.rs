@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use berth_ui::{
     Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, Sidebar, SidebarItem, SidebarSection,
-    Status, Theme, Toast, ToastKind, icons, item_list, modal_overlay, sidebar_glyph, status_dot,
+    Theme, Toast, ToastKind, icons, item_list, modal_overlay, sidebar_glyph, status_dot,
 };
 use gpui::{
     AnimationExt as _, AnyElement, Context, Entity, EventEmitter, FocusHandle, FontWeight,
@@ -14,11 +14,18 @@ use gpui::{
 
 use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
+use crate::preferences;
 use crate::screens::{
-    Chrome, activity::ActivityScreen, cleanup::CleanupScreen, containers::ContainersScreen,
-    images::ImagesScreen, volumes::VolumesScreen,
+    Chrome,
+    activity::ActivityScreen,
+    cleanup::CleanupScreen,
+    containers::ContainersScreen,
+    engine_summary,
+    images::ImagesScreen,
+    settings::{Page, SettingsScreen},
+    volumes::VolumesScreen,
 };
-use crate::store::{Connection, Connector, Store, StoreEvent};
+use crate::store::{Connector, Store, StoreEvent};
 
 actions!(
     berth,
@@ -27,6 +34,12 @@ actions!(
         ToggleSidebar,
         #[derive(Eq)]
         FocusSearch,
+        #[derive(Eq)]
+        OpenSettings,
+        #[derive(Eq)]
+        FocusNext,
+        #[derive(Eq)]
+        FocusPrev,
         #[derive(Eq)]
         Quit
     ]
@@ -46,6 +59,7 @@ enum Route {
     Images,
     Activity,
     Cleanup,
+    Settings,
 }
 
 struct ToastItem {
@@ -61,20 +75,26 @@ pub struct Shell {
     sidebar_collapsed: bool,
     store: Entity<Store>,
     route: Route,
+    /// Where the settings sidebar's "Back" returns to.
+    back: Route,
     containers: Entity<ContainersScreen>,
     volumes: Entity<VolumesScreen>,
     images: Entity<ImagesScreen>,
     activity: Entity<ActivityScreen>,
     cleanup: Entity<CleanupScreen>,
+    settings: Entity<SettingsScreen>,
     confirm: Option<ConfirmRequest>,
     toasts: Vec<ToastItem>,
     next_toast_id: usize,
+    /// The settings problem already toasted, so it is reported once.
+    settings_problem: Option<SharedString>,
 }
 
 impl Shell {
     pub fn new(connector: Connector, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        preferences::observe_system_appearance(window, cx).detach();
 
         let store = cx.new(|cx| Store::new(connector, cx));
         cx.observe(&store, |_, _, cx| cx.notify()).detach();
@@ -87,12 +107,20 @@ impl Shell {
             }
         })
         .detach();
+        cx.observe_global::<preferences::Preferences>(Self::report_settings_problem)
+            .detach();
+        // Report a problem from loading settings once the shell exists.
+        cx.spawn(async move |this, cx| {
+            this.update(cx, Self::report_settings_problem).ok();
+        })
+        .detach();
 
         let containers = cx.new(|cx| ContainersScreen::new(store.clone(), cx));
         let volumes = cx.new(|cx| VolumesScreen::new(store.clone(), cx));
         let images = cx.new(|cx| ImagesScreen::new(store.clone(), cx));
         let activity = cx.new(|cx| ActivityScreen::new(store.clone(), cx));
         let cleanup = cx.new(|cx| CleanupScreen::new(store.clone(), cx));
+        let settings = cx.new(|cx| SettingsScreen::new(store.clone(), window, cx));
         Self::present_confirms(&containers, window, cx);
         Self::present_confirms(&volumes, window, cx);
         Self::present_confirms(&images, window, cx);
@@ -101,17 +129,36 @@ impl Shell {
         Self {
             focus,
             dialog_focus: cx.focus_handle(),
-            sidebar_collapsed: false,
+            sidebar_collapsed: preferences::get(cx).sidebar_collapsed,
             store,
             route: Route::Containers,
+            back: Route::Containers,
             containers,
             volumes,
             images,
             activity,
             cleanup,
+            settings,
             confirm: None,
             toasts: Vec::new(),
             next_toast_id: 0,
+            settings_problem: None,
+        }
+    }
+
+    fn report_settings_problem(&mut self, cx: &mut Context<Self>) {
+        let problem = preferences::problem(cx);
+        if problem == self.settings_problem {
+            return;
+        }
+        self.settings_problem.clone_from(&problem);
+        if let Some(problem) = problem {
+            self.push_toast(
+                ToastKind::Error,
+                "Settings problem".into(),
+                problem.to_string(),
+                cx,
+            );
         }
     }
 
@@ -133,8 +180,17 @@ impl Shell {
         .detach();
     }
 
-    fn navigate(&mut self, route: Route, cx: &mut Context<Self>) {
+    fn navigate(&mut self, route: Route, window: &mut Window, cx: &mut Context<Self>) {
+        if route == self.route {
+            return;
+        }
+        if route == Route::Settings {
+            self.back = self.route;
+        }
         self.route = route;
+        // Focus may sit in the screen being hidden (e.g. the search field);
+        // left there, shell shortcuts would stop resolving.
+        window.focus(&self.focus, cx);
         self.containers.update(cx, |screen, cx| {
             screen.set_visible(route == Route::Containers, cx);
         });
@@ -145,13 +201,19 @@ impl Shell {
     }
 
     fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate(Route::Containers, cx);
+        self.navigate(Route::Containers, window, cx);
         self.containers
             .update(cx, |screen, cx| screen.open_search(window, cx));
     }
 
+    fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Settings, window, cx);
+    }
+
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        let collapsed = self.sidebar_collapsed;
+        preferences::update(cx, |s| s.sidebar_collapsed = collapsed);
         cx.notify();
     }
 
@@ -258,22 +320,7 @@ impl Shell {
 
     fn render_engine_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        let (status, name, detail): (Status, SharedString, SharedString) =
-            match self.store.read(cx).connection() {
-                Connection::Connecting => (
-                    Status::Transitioning,
-                    "Connecting…".into(),
-                    "Looking for an engine".into(),
-                ),
-                Connection::Connected(info) => (
-                    Status::Running,
-                    format!("{} {}", info.name, info.version).into(),
-                    info.endpoint.to_string().into(),
-                ),
-                Connection::Disconnected { error } => {
-                    (Status::Error, "Not connected".into(), error.clone().into())
-                }
-            };
+        let (status, name, detail) = engine_summary(self.store.read(cx).connection());
         div()
             .flex()
             .items_center()
@@ -303,10 +350,55 @@ impl Shell {
                             .child(detail),
                     ),
             )
-            .child(IconButton::new("settings", icons::SETTINGS).size(28.0, 16.0))
+            .child(
+                IconButton::new("settings", icons::SETTINGS)
+                    .size(28.0, 16.0)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(&OpenSettings, window, cx);
+                    })),
+            )
+    }
+
+    /// Settings swaps the navigation for its own pages, with a way back.
+    fn render_settings_sidebar(&self, radius: f32, cx: &Context<Self>) -> Sidebar {
+        let current = self.settings.read(cx).page();
+        let back = self.back;
+        Sidebar::new("sidebar")
+            .collapsed(self.sidebar_collapsed)
+            .corner_radius(radius)
+            .header(chrome::drag_region(
+                "sidebar-titlebar",
+                div().h(px(Theme::HEADER_HEIGHT)).flex_none().w_full(),
+            ))
+            .section(SidebarSection::untitled().item(
+                SidebarItem::new("settings-back", icons::ARROW_LEFT, "Back").on_click(
+                    cx.listener(move |this, _, window, cx| this.navigate(back, window, cx)),
+                ),
+            ))
+            .section(Page::ALL.into_iter().fold(
+                SidebarSection::new("Settings"),
+                |section, page| {
+                    section.item(
+                        SidebarItem::new(
+                            SharedString::from(format!("settings-{}", page.label())),
+                            page.icon(),
+                            page.label(),
+                        )
+                        .active(page == current)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings
+                                .update(cx, |screen, cx| screen.set_page(page, cx));
+                        })),
+                    )
+                },
+            ))
+            .footer(self.render_engine_footer(cx))
     }
 
     fn render_sidebar(&self, radius: f32, cx: &Context<Self>) -> Sidebar {
+        if self.route == Route::Settings {
+            return self.render_settings_sidebar(radius, cx);
+        }
         let store = self.store.read(cx);
         let running = store.running_count();
         let volumes = store.volumes().len();
@@ -314,7 +406,7 @@ impl Shell {
         let item = |id: &'static str, icon, label: &'static str, route: Route| {
             SidebarItem::new(id, icon, label)
                 .active(self.route == route)
-                .on_click(cx.listener(move |this, _, _, cx| this.navigate(route, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.navigate(route, window, cx)))
         };
         Sidebar::new("sidebar")
             .collapsed(self.sidebar_collapsed)
@@ -379,11 +471,17 @@ impl Shell {
             .cursor_pointer()
             .hover(|s| s.bg(theme.element_hover))
             .occlude()
-            .child(div().with_spring(
-                "sidebar-glyph",
-                SpringAnimation::new(PANEL_SPRING).to(open),
-                move |this, t: f32| this.child(sidebar_glyph(t, 18.0, color)),
-            ))
+            .map(|d| {
+                if theme.reduce_motion {
+                    d.child(sidebar_glyph(open, 18.0, color))
+                } else {
+                    d.child(div().with_spring(
+                        "sidebar-glyph",
+                        SpringAnimation::new(PANEL_SPRING).to(open),
+                        move |this, t: f32| this.child(sidebar_glyph(t, 18.0, color)),
+                    ))
+                }
+            })
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
@@ -433,6 +531,11 @@ impl Render for Shell {
                     .update(cx, |screen, cx| screen.set_chrome(frame, cx));
                 self.cleanup.clone().into_any_element()
             }
+            Route::Settings => {
+                self.settings
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
+                self.settings.clone().into_any_element()
+            }
         };
         let captions = chrome::caption_buttons(window, cx);
         let confirm = self
@@ -446,6 +549,9 @@ impl Render for Shell {
             .key_context("Shell")
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+            .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
             .relative()
             .size_full()
             .flex()

@@ -2,16 +2,19 @@ mod chrome;
 mod dialogs;
 mod format;
 mod live;
+mod preferences;
 mod screens;
 mod selection;
 mod shell;
 mod store;
 mod virtual_rows;
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use berth_docker::{BollardEngine, DiscoveryEnv, discover, fixtures::FixtureEngine};
+use berth_settings::EngineChoice;
+use preferences::EngineTarget;
 use store::Connector;
 
 use gpui::{
@@ -19,7 +22,7 @@ use gpui::{
     WindowOptions, px, size,
 };
 
-use shell::{FocusSearch, Quit, Shell, ToggleSidebar};
+use shell::{FocusNext, FocusPrev, FocusSearch, OpenSettings, Quit, Shell, ToggleSidebar};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -29,12 +32,17 @@ fn main() {
         .run(|cx: &mut App| {
             gpui_base::init(cx);
             berth_ui::init(cx);
+            preferences::init(cx);
 
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
                 KeyBinding::new("ctrl-f", FocusSearch, None),
                 KeyBinding::new("cmd-f", FocusSearch, None),
+                KeyBinding::new("ctrl-,", OpenSettings, None),
+                KeyBinding::new("cmd-,", OpenSettings, None),
+                KeyBinding::new("tab", FocusNext, Some("Shell")),
+                KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("enter", dialogs::Confirm, Some(dialogs::CONFIRM_CONTEXT)),
@@ -42,6 +50,7 @@ fn main() {
             ]);
             cx.on_action(|_: &Quit, cx| cx.quit());
 
+            let connector = connector(preferences::engine_target(cx));
             let bounds = Bounds::centered(None, size(px(1240.0), px(800.0)), cx);
             if let Err(error) = cx.open_window(
                 WindowOptions {
@@ -60,7 +69,7 @@ fn main() {
                     app_id: Some("berth".into()),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Shell::new(connector(), window, cx)),
+                |window, cx| cx.new(|cx| Shell::new(connector, window, cx)),
             ) {
                 log::error!("failed to open the main window: {error}");
                 cx.quit();
@@ -73,9 +82,10 @@ fn main() {
 /// How the store obtains an engine. `BERTH_FIXTURES=1` runs on in-memory
 /// fixture data (`BERTH_FIXTURE_LATENCY_MS` simulates a slow engine,
 /// `BERTH_FIXTURE_LOG_LINES` sets per-container log history, e.g. 1000000);
-/// otherwise each connect discovers the endpoint (`DOCKER_HOST`, Docker
-/// context, default sockets) and opens a live client.
-fn connector() -> Connector {
+/// otherwise each connect resolves `target` — a host from settings, or
+/// discovery (`DOCKER_HOST`, Docker context, default sockets) — and opens a
+/// live client.
+fn connector(target: EngineTarget) -> Connector {
     if std::env::var_os("BERTH_FIXTURES").is_some() {
         let latency = std::env::var("BERTH_FIXTURE_LATENCY_MS")
             .ok()
@@ -92,8 +102,22 @@ fn connector() -> Connector {
             }))
         });
     }
-    Arc::new(|| {
-        let discovered = discover(&DiscoveryEnv::from_process()).map_err(|e| e.to_string())?;
+    Arc::new(move || {
+        let choice = target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut env = DiscoveryEnv::from_process();
+        match choice {
+            EngineChoice::Auto => {}
+            // An explicit context wins over DOCKER_HOST, like `docker --context`.
+            EngineChoice::Context { name } => {
+                env.docker_host = None;
+                env.docker_context = Some(name);
+            }
+            EngineChoice::Host { host } => env.docker_host = Some(host),
+        }
+        let discovered = discover(&env).map_err(|e| e.to_string())?;
         log::info!(
             "connecting to {} ({:?})",
             discovered.endpoint,

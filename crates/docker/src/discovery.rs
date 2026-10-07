@@ -92,6 +92,12 @@ struct ContextMeta {
 }
 
 #[derive(Deserialize)]
+struct ContextName {
+    #[serde(rename = "Name")]
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct ContextEndpoints {
     docker: ContextDocker,
 }
@@ -113,7 +119,12 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T
     serde_json::from_slice(&data).map_err(|e| invalid(format!("{}: {e}", path.display())))
 }
 
-fn parse_host(host: &str) -> Result<Endpoint, ConnectError> {
+/// Parse a `DOCKER_HOST`-style address without touching the network or disk.
+///
+/// # Errors
+/// Returns [`ConnectError::InvalidConfig`] for unsupported schemes, relative
+/// socket paths, missing addresses or embedded whitespace.
+pub fn parse_host(host: &str) -> Result<Endpoint, ConnectError> {
     let (scheme, address) = host
         .split_once("://")
         .ok_or_else(|| invalid(format!("invalid Docker host: {host}")))?;
@@ -230,6 +241,28 @@ pub fn discover(env: &DiscoveryEnv) -> Result<Discovered, ConnectError> {
         }
     }
     discover_candidates(candidates)
+}
+
+/// Names of the Docker contexts under the Docker config directory, sorted.
+/// The CLI's implicit `default` context is not stored there, so it is not
+/// listed; unreadable entries are skipped.
+#[must_use]
+pub fn docker_contexts(env: &DiscoveryEnv) -> Vec<String> {
+    let Some(dir) = env.config_dir().map(|d| d.join("contexts/meta")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| read_json::<ContextName>(&entry.path().join("meta.json")).ok())
+        .map(|meta| meta.name)
+        .filter(|name| !name.is_empty() && name != "default")
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn discover_candidates(
@@ -377,6 +410,37 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn parse_host_rejects_what_discovery_would() {
+        for host in [
+            "unix://relative.sock",
+            "tcp:///localhost:2375",
+            "tcp://local host:2375",
+            "ssh://box",
+            "tcp://",
+            "/var/run/docker.sock",
+        ] {
+            assert!(parse_host(host).is_err(), "{host}");
+        }
+        assert!(parse_host("unix:///var/run/docker.sock").is_ok());
+    }
+
+    #[test]
+    fn lists_named_contexts() {
+        let dir = TempDir::new().unwrap();
+        let env = env(&dir);
+        assert_eq!(docker_contexts(&env), Vec::<String>::new());
+        let meta = env.config_dir().unwrap().join("contexts/meta");
+        for (hash, name) in [("b", "remote"), ("a", "colima"), ("c", "default")] {
+            write(
+                &meta.join(hash).join("meta.json"),
+                &serde_json::json!({"Name": name, "Endpoints": {}}).to_string(),
+            );
+        }
+        write(&meta.join("d/meta.json"), "{ broken");
+        assert_eq!(docker_contexts(&env), ["colima", "remote"]);
     }
 
     #[test]

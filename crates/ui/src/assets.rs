@@ -72,6 +72,11 @@ icon_assets![
     (DANGER, "danger-circle"),
     (CLOCK, "clock-circle"),
     (ARROW_DOWN, "arrow-down"),
+    (ARROW_LEFT, "arrow-left"),
+    (SUN, "sun"),
+    (MOON, "moon"),
+    (TUNING, "tuning"),
+    (SERVER, "server"),
 ];
 
 const FONTS: &[&[u8]] = &[

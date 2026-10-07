@@ -180,10 +180,14 @@ impl Store {
             return;
         };
         self.storage.refresh_queued = true;
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_DEBOUNCE).await;
             let (images, volumes) = futures::join!(engine.list_images(), engine.list_volumes());
-            let alive = this.update(cx, |store, cx| {
+            let current = this.update(cx, |store, cx| {
+                if !store.is_current(generation) {
+                    return false;
+                }
                 store.storage.refresh_queued = false;
                 match (images, volumes) {
                     (Ok(images), Ok(volumes)) => store.merge_lists(images, volumes),
@@ -192,13 +196,17 @@ impl Store {
                     }
                 }
                 cx.notify();
+                true
             });
-            if alive.is_err() {
+            if !matches!(current, Ok(true)) {
                 return;
             }
             match engine.disk_usage().await {
                 Ok(usage) => {
                     this.update(cx, |store, cx| {
+                        if !store.is_current(generation) {
+                            return;
+                        }
                         store.storage.images = usage.images;
                         store.storage.volumes = usage.volumes;
                         store.storage.build_cache_reclaimable =
@@ -245,9 +253,13 @@ impl Store {
             }
             self.pending.insert(id.clone(), Op::Remove);
             let call = engine.remove_image(&id, force);
+            let generation = self.generation;
             cx.spawn(async move |this, cx| {
                 let result = call.await;
                 this.update(cx, |store, cx| {
+                    if !store.is_current(generation) {
+                        return;
+                    }
                     store.pending.remove(&id);
                     match result {
                         Ok(()) => store.storage.images.retain(|i| i.id != id),
@@ -285,9 +297,13 @@ impl Store {
             }
             self.pending.insert(name.clone(), Op::Remove);
             let call = engine.remove_volume(&name, false);
+            let generation = self.generation;
             cx.spawn(async move |this, cx| {
                 let result = call.await;
                 this.update(cx, |store, cx| {
+                    if !store.is_current(generation) {
+                        return;
+                    }
                     store.pending.remove(&name);
                     match result {
                         Ok(()) => store.storage.volumes.retain(|v| v.name != name),
@@ -316,6 +332,7 @@ impl Store {
         };
         self.storage.pruning = true;
         cx.notify();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let mut deleted = 0usize;
             let mut reclaimed = 0u64;
@@ -338,6 +355,9 @@ impl Store {
                 }
             }
             this.update(cx, |store, cx| {
+                if !store.is_current(generation) {
+                    return;
+                }
                 store.storage.pruning = false;
                 if failures.is_empty() {
                     cx.emit(StoreEvent::Info {

@@ -10,19 +10,24 @@ pub mod theme;
 
 pub use assets::{Assets, icons, register_fonts};
 pub use components::*;
-pub use theme::Theme;
+pub use theme::{Accent, Appearance, Theme};
 
 use gpui::App;
 
 /// Install the theme global and register bundled fonts. Call once at startup,
 /// before opening windows.
 pub fn init(cx: &mut App) {
-    let theme = Theme::dark();
-    sync_base_theme(&theme, cx);
-    cx.set_global(theme);
+    install_theme(Theme::dark(), cx);
     if let Err(err) = register_fonts(cx) {
         eprintln!("berth-ui: failed to register bundled fonts: {err:#}");
     }
+}
+
+/// Make `theme` the active palette. Colours are read at paint time, so the
+/// caller must `refresh_windows` for open windows to pick it up.
+pub fn install_theme(theme: Theme, cx: &mut App) {
+    sync_base_theme(&theme, cx);
+    cx.set_global(theme);
 }
 
 /// Project our tokens onto `gpui-base`'s semantic tokens so its behaviour

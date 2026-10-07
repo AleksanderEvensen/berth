@@ -87,6 +87,10 @@ pub struct Store {
     /// even when every inspect reports "running".
     starts: HashMap<String, u64>,
     storage: Storage,
+    /// Bumped whenever a different engine is installed. Async work captures
+    /// it and drops its result if the engine changed meanwhile, so a slow
+    /// reply from the old engine can't land in the new engine's state.
+    generation: u64,
     session: Task<()>,
 }
 
@@ -103,6 +107,7 @@ impl Store {
             pending: HashMap::new(),
             starts: HashMap::new(),
             storage: Storage::default(),
+            generation: 0,
             session,
         }
     }
@@ -143,6 +148,24 @@ impl Store {
         cx.notify();
     }
 
+    /// The engine target changed: forget everything learned from the old
+    /// engine, then connect to the new one.
+    pub fn switch_engine(&mut self, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.engine = None;
+        self.containers.clear();
+        self.pending.clear();
+        self.starts.clear();
+        self.storage = Storage::default();
+        self.reconnect(cx);
+    }
+
+    /// Whether async work started at `generation` still talks to the
+    /// installed engine.
+    const fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
     /// Run `op` on each container. Already-pending containers are skipped.
     pub fn run(&mut self, ids: Vec<String>, op: Op, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else {
@@ -176,6 +199,7 @@ impl Store {
                 ),
             };
             let engine = engine.clone();
+            let generation = self.generation;
             cx.spawn(async move |this, cx| {
                 let result = call.await;
                 let refreshed = match (&result, op) {
@@ -183,6 +207,9 @@ impl Store {
                     (Ok(()), _) => Some(engine.inspect_container(&id).await),
                 };
                 this.update(cx, |store, cx| {
+                    if !store.is_current(generation) {
+                        return;
+                    }
                     store.pending.remove(&id);
                     match result {
                         Ok(()) if op == Op::Remove => store.forget(&id),
@@ -249,6 +276,7 @@ impl Store {
                     Err(error) => SessionEnd::Failed(error),
                     Ok(engine) => {
                         let installed = this.update(cx, |store, _| {
+                            store.generation = store.generation.wrapping_add(1);
                             store.engine = Some(engine.clone());
                         });
                         if installed.is_err() {
@@ -382,4 +410,72 @@ async fn handle_event(
         cx.notify();
     })
     .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use berth_docker::fixtures::FixtureEngine;
+    use gpui::{AppContext as _, TestAppContext};
+
+    use super::*;
+
+    /// A slow reply from the old engine must not touch the new engine's
+    /// state — here, a volume with the same name on both.
+    #[gpui::test]
+    fn stale_engine_results_are_dropped(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let slow: Arc<dyn Engine> =
+            Arc::new(FixtureEngine::default().with_latency(Duration::from_millis(150)));
+        let fast: Arc<dyn Engine> = Arc::new(FixtureEngine::default());
+        let current = Arc::new(Mutex::new(slow));
+        let target = current.clone();
+        let connector: Connector = Arc::new(move || {
+            Ok(target
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone())
+        });
+        let store = cx.new(|cx| Store::new(connector, cx));
+        let settle = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        let volume = store.read_with(cx, |store, _| {
+            assert!(matches!(store.connection(), Connection::Connected(_)));
+            store
+                .volumes()
+                .iter()
+                .find(|v| !store.volume_in_use(v))
+                .map(|v| v.name.clone())
+                .unwrap()
+        });
+
+        // Start a slow removal on the old engine, then switch.
+        store.update(cx, |store, cx| {
+            store.remove_volumes(vec![volume.clone()], cx);
+        });
+        *current.lock().unwrap() = fast;
+        store.update(cx, Store::switch_engine);
+        settle(cx);
+        store.read_with(cx, |store, _| {
+            assert!(store.volumes().iter().any(|v| v.name == volume));
+            assert_eq!(store.pending(&volume), None);
+        });
+
+        // The old engine's reply arrives after the switch. Check before the
+        // clock moves: a later refresh from the new engine would mask it.
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(
+                store.volumes().iter().any(|v| v.name == volume),
+                "a stale removal pruned the new engine's volume"
+            );
+            assert_eq!(store.pending(&volume), None);
+        });
+    }
 }
