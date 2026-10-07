@@ -16,12 +16,12 @@ use std::time::Duration;
 use bollard::{
     API_DEFAULT_VERSION, Docker, errors::Error as BollardError, query_parameters as query,
 };
-use futures::channel::{mpsc, oneshot};
+use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt as _, SinkExt as _, Stream, StreamExt as _};
 use tokio::runtime::{Handle, Runtime};
-use tokio::task::AbortHandle;
+use tokio_util::task::{AbortOnDrop, AbortOnDropHandle};
 
 use crate::{
     ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
@@ -64,13 +64,6 @@ impl Drop for EngineRuntime {
         if let Some(runtime) = self.owner.take() {
             runtime.shutdown_background();
         }
-    }
-}
-
-struct AbortOnDrop(AbortHandle);
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
@@ -131,15 +124,10 @@ impl BollardEngine {
         &self,
         work: impl Future<Output = EngineResult<T>> + Send + 'static,
     ) -> BoxFuture<'static, EngineResult<T>> {
-        let (sender, receiver) = oneshot::channel();
-        let task = self.runtime().spawn(async move {
-            let _ = sender.send(work.await);
-        });
-        // Capture the guard before returning: even an unpolled future cancels.
-        let guard = AbortOnDrop(task.abort_handle());
+        // Wrap before returning: even an unpolled future cancels its task.
+        let task = AbortOnDropHandle::new(self.runtime().spawn(work));
         async move {
-            let _guard = guard;
-            receiver.await.unwrap_or_else(|_| {
+            task.await.unwrap_or_else(|_| {
                 Err(EngineError::Transport(
                     "engine task ended before delivering a result".into(),
                 ))
@@ -470,7 +458,7 @@ impl Engine for BollardEngine {
         });
         EventStream {
             receiver,
-            _task: AbortOnDrop(task.abort_handle()),
+            _task: AbortOnDrop::new(task.abort_handle()),
         }
         .boxed()
     }

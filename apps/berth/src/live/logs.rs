@@ -19,7 +19,7 @@ use gpui::{
 use gpui_base::input::{InputEvent, InputState};
 
 use super::ansi::{SgrStyle, segments};
-use super::log_buffer::{CAPACITY, LogBuffer, LogEntry, match_ranges};
+use super::log_buffer::{CAPACITY, LogBuffer, LogEntry, Needle};
 
 const ROW_HEIGHT: f32 = 18.0;
 /// Most lines applied per update; larger backlogs keep draining without
@@ -163,7 +163,7 @@ impl LogsView {
 
     fn render_rows(&self, range: std::ops::Range<usize>, cx: &Context<Self>) -> Vec<AnyElement> {
         let theme = Theme::of(cx);
-        let needle = self.buffer.needle().unwrap_or_default();
+        let needle = self.buffer.needle();
         range
             .filter_map(|ix| self.buffer.get(ix))
             .map(|entry| log_row(entry, needle, self.timestamps, theme))
@@ -304,9 +304,14 @@ impl Render for LogsView {
     }
 }
 
-fn log_row(entry: &LogEntry, needle: &str, timestamps: bool, theme: &Theme) -> AnyElement {
+fn log_row(
+    entry: &LogEntry,
+    needle: Option<&Needle>,
+    timestamps: bool,
+    theme: &Theme,
+) -> AnyElement {
     let text = SharedString::from(entry.text.to_string());
-    let matches = match_ranges(&text, needle);
+    let matches = needle.map(|n| n.ranges(&text)).unwrap_or_default();
     let highlights = segments(&entry.spans, &matches)
         .into_iter()
         .map(|(range, style, hit)| (range, highlight(style, hit, theme)));

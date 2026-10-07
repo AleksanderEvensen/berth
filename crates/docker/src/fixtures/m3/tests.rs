@@ -189,11 +189,11 @@ fn cancellation_wakes_quiet_timer_and_aborts_blocked_send() {
     for sleeping in [false, true] {
         let (tx, rx) = std::sync::mpsc::channel();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let stream = worker::<(), _, _>(1, None, move |mut sender, timer| async move {
+        let stream = worker::<(), _, _>(1, None, move |mut sender| async move {
             let _probe = Probe(tx);
             started_tx.send(()).unwrap();
             if sleeping {
-                timer.wait(Duration::from_secs(60));
+                futures_timer::Delay::new(Duration::from_secs(60)).await;
             } else {
                 loop {
                     if sender.send(Ok(())).await.is_err() {

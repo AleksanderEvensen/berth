@@ -22,7 +22,7 @@ fn dropping_stream_aborts_all_session_tasks_even_when_unpolled() {
                 let _sender = sender;
                 futures::future::pending::<()>().await;
             });
-            AbortOnDrop(task.abort_handle())
+            AbortOnDrop::new(task.abort_handle())
         })
         .collect();
     drop(sender);
@@ -52,7 +52,7 @@ fn dropping_backpressured_stream_aborts_its_producer() {
     });
     drop(TaskStream {
         receiver,
-        _tasks: vec![AbortOnDrop(task.abort_handle())],
+        _tasks: vec![AbortOnDrop::new(task.abort_handle())],
     });
     dropped_rx
         .recv_timeout(std::time::Duration::from_secs(2))

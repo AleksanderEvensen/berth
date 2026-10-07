@@ -270,7 +270,7 @@ fn dropping_a_pending_future_cancels_its_task() {
     let server = TestServer::new();
     let engine = BollardEngine::connect(&server.endpoint).unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
-    let (started_tx, started_rx) = oneshot::channel();
+    let (started_tx, started_rx) = futures::channel::oneshot::channel();
     let probe = Dropped(sender);
     let future = engine.spawn(async move {
         let _probe = probe;
@@ -298,7 +298,7 @@ fn dropping_stream_cancels_an_idle_subscription_task() {
     });
     let stream = EventStream {
         receiver,
-        _task: AbortOnDrop(task.abort_handle()),
+        _task: AbortOnDrop::new(task.abort_handle()),
     };
     drop(stream);
     dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();

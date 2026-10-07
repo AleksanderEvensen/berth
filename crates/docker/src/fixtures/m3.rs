@@ -1,13 +1,15 @@
 //! Executor-independent, bounded fixture streams. Each subscription owns one
-//! worker thread; drop wakes its timer and aborts pending channel operations.
+//! worker thread; dropping the stream aborts its future, including any
+//! pending timer or channel send.
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc;
 use futures::future::{AbortHandle, Abortable};
 use futures::{SinkExt as _, Stream, StreamExt as _};
+use futures_timer::Delay;
 
 use super::{FixtureEngine, FixtureState};
 use crate::{
@@ -17,37 +19,12 @@ use crate::{
 
 type State = Arc<Mutex<FixtureState>>;
 
-#[derive(Default)]
-struct Timer {
-    cancelled: Mutex<bool>,
-    wake: Condvar,
-}
-impl Timer {
-    fn wait(&self, duration: Duration) -> bool {
-        let cancelled = self
-            .cancelled
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (cancelled, _) = self
-            .wake
-            .wait_timeout_while(cancelled, duration, |c| !*c)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !*cancelled
-    }
-}
-struct Cancel {
-    abort: AbortHandle,
-    timer: Arc<Timer>,
-}
+/// Aborts the worker's future when the stream is dropped, waking it even
+/// while it sleeps in a timer or waits on a full channel.
+struct Cancel(AbortHandle);
 impl Drop for Cancel {
     fn drop(&mut self) {
-        *self
-            .timer
-            .cancelled
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
-        self.timer.wake.notify_all();
-        self.abort.abort();
+        self.0.abort();
     }
 }
 struct WorkerStream<T> {
@@ -67,19 +44,16 @@ fn worker<T, F, Fut>(
 ) -> futures::stream::BoxStream<'static, EngineResult<T>>
 where
     T: Send + 'static,
-    F: FnOnce(mpsc::Sender<EngineResult<T>>, Arc<Timer>) -> Fut + Send + 'static,
+    F: FnOnce(mpsc::Sender<EngineResult<T>>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let (sender, receiver) = mpsc::channel(capacity);
-    let timer = Arc::new(Timer::default());
     let (abort, registration) = AbortHandle::new_pair();
-    let worker_timer = timer.clone();
     std::thread::spawn(move || {
         futures::executor::block_on(Abortable::new(
             async move {
-                if worker_timer.wait(latency.unwrap_or_default()) {
-                    work(sender, worker_timer).await;
-                }
+                Delay::new(latency.unwrap_or_default()).await;
+                work(sender).await;
             },
             registration,
         ))
@@ -87,7 +61,7 @@ where
     });
     WorkerStream {
         receiver,
-        _cancel: Cancel { abort, timer },
+        _cancel: Cancel(abort),
     }
     .boxed()
 }
@@ -131,7 +105,7 @@ impl FixtureEngine {
         let state = self.state.clone();
         let id = id.to_owned();
         let count = self.log_history_lines;
-        worker(1024, self.latency, move |mut sender, timer| async move {
+        worker(1024, self.latency, move |mut sender| async move {
             let c = match container(&state, &id) {
                 Ok(c) => c,
                 Err(e) => {
@@ -163,9 +137,7 @@ impl FixtureEngine {
                     4..=9 => 400,
                     _ => 1800,
                 };
-                if !timer.wait(Duration::from_millis(delay)) {
-                    break;
-                }
+                Delay::new(Duration::from_millis(delay)).await;
                 let Ok(current) = container(&state, &id) else {
                     break;
                 };
@@ -195,7 +167,7 @@ impl FixtureEngine {
     ) -> futures::stream::BoxStream<'static, EngineResult<StatsSample>> {
         let state = self.state.clone();
         let id = id.to_owned();
-        worker(4, self.latency, move |mut sender, timer| async move {
+        worker(4, self.latency, move |mut sender| async move {
             if let Err(e) = container(&state, &id) {
                 let _ = sender.send(Err(e)).await;
                 return;
@@ -208,10 +180,10 @@ impl FixtureEngine {
                     .send(Ok(stats_sample(seed, tick, time)))
                     .await
                     .is_err()
-                    || !timer.wait(Duration::from_secs(1))
                 {
                     break;
                 }
+                Delay::new(Duration::from_secs(1)).await;
                 tick = tick.saturating_add(1);
                 time = time.saturating_add(1_000_000_000);
             }
@@ -324,7 +296,7 @@ fn fake_shell(id: &str, options: ExecOptions) -> ExecSession {
     let pwd = options.working_dir.unwrap_or_else(|| "/".into());
     let user = options.user.unwrap_or_else(|| "root".into());
     let prompt = format!("\x1b[32m{user}@{short}\x1b[0m:{pwd}# ");
-    let stdout = worker(64, None, move |mut sender, _timer| async move {
+    let stdout = worker(64, None, move |mut sender| async move {
         if sender.send(Ok(prompt.as_bytes().to_vec())).await.is_err() {
             return;
         }

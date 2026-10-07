@@ -9,6 +9,7 @@ publish.workspace = true
 gpui.workspace = true
 anyhow.workspace = true
 gpui-base.workspace = true
+palette.workspace = true
 
 [lints]
 workspace = true

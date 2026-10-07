@@ -21,6 +21,7 @@ use gpui::{
     Style, TextAlign, TextRun, UnderlineStyle, Window, div, fill, font, outline, point, prelude::*,
     px, relative, size,
 };
+use num_traits::ToPrimitive as _;
 
 use crate::emulator::{CellColor, CellSnapshot, Emulator, GridSize, Side, Snapshot};
 use crate::input::{keystroke_bytes, paste_bytes};
@@ -215,22 +216,16 @@ impl Render for TerminalView {
     }
 }
 
-/// The largest whole number `n ≤ value`, clamped to `0..=max`. Exact for the
-/// small counts a terminal deals in, without a lossy cast.
+/// The largest whole number `n ≤ value`, clamped to `0..=max`; non-finite
+/// metrics (a failed font probe) count as zero.
 fn whole(value: f32, max: u16) -> u16 {
-    if !value.is_finite() || value < 1.0 {
+    if !value.is_finite() {
         return 0;
     }
-    let (mut lo, mut hi) = (0u16, max);
-    while lo < hi {
-        let mid = lo.saturating_add(hi.saturating_sub(lo).div_ceil(2));
-        if f32::from(mid) <= value {
-            lo = mid;
-        } else {
-            hi = mid.saturating_sub(1);
-        }
-    }
-    lo
+    value
+        .clamp(0.0, f32::from(max))
+        .to_u16()
+        .unwrap_or_default()
 }
 
 /// `n` cells as `f32` (exact: grids are capped at [`MAX_CELLS`]).
@@ -566,6 +561,8 @@ mod tests {
         assert_eq!(whole(99.0, 10), 10);
         assert_eq!(whole(f32::NAN, 10), 0);
         assert_eq!(whole(-5.0, 10), 0);
+        assert_eq!(whole(f32::INFINITY, 10), 0);
+        assert_eq!(whole(0.99, 10), 0);
     }
 
     #[test]

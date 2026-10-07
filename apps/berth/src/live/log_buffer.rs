@@ -10,6 +10,8 @@ use std::ops::Range;
 
 use berth_docker::{LogLine, LogStream};
 
+use aho_corasick::AhoCorasick;
+
 use super::ansi::{self, Span};
 
 pub const CAPACITY: usize = 1_000_000;
@@ -37,8 +39,7 @@ impl LogEntry {
 }
 
 struct Filter {
-    /// Lower-cased query.
-    needle: String,
+    needle: Needle,
     /// Sequence numbers of matching entries, ascending.
     matches: VecDeque<u64>,
 }
@@ -73,7 +74,7 @@ impl LogBuffer {
         }
         let seq = self.next_seq();
         if let Some(filter) = &mut self.filter
-            && contains_ci(&entry.text, &filter.needle)
+            && filter.needle.is_match(&entry.text)
         {
             filter.matches.push_back(seq);
         }
@@ -101,24 +102,23 @@ impl LogBuffer {
     /// Show only lines containing `query` (case-insensitive); empty clears.
     /// Rescans the whole buffer, so callers debounce keystrokes.
     pub fn set_filter(&mut self, query: &str) {
-        let needle = query.to_lowercase();
-        if needle.is_empty() {
+        let Some(needle) = Needle::new(query) else {
             self.filter = None;
             return;
-        }
+        };
         let first = self.first_seq;
         let matches = self
             .entries
             .iter()
             .zip(first..)
-            .filter(|(entry, _)| contains_ci(&entry.text, &needle))
+            .filter(|(entry, _)| needle.is_match(&entry.text))
             .map(|(_, seq)| seq)
             .collect();
         self.filter = Some(Filter { needle, matches });
     }
 
-    pub fn needle(&self) -> Option<&str> {
-        self.filter.as_ref().map(|f| f.needle.as_str())
+    pub fn needle(&self) -> Option<&Needle> {
+        self.filter.as_ref().map(|f| &f.needle)
     }
 
     /// Lines currently shown (after the filter).
@@ -149,43 +149,53 @@ impl LogBuffer {
     }
 }
 
-/// Case-insensitive substring test; `needle` is already lower-cased.
-/// ASCII needles (the common case) compare bytes without allocating.
-pub fn contains_ci(haystack: &str, needle: &str) -> bool {
-    if needle.is_ascii() {
-        let needle = needle.as_bytes();
-        haystack
-            .as_bytes()
-            .windows(needle.len().max(1))
-            .any(|w| w.eq_ignore_ascii_case(needle))
-    } else {
-        haystack.to_lowercase().contains(needle)
-    }
+/// A case-insensitive filter query, compiled once.
+///
+/// ASCII queries (the common case) use an ASCII-case-insensitive
+/// Aho-Corasick matcher, which also locates matches for highlighting. Other
+/// queries fall back to Unicode lower-casing and highlight nothing, since
+/// case folding can change byte lengths.
+pub struct Needle {
+    lower: String,
+    ascii: Option<AhoCorasick>,
 }
 
-/// Byte ranges of every match of the lower-cased `needle` in `text`, for
-/// highlighting. Only ASCII needles are located exactly (case folding can
-/// change byte lengths otherwise); others highlight nothing.
-pub fn match_ranges(text: &str, needle: &str) -> Vec<Range<usize>> {
-    if needle.is_empty() || !needle.is_ascii() {
-        return Vec::new();
-    }
-    let (hay, pat) = (text.as_bytes(), needle.as_bytes());
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    while let Some(window) = hay.get(at..) {
-        let Some(found) = window
-            .windows(pat.len())
-            .position(|w| w.eq_ignore_ascii_case(pat))
-        else {
-            break;
+impl Needle {
+    /// `None` for an empty query.
+    pub fn new(query: &str) -> Option<Self> {
+        let lower = query.to_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        let ascii = lower.is_ascii().then(|| {
+            AhoCorasick::builder()
+                .ascii_case_insensitive(true)
+                .build([&lower])
+        });
+        let ascii = match ascii {
+            Some(Ok(matcher)) => Some(matcher),
+            Some(Err(err)) => {
+                log::warn!("log filter falls back to lower-casing: {err}");
+                None
+            }
+            None => None,
         };
-        let start = at.saturating_add(found);
-        let end = start.saturating_add(pat.len());
-        out.push(start..end);
-        at = end;
+        Some(Self { lower, ascii })
     }
-    out
+
+    pub fn is_match(&self, text: &str) -> bool {
+        self.ascii.as_ref().map_or_else(
+            || text.to_lowercase().contains(&self.lower),
+            |matcher| matcher.is_match(text),
+        )
+    }
+
+    /// Byte ranges of every match in `text`, for highlighting.
+    pub fn ranges(&self, text: &str) -> Vec<Range<usize>> {
+        self.ascii.as_ref().map_or_else(Vec::new, |matcher| {
+            matcher.find_iter(text).map(|m| m.range()).collect()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -255,11 +265,13 @@ mod tests {
 
     #[test]
     fn case_insensitive_matching() {
-        assert!(contains_ci("Hello World", "o w"));
-        assert!(contains_ci("ÉCOLE", "école"));
-        assert!(!contains_ci("abc", "abcd"));
-        assert_eq!(match_ranges("aXa xa", "xa"), [1..3, 4..6]);
-        assert_eq!(match_ranges("abc", "").len(), 0);
+        let needle = |q: &str| Needle::new(q).unwrap();
+        assert!(needle("O W").is_match("Hello World"));
+        assert!(needle("école").is_match("ÉCOLE"));
+        assert!(!needle("abcd").is_match("abc"));
+        assert_eq!(needle("xa").ranges("aXa xa"), [1..3, 4..6]);
+        assert_eq!(needle("école").ranges("ÉCOLE").len(), 0);
+        assert!(Needle::new("").is_none());
     }
 
     #[test]

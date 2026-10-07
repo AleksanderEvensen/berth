@@ -1,12 +1,10 @@
 use crate::StatsSample;
 use bollard::models::{ContainerCpuStats, ContainerMemoryStats, ContainerStatsResponse};
+use num_traits::ToPrimitive as _;
 
-// Each half converts exactly. Combining them rounds once to f64's available
-// precision (as Docker CLI's float64 conversion does), without a lossy cast.
+/// `u64` → `f64`, rounding like the Docker CLI's `float64(…)` conversion.
 fn float(value: u64) -> f64 {
-    let high = u32::try_from(value >> 32).unwrap_or_default();
-    let low = u32::try_from(value & u64::from(u32::MAX)).unwrap_or_default();
-    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
+    value.to_f64().unwrap_or_default()
 }
 fn cpus(cpu: &ContainerCpuStats) -> u32 {
     cpu.online_cpus

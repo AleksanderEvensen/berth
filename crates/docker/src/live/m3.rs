@@ -20,7 +20,9 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
-use super::{AbortOnDrop, BollardEngine, mapping};
+use tokio_util::task::AbortOnDrop;
+
+use super::{BollardEngine, mapping};
 use crate::{
     EngineError, EngineResult, ExecOptions, ExecSession, LogLine, LogOptions, StatsSample,
     TtyResizer, TtySize,
@@ -52,7 +54,7 @@ impl BollardEngine {
         });
         TaskStream {
             receiver,
-            _tasks: vec![AbortOnDrop(task.abort_handle())],
+            _tasks: vec![AbortOnDrop::new(task.abort_handle())],
         }
         .boxed()
     }
@@ -67,7 +69,7 @@ impl BollardEngine {
         });
         TaskStream {
             receiver,
-            _tasks: vec![AbortOnDrop(task.abort_handle())],
+            _tasks: vec![AbortOnDrop::new(task.abort_handle())],
         }
         .boxed()
     }
@@ -288,8 +290,8 @@ fn attach_session(
     // Also stop the input and resize pumps at remote EOF, even if the caller
     // retains an exhausted stdout stream or its stdin/resizer handles.
     let guards = vec![
-        AbortOnDrop(input_abort.clone()),
-        AbortOnDrop(resize_abort.clone()),
+        AbortOnDrop::new(input_abort.clone()),
+        AbortOnDrop::new(resize_abort.clone()),
     ];
     let output_task = runtime.spawn(async move {
         let _guards = guards;
@@ -308,9 +310,9 @@ fn attach_session(
         stdout: TaskStream {
             receiver,
             _tasks: vec![
-                AbortOnDrop(input_abort),
-                AbortOnDrop(resize_abort),
-                AbortOnDrop(output_task.abort_handle()),
+                AbortOnDrop::new(input_abort),
+                AbortOnDrop::new(resize_abort),
+                AbortOnDrop::new(output_task.abort_handle()),
             ],
         }
         .boxed(),

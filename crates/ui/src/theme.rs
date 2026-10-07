@@ -9,6 +9,7 @@
 //! plain numbers and never depend on the appearance.
 
 use gpui::{App, Global, Hsla, SharedString, hsla};
+use palette::{FromColor as _, LinSrgb, Oklch, Srgb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Appearance {
@@ -238,71 +239,28 @@ pub fn grey(value: u8) -> Hsla {
 /// A neutral (chroma 0) oklch tone.
 #[must_use]
 pub fn neutral(lightness: f32) -> Hsla {
-    let [v, _, _] = oklch_to_srgb(lightness, 0.0, 0.0);
-    hsla(0.0, 0.0, v, 1.0)
+    // Achromatic by construction: no hue/saturation drift from rounding.
+    let gpui::Rgba { r, .. } = oklch_rgba(lightness, 0.0, 0.0);
+    hsla(0.0, 0.0, r, 1.0)
 }
 
 /// oklch (CSS notation: L 0..1, C, H in degrees) → gpui Hsla.
 #[must_use]
 pub fn oklch(lightness: f32, chroma: f32, hue_degrees: f32) -> Hsla {
-    let [red, green, blue] = oklch_to_srgb(lightness, chroma, hue_degrees);
-    let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
-    hsla(hue, saturation, lightness, 1.0)
+    oklch_rgba(lightness, chroma, hue_degrees).into()
 }
 
-/// Björn Ottosson's `OKLab` → sRGB (the matrices CSS Color 4 uses), gamut-clipped.
-fn oklch_to_srgb(lightness: f32, chroma: f32, hue_degrees: f32) -> [f32; 3] {
-    let hue = hue_degrees.to_radians();
-    let a = chroma * hue.cos();
-    let lab_b = chroma * hue.sin();
-
-    let l_ = 0.215_803_76f32.mul_add(lab_b, 0.396_337_78f32.mul_add(a, lightness));
-    let m_ = 0.063_854_17f32.mul_add(-lab_b, 0.105_561_346f32.mul_add(-a, lightness));
-    let s_ = 1.291_485_5f32.mul_add(-lab_b, 0.089_484_18f32.mul_add(-a, lightness));
-    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
-
-    let red = 0.230_969_93f32.mul_add(s3, 3.307_711_6f32.mul_add(-m3, 4.076_741_7 * l3));
-    let green = 0.341_319_4f32.mul_add(-s3, 2.609_757_4f32.mul_add(m3, -1.268_438 * l3));
-    let blue = 1.707_614_7f32.mul_add(s3, 0.703_418_6f32.mul_add(-m3, -0.004_196_086_3 * l3));
-
-    [gamma_encode(red), gamma_encode(green), gamma_encode(blue)]
-}
-
-fn gamma_encode(x: f32) -> f32 {
-    let x = x.clamp(0.0, 1.0);
-    if x <= 0.003_130_8 {
-        12.92 * x
-    } else {
-        1.055f32.mul_add(x.powf(1.0 / 2.4), -0.055)
+/// OKLCH → gamut-clipped sRGB. Clipping happens in linear light, before
+/// the transfer function, like CSS Color 4.
+fn oklch_rgba(lightness: f32, chroma: f32, hue_degrees: f32) -> gpui::Rgba {
+    let linear = LinSrgb::<f32>::from_color(Oklch::new(lightness, chroma, hue_degrees));
+    let rgb = Srgb::<f32>::from_linear(linear);
+    gpui::Rgba {
+        r: rgb.red,
+        g: rgb.green,
+        b: rgb.blue,
+        a: 1.0,
     }
-}
-
-// The maximum is one of these exact input channels; equality selects its hue formula.
-#[expect(
-    clippy::float_cmp,
-    reason = "identify the channel that supplied the maximum"
-)]
-pub(crate) fn rgb_to_hsl(red: f32, green: f32, blue: f32) -> (f32, f32, f32) {
-    let max = red.max(green).max(blue);
-    let min = red.min(green).min(blue);
-    let lightness = f32::midpoint(max, min);
-    if (max - min).abs() < f32::EPSILON {
-        return (0.0, 0.0, lightness);
-    }
-    let range = max - min;
-    let saturation = if lightness > 0.5 {
-        range / (2.0 - max - min)
-    } else {
-        range / (max + min)
-    };
-    let hue = if max == red {
-        (green - blue) / range + if green < blue { 6.0 } else { 0.0 }
-    } else if max == green {
-        (blue - red) / range + 2.0
-    } else {
-        (red - green) / range + 4.0
-    };
-    (hue / 6.0, saturation, lightness)
 }
 
 #[cfg(test)]
@@ -336,20 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn rgb_hues_cover_primary_colors_and_tied_maxima() {
-        for (rgb, expected_hue) in [
-            ([1.0, 0.0, 0.0], 0.0),
-            ([1.0, 1.0, 0.0], 1.0 / 6.0),
-            ([0.0, 1.0, 0.0], 2.0 / 6.0),
-            ([0.0, 1.0, 1.0], 3.0 / 6.0),
-            ([0.0, 0.0, 1.0], 4.0 / 6.0),
-            ([1.0, 0.0, 1.0], 5.0 / 6.0),
-        ] {
-            let [red, green, blue] = rgb;
-            let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
-            assert!((hue - expected_hue).abs() < f32::EPSILON);
-            assert!((saturation - 1.0).abs() < f32::EPSILON);
-            assert!((lightness - 0.5).abs() < f32::EPSILON);
+    fn out_of_gamut_colours_clip_into_srgb() {
+        let color = gpui::Rgba::from(oklch(0.7, 0.4, 150.0));
+        for channel in [color.r, color.g, color.b] {
+            assert!((0.0..=1.0).contains(&channel), "{color:?}");
         }
     }
 }
