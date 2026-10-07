@@ -1,4 +1,7 @@
 #![allow(clippy::unwrap_used)]
+// The mock daemon must outlive the engine under test; dropping it early is
+// exactly what these tests must not do.
+#![allow(clippy::significant_drop_tightening)]
 use super::super::EngineRuntime;
 use super::*;
 

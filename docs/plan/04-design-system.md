@@ -111,3 +111,9 @@ Status: ✅ in prototype · ⏳ next · 🔲 later
 | `LogView` | 🔲 | Virtualized monospace lines, ANSI colours. |
 | `Terminal` | 🔲 | alacritty_terminal grid element. |
 | `TreeTable` | 🔲 | Activity monitor. |
+
+**Open question (undecided):** build `Button`/`IconButton` and `Dialog` on
+`gpui-base`'s unstyled primitives instead of plain `div`s, keeping our styling.
+The gain would be keyboard focus and accessibility behaviour we don't have to
+maintain; `Dialog` focus trapping would also need `gpui-base`'s Root
+integration. Not a code-size win. Raised by the M3 crate audit.

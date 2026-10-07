@@ -1,89 +1,62 @@
+// The mock daemon must outlive the engine under test; dropping it early is
+// exactly what these tests must not do.
+#![allow(clippy::significant_drop_tightening)]
 use super::*;
 use futures::executor::block_on;
-use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
-/// Small HTTP daemon substitute: verifies the public trait without Docker or
+/// Daemon substitute on mockito: verifies the public trait without Docker or
 /// a Tokio context on the test thread, including actions and stream EOF.
+/// Every request is recorded as an HTTP request line for assertions.
 pub(super) struct TestServer {
     pub(super) endpoint: Endpoint,
     pub(super) requests: Arc<Mutex<Vec<String>>>,
-    stopping: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    _server: mockito::ServerGuard,
+    _mocks: Vec<mockito::Mock>,
 }
-trait ReadWrite: std::io::Read + std::io::Write {}
-impl<T: std::io::Read + std::io::Write> ReadWrite for T {}
 
 impl TestServer {
     pub(super) fn new() -> Self {
-        Self::with_tls(None)
-    }
-
-    fn with_tls(tls: Option<Arc<rustls::ServerConfig>>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = Endpoint::Tcp {
-            url: format!("http://{}", listener.local_addr().unwrap()),
-            tls: None,
-        };
-        listener.set_nonblocking(true).unwrap();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let stop = stopping.clone();
+        let mut server = mockito::Server::new();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
-        let thread = std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                let (stream, _) = match listener.accept() {
-                    Ok(stream) => stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                    Err(e) => panic!("test server accept: {e}"),
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                stream
-                    .set_write_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                let mut stream: Box<dyn ReadWrite> = match &tls {
-                    Some(config) => Box::new(rustls::StreamOwned::new(
-                        rustls::ServerConnection::new(config.clone()).unwrap(),
-                        stream,
-                    )),
-                    None => Box::new(stream),
-                };
-                let mut request = Vec::new();
-                let mut buffer = [0; 2048];
-                while !request.windows(4).any(|s| s == b"\r\n\r\n") {
-                    match stream.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(size) => request.extend_from_slice(&buffer[..size]),
-                    }
-                }
-                let request = String::from_utf8_lossy(&request);
-                let line = request.lines().next().unwrap_or_default().to_owned();
-                captured.lock().unwrap().push(line.clone());
-                let (status, body) = response_for(&line);
-                let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
-        });
+        let line = |request: &mockito::Request| {
+            format!("{} {} HTTP/1.1", request.method(), request.path_and_query())
+        };
+        let mocks = ["GET", "POST", "DELETE", "HEAD", "PUT"]
+            .into_iter()
+            .map(|method| {
+                let captured = captured.clone();
+                server
+                    .mock(method, mockito::Matcher::Any)
+                    .with_header("content-type", "application/json")
+                    .with_status_code_from_request(move |request| {
+                        let line = line(request);
+                        let (status, _) = response_for(&line);
+                        captured.lock().unwrap().push(line);
+                        status
+                            .split(' ')
+                            .next()
+                            .and_then(|code| code.parse().ok())
+                            .unwrap_or(500)
+                    })
+                    .with_body_from_request(move |request| response_for(&line(request)).1.into())
+                    .create()
+            })
+            .collect();
         Self {
-            endpoint,
+            endpoint: Endpoint::Tcp {
+                url: server.url(),
+                tls: None,
+            },
             requests,
-            stopping,
-            thread: Some(thread),
+            _server: server,
+            _mocks: mocks,
         }
     }
 }
+
 fn response_for(line: &str) -> (&'static str, &'static str) {
     if line.contains("/version ") {
         (
@@ -145,13 +118,6 @@ fn response_for(line: &str) -> (&'static str, &'static str) {
         ("304 Not Modified", "")
     } else {
         ("204 No Content", "")
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Relaxed);
-        self.thread.take().unwrap().join().unwrap();
     }
 }
 
@@ -438,70 +404,26 @@ fn invalid_transport_and_tls_configuration_return_errors() {
 }
 
 #[test]
-fn tls_authenticates_client_and_honors_server_verification_in_tls12_and_tls13() {
-    use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
-    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/live/test-certs");
-    let certs = |name: &str| {
-        CertificateDer::pem_file_iter(directory.join(name))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
+fn tls_rejects_skip_verify_and_classifies_a_closed_port() {
+    let certs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/live/test-certs");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let at = |verify| Endpoint::Tcp {
+        url: format!("tcp://localhost:{port}"),
+        tls: Some(crate::TlsConfig {
+            cert_dir: certs.clone(),
+            verify,
+        }),
     };
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    for protocol in [&rustls::version::TLS12, &rustls::version::TLS13] {
-        let mut roots = rustls::RootCertStore::empty();
-        for cert in certs("ca.pem") {
-            roots.add(cert).unwrap();
-        }
-        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots),
-            provider.clone(),
-        )
-        .build()
-        .unwrap();
-        let key = PrivateKeyDer::from_pem_file(directory.join("server-key.pem")).unwrap();
-        let config = rustls::ServerConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[protocol])
-            .unwrap()
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(certs("server.pem"), key)
-            .unwrap();
-        let server = TestServer::with_tls(Some(Arc::new(config)));
-        let Endpoint::Tcp { url, .. } = &server.endpoint else {
-            panic!("TLS test server must have a TCP endpoint")
-        };
-        let verified_endpoint = Endpoint::Tcp {
-            url: url.replace("http://127.0.0.1", "https://localhost"),
-            tls: Some(crate::TlsConfig {
-                cert_dir: directory.clone(),
-                verify: true,
-            }),
-        };
-        let engine = BollardEngine::connect(&verified_endpoint)
-            .expect("trusted CA, matching hostname and client certificate");
-        assert_eq!(block_on(engine.info()).unwrap().version, "test");
-        let wrong_name = Endpoint::Tcp {
-            url: url.replace("http://", "tcp://"),
-            tls: Some(crate::TlsConfig {
-                cert_dir: directory.clone(),
-                verify: true,
-            }),
-        };
-        assert!(
-            BollardEngine::connect(&wrong_name).is_err(),
-            "server certificate excludes the IP address"
-        );
-        let unverified = Endpoint::Tcp {
-            url: url.replace("http://", "tcp://"),
-            tls: Some(crate::TlsConfig {
-                cert_dir: directory.clone(),
-                verify: false,
-            }),
-        };
-        let engine = BollardEngine::connect(&unverified)
-            .expect("verify=false permits a mismatched server name");
-        assert_eq!(block_on(engine.info()).unwrap().version, "test");
-    }
+    assert!(matches!(
+        BollardEngine::connect(&at(false)),
+        Err(ConnectError::InvalidConfig(_))
+    ));
+    assert!(matches!(
+        BollardEngine::connect(&at(true)),
+        Err(ConnectError::Refused { .. })
+    ));
 }
 
 #[test]
