@@ -18,6 +18,7 @@ use gpui::{AnyView, AppContext as _, Context, Entity, Window};
 
 pub use logs::LogsView;
 pub use stats::StatsView;
+pub use stats::{HISTORY, card, chart_value, io_card, rate};
 pub use terminal::ExecView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

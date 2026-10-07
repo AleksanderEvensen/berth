@@ -770,7 +770,7 @@ const fn status_of(state: ContainerState) -> Status {
 }
 
 /// `ghcr.io/berth/api:dev` → `api`: the part worth a monogram and a tint.
-fn image_name(image: &str) -> String {
+pub fn image_name(image: &str) -> String {
     let without_digest = image.split_once('@').map_or(image, |(name, _)| name);
     let last = without_digest.rsplit('/').next().unwrap_or(without_digest);
     last.split_once(':')

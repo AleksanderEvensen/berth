@@ -15,8 +15,8 @@ use gpui::{
 use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
 use crate::screens::{
-    Chrome, cleanup::CleanupScreen, containers::ContainersScreen, images::ImagesScreen,
-    volumes::VolumesScreen,
+    Chrome, activity::ActivityScreen, cleanup::CleanupScreen, containers::ContainersScreen,
+    images::ImagesScreen, volumes::VolumesScreen,
 };
 use crate::store::{Connection, Connector, Store, StoreEvent};
 
@@ -44,6 +44,7 @@ enum Route {
     Containers,
     Volumes,
     Images,
+    Activity,
     Cleanup,
 }
 
@@ -63,6 +64,7 @@ pub struct Shell {
     containers: Entity<ContainersScreen>,
     volumes: Entity<VolumesScreen>,
     images: Entity<ImagesScreen>,
+    activity: Entity<ActivityScreen>,
     cleanup: Entity<CleanupScreen>,
     confirm: Option<ConfirmRequest>,
     toasts: Vec<ToastItem>,
@@ -89,6 +91,7 @@ impl Shell {
         let containers = cx.new(|cx| ContainersScreen::new(store.clone(), cx));
         let volumes = cx.new(|cx| VolumesScreen::new(store.clone(), cx));
         let images = cx.new(|cx| ImagesScreen::new(store.clone(), cx));
+        let activity = cx.new(|cx| ActivityScreen::new(store.clone(), cx));
         let cleanup = cx.new(|cx| CleanupScreen::new(store.clone(), cx));
         Self::present_confirms(&containers, window, cx);
         Self::present_confirms(&volumes, window, cx);
@@ -104,6 +107,7 @@ impl Shell {
             containers,
             volumes,
             images,
+            activity,
             cleanup,
             confirm: None,
             toasts: Vec::new(),
@@ -133,6 +137,9 @@ impl Shell {
         self.route = route;
         self.containers.update(cx, |screen, cx| {
             screen.set_visible(route == Route::Containers, cx);
+        });
+        self.activity.update(cx, |screen, cx| {
+            screen.set_visible(route == Route::Activity, cx);
         });
         cx.notify();
     }
@@ -339,7 +346,12 @@ impl Shell {
             )
             .section(
                 SidebarSection::new("General")
-                    .item(SidebarItem::new("nav-activity", icons::CHART, "Activity"))
+                    .item(item(
+                        "nav-activity",
+                        icons::CHART,
+                        "Activity",
+                        Route::Activity,
+                    ))
                     .item(item(
                         "nav-cleanup",
                         icons::BROOM,
@@ -410,6 +422,11 @@ impl Render for Shell {
                 self.images
                     .update(cx, |screen, cx| screen.set_chrome(frame, cx));
                 self.images.clone().into_any_element()
+            }
+            Route::Activity => {
+                self.activity
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
+                self.activity.clone().into_any_element()
             }
             Route::Cleanup => {
                 self.cleanup

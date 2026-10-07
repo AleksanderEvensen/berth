@@ -174,7 +174,7 @@ impl Render for StatsView {
     }
 }
 
-fn card(
+pub fn card(
     title: &'static str,
     value: String,
     detail: Option<String>,
@@ -223,7 +223,7 @@ fn card(
         .into_any_element()
 }
 
-fn io_card(
+pub fn io_card(
     title: &'static str,
     (in_label, out_label): (&str, &str),
     (rate_in, rate_out): (u64, u64),
@@ -289,7 +289,7 @@ impl From<&VecDeque<StatsSample>> for History {
 /// Bytes per second between two cumulative counter readings. A counter
 /// that went backwards (container restart) or a non-positive interval
 /// reads as zero.
-fn rate(prev: u64, cur: u64, elapsed_nanos: i64) -> u64 {
+pub fn rate(prev: u64, cur: u64, elapsed_nanos: i64) -> u64 {
     let Ok(elapsed) = u128::try_from(elapsed_nanos) else {
         return 0;
     };
@@ -300,7 +300,7 @@ fn rate(prev: u64, cur: u64, elapsed_nanos: i64) -> u64 {
         .unwrap_or(0)
 }
 
-fn chart_value(n: u64) -> f32 {
+pub fn chart_value(n: u64) -> f32 {
     n.to_f32().unwrap_or(f32::MAX)
 }
 

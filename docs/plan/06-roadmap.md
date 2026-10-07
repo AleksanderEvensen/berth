@@ -18,13 +18,15 @@
 - `/system/df` sizes; Clean-up page with prunes (G1).
 - Stories: C1–C3, D1–D3, B11, G1.
 
-## M3 — Live views (P1)
+## M3 — Live views (P1) ✅
 - Logs (virtualized, ANSI), Stats sparklines, Terminal (exec), Activity monitor.
 - Stories: B6–B8, F1.
 
 ## M4 — Polish & ship Linux (P1)
 - Light theme, accent picker, settings persistence, command palette, keyboard
   map, networks screen, reduce-motion.
+- Deferred from M3: Activity monitor "Engine" row (daemon usage isn't in the
+  Docker API — read `/proc` for `dockerd` on Linux), Logs wrap toggle.
 - Packaging: AppImage, Flatpak, AUR, .deb/.rpm.
 - Stories: A3, E1, H1, H2, C4, D4, D5.
 

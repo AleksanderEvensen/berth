@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod cleanup;
 pub mod containers;
 pub mod images;

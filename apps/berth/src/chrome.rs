@@ -53,6 +53,10 @@ pub fn content_radius(window: &Window) -> f32 {
 
 /// Left edge for our leading titlebar controls, clear of the native macOS
 /// traffic lights (which hide in fullscreen).
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(clippy::missing_const_for_fn, reason = "the macOS branch is not const")
+)]
 pub fn titlebar_leading(window: &Window) -> f32 {
     #[cfg(target_os = "macos")]
     if !window.is_fullscreen() {
