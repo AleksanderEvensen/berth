@@ -20,5 +20,9 @@ chrono.workspace = true
 aho-corasick.workspace = true
 num-traits.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit.workspace = true
+raw-window-handle.workspace = true
+
 [lints]
 workspace = true

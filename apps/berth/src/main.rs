@@ -50,7 +50,7 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Berth".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(gpui::point(px(14.0), px(19.0))),
+                        traffic_light_position: Some(chrome::TRAFFIC_LIGHT_POSITION),
                     }),
                     // We draw our own unified titlebar and, under CSD, our own
                     // caption buttons (see chrome.rs). The compositor may still

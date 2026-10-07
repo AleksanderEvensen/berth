@@ -6,19 +6,33 @@
 
 use std::cell::Cell;
 
-use berth_ui::{Theme, icon, icons};
+use berth_ui::Theme;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use berth_ui::{icon, icons};
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, Div, HitboxBehavior, MouseButton, Pixels,
     Point, ResizeEdge, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px,
     transparent_black,
 };
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 const CAPTION_GROUP: &str = "caption-button";
 
 /// Width of the invisible resize band (and shadow) around a CSD window.
 const FRAME_INSET: Pixels = px(10.0);
 /// Corner radius of a floating CSD window.
 pub const WINDOW_RADIUS: f32 = 10.0;
+
+/// Origin of the macOS close button, vertically centred in our header.
+pub const TRAFFIC_LIGHT_POSITION: Point<Pixels> =
+    point(px(14.0), px((Theme::HEADER_HEIGHT - 14.0) / 2.0));
+/// Fallback right edge of the macOS zoom button, should `AppKit` not hand
+/// us the button: three 14pt buttons, 9pt apart (macOS 26+).
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHTS_END: f32 = 14.0 + 3.0 * 14.0 + 2.0 * 9.0;
+/// Left edge of our own leading titlebar controls when nothing native
+/// occupies the corner.
+pub const TITLEBAR_LEADING: f32 = Theme::SPACE_SM + 2.0;
 
 thread_local! {
     /// Armed by a press on a drag region; the first move with the button
@@ -35,6 +49,40 @@ pub fn content_radius(window: &Window) -> f32 {
         }
         _ => 0.0,
     }
+}
+
+/// Left edge for our leading titlebar controls, clear of the native macOS
+/// traffic lights (which hide in fullscreen).
+pub fn titlebar_leading(window: &Window) -> f32 {
+    #[cfg(target_os = "macos")]
+    if !window.is_fullscreen() {
+        return traffic_lights_end(window).unwrap_or(TRAFFIC_LIGHTS_END) + Theme::SPACE_MD;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+    TITLEBAR_LEADING
+}
+
+/// Right edge of the native zoom button in window coordinates, measured
+/// from `AppKit` so button size and spacing are right on every macOS release.
+#[cfg(target_os = "macos")]
+fn traffic_lights_end(window: &Window) -> Option<f32> {
+    use num_traits::ToPrimitive as _;
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    // SAFETY: GPUI's AppKit handle points at the window's live content
+    // `NSView`, borrowed for as long as `window`; we render on the main thread.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let zoom = view
+        .window()?
+        .standardWindowButton(NSWindowButton::ZoomButton)?;
+    let frame = zoom.convertRect_toView(zoom.bounds(), None);
+    (frame.origin.x + frame.size.width).to_f32()
 }
 
 /// Make `el` drag the window; double-click toggles maximize.
@@ -170,15 +218,19 @@ const fn cursor_for(edge: ResizeEdge) -> CursorStyle {
     }
 }
 
+/// Other platforms always draw native window controls.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+pub const fn caption_buttons(_window: &Window, _cx: &App) -> Option<AnyElement> {
+    None
+}
+
 /// Minimize / maximize / close, drawn by us when the compositor leaves
 /// decorations to the client. Follows the desktop's button layout.
 ///
 /// TODO: only the right-hand side is rendered; a left-side layout
 /// (e.g. GNOME `close,minimize:`) needs clearance around the sidebar toggle.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
-    if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
-        return None;
-    }
     if !matches!(window.window_decorations(), Decorations::Client { .. }) {
         return None;
     }

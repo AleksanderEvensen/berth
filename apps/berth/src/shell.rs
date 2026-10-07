@@ -350,7 +350,7 @@ impl Shell {
             .footer(self.render_engine_footer(cx))
     }
 
-    fn render_sidebar_toggle(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_sidebar_toggle(&self, leading: f32, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
         let color = theme.text_muted;
         let open = if self.sidebar_collapsed { 0.0 } else { 1.0 };
@@ -358,7 +358,7 @@ impl Shell {
             .id("sidebar-toggle")
             .absolute()
             .top(px((Theme::HEADER_HEIGHT - 28.0) / 2.0))
-            .left(px(Theme::SPACE_SM + 2.0))
+            .left(px(leading))
             .size(px(28.0))
             .flex()
             .items_center()
@@ -384,8 +384,13 @@ impl Render for Shell {
         let radius = chrome::content_radius(window);
         let theme = Theme::of(cx).clone();
         let collapsed = self.sidebar_collapsed;
+        let leading = chrome::titlebar_leading(window);
         let frame = Chrome {
-            header_inset: if collapsed { TOGGLE_CLEARANCE } else { 0.0 },
+            header_inset: if collapsed {
+                leading - chrome::TITLEBAR_LEADING + TOGGLE_CLEARANCE
+            } else {
+                0.0
+            },
             left_radius: if collapsed { radius } else { 0.0 },
             right_radius: radius,
         };
@@ -433,7 +438,7 @@ impl Render for Shell {
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
-            .child(self.render_sidebar_toggle(cx))
+            .child(self.render_sidebar_toggle(leading, cx))
             .when_some(captions, |d, captions| {
                 d.child(
                     div()
