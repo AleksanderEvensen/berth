@@ -22,6 +22,7 @@ use crate::screens::{
     containers::ContainersScreen,
     engine_summary,
     images::ImagesScreen,
+    networks::NetworksScreen,
     settings::{Page, SettingsScreen},
     volumes::VolumesScreen,
 };
@@ -57,6 +58,7 @@ enum Route {
     Containers,
     Volumes,
     Images,
+    Networks,
     Activity,
     Cleanup,
     Settings,
@@ -80,6 +82,7 @@ pub struct Shell {
     containers: Entity<ContainersScreen>,
     volumes: Entity<VolumesScreen>,
     images: Entity<ImagesScreen>,
+    networks: Entity<NetworksScreen>,
     activity: Entity<ActivityScreen>,
     cleanup: Entity<CleanupScreen>,
     settings: Entity<SettingsScreen>,
@@ -118,12 +121,14 @@ impl Shell {
         let containers = cx.new(|cx| ContainersScreen::new(store.clone(), cx));
         let volumes = cx.new(|cx| VolumesScreen::new(store.clone(), cx));
         let images = cx.new(|cx| ImagesScreen::new(store.clone(), cx));
+        let networks = cx.new(|cx| NetworksScreen::new(store.clone(), cx));
         let activity = cx.new(|cx| ActivityScreen::new(store.clone(), cx));
         let cleanup = cx.new(|cx| CleanupScreen::new(store.clone(), cx));
         let settings = cx.new(|cx| SettingsScreen::new(store.clone(), window, cx));
         Self::present_confirms(&containers, window, cx);
         Self::present_confirms(&volumes, window, cx);
         Self::present_confirms(&images, window, cx);
+        Self::present_confirms(&networks, window, cx);
         Self::present_confirms(&cleanup, window, cx);
 
         Self {
@@ -136,6 +141,7 @@ impl Shell {
             containers,
             volumes,
             images,
+            networks,
             activity,
             cleanup,
             settings,
@@ -403,6 +409,7 @@ impl Shell {
         let running = store.running_count();
         let volumes = store.volumes().len();
         let images = store.images().len();
+        let networks = store.networks().len();
         let item = |id: &'static str, icon, label: &'static str, route: Route| {
             SidebarItem::new(id, icon, label)
                 .active(self.route == route)
@@ -434,7 +441,10 @@ impl Shell {
                         item("nav-images", icons::DISC, "Images", Route::Images)
                             .trailing(images.to_string()),
                     )
-                    .item(SidebarItem::new("nav-networks", icons::NETWORK, "Networks")),
+                    .item(
+                        item("nav-networks", icons::NETWORK, "Networks", Route::Networks)
+                            .trailing(networks.to_string()),
+                    ),
             )
             .section(
                 SidebarSection::new("General")
@@ -520,6 +530,11 @@ impl Render for Shell {
                 self.images
                     .update(cx, |screen, cx| screen.set_chrome(frame, cx));
                 self.images.clone().into_any_element()
+            }
+            Route::Networks => {
+                self.networks
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
+                self.networks.clone().into_any_element()
             }
             Route::Activity => {
                 self.activity

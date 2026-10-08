@@ -18,7 +18,7 @@ use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
-use crate::{Container, DiskUsage, Image, ImagePrune, PruneReport, Volume};
+use crate::{Container, DiskUsage, Image, ImagePrune, Network, PruneReport, Volume};
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
@@ -355,6 +355,11 @@ pub trait Engine: Send + Sync + 'static {
 
     fn remove_image(&self, id: &str, force: bool) -> BoxFuture<'static, EngineResult<()>>;
     fn remove_volume(&self, name: &str, force: bool) -> BoxFuture<'static, EngineResult<()>>;
+
+    /// All networks with their connected (running) containers.
+    fn list_networks(&self) -> BoxFuture<'static, EngineResult<Vec<Network>>>;
+    /// Fails with a conflict while containers are connected.
+    fn remove_network(&self, id: &str) -> BoxFuture<'static, EngineResult<()>>;
 
     /// Remove stopped containers.
     fn prune_containers(&self) -> BoxFuture<'static, EngineResult<PruneReport>>;

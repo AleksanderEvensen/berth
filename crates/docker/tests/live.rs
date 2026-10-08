@@ -10,7 +10,7 @@ use berth_docker::{
 };
 use bollard::{
     API_DEFAULT_VERSION, Docker,
-    models::{ContainerCreateBody, VolumeCreateOptions},
+    models::{ContainerCreateBody, NetworkCreateRequest, VolumeCreateOptions},
     query_parameters as query,
 };
 use futures::{FutureExt as _, StreamExt as _, channel::oneshot, executor::block_on};
@@ -411,6 +411,80 @@ fn live_volume_disk_usage_on_a_non_tokio_executor() {
             .unwrap()
             .iter()
             .any(|v| v.name == name)
+    );
+}
+
+struct NetworkCleanup<'a> {
+    runtime: &'a Runtime,
+    docker: &'a Docker,
+    name: String,
+}
+
+impl Drop for NetworkCleanup<'_> {
+    fn drop(&mut self) {
+        // Usually already removed by the test; a 404 here is expected.
+        let _ = self.runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                self.docker.remove_network(&self.name),
+            )
+            .await
+        });
+    }
+}
+
+#[test]
+#[ignore = "requires a real engine and a uniquely named throwaway network"]
+fn live_network_list_and_remove_on_a_non_tokio_executor() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let endpoint = endpoint().unwrap();
+    let engine = BollardEngine::connect(&endpoint).unwrap();
+    let kind = block_on(engine.info()).unwrap().kind;
+    let (runtime, docker) = test_client(&endpoint).unwrap();
+    let name = test_container_name()
+        .unwrap()
+        .replace("berth-live-test-", "berth-live-network-");
+    let label = "dev.berth.integration-test";
+    let _cleanup = NetworkCleanup {
+        runtime: &runtime,
+        docker: &docker,
+        name: name.clone(),
+    };
+    runtime
+        .block_on(docker.create_network(NetworkCreateRequest {
+            name: name.clone(),
+            internal: Some(true),
+            labels: Some(std::collections::HashMap::from([(
+                label.into(),
+                name.clone(),
+            )])),
+            ..Default::default()
+        }))
+        .unwrap();
+    let networks = block_on(engine.list_networks()).unwrap();
+    let network = networks
+        .iter()
+        .find(|n| n.name == name)
+        .ok_or("throwaway network not listed")
+        .unwrap();
+    assert!(!network.is_builtin(kind) && network.internal);
+    assert!(network.is_prunable(kind));
+    assert_eq!(network.endpoints, []);
+    assert!(network.labels.contains(&(label.into(), name.clone())));
+    let bridge = networks
+        .iter()
+        .find(|n| n.name == "bridge")
+        .ok_or("default bridge not listed")
+        .unwrap();
+    assert!(bridge.is_builtin(kind) && !bridge.subnets.is_empty());
+    assert!(block_on(engine.remove_network(&bridge.id)).is_err());
+
+    block_on(engine.remove_network(&network.id)).unwrap();
+    assert!(
+        !block_on(engine.list_networks())
+            .unwrap()
+            .iter()
+            .any(|n| n.name == name)
     );
 }
 

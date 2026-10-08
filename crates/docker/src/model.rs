@@ -1,3 +1,5 @@
+use crate::EngineKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerState {
     Created,
@@ -202,6 +204,100 @@ impl Volume {
     }
 }
 
+/// One IPAM pool of a network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subnet {
+    /// CIDR, e.g. `172.19.0.0/16`.
+    pub subnet: String,
+    pub gateway: Option<String>,
+}
+
+/// A container's endpoint on a network. Only running containers have one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkEndpoint {
+    pub container_id: String,
+    pub name: String,
+    /// CIDR as reported by the engine, e.g. `172.19.0.2/16`.
+    pub ipv4: Option<String>,
+    pub ipv6: Option<String>,
+}
+
+/// Special-purpose networks that `network prune` leaves alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetworkRole {
+    #[default]
+    Regular,
+    /// Swarm routing-mesh network.
+    Ingress,
+    /// A template for other networks; never has endpoints of its own.
+    ConfigOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Network {
+    pub id: String,
+    pub name: String,
+    pub driver: String,
+    /// `local`, `swarm` or `global`.
+    pub scope: String,
+    /// RFC3339 creation time reported by the engine.
+    pub created: Option<String>,
+    pub internal: bool,
+    pub attachable: bool,
+    pub role: NetworkRole,
+    pub ipv6: bool,
+    pub subnets: Vec<Subnet>,
+    /// Sorted by key.
+    pub labels: Vec<(String, String)>,
+    /// Sorted by container name.
+    pub endpoints: Vec<NetworkEndpoint>,
+}
+
+impl Network {
+    /// Networks the engine creates itself and refuses to remove.
+    #[must_use]
+    pub fn is_builtin(&self, engine: EngineKind) -> bool {
+        match engine {
+            EngineKind::Podman => matches!(self.name.as_str(), "podman" | "host" | "none"),
+            EngineKind::Docker | EngineKind::Other => {
+                matches!(self.name.as_str(), "bridge" | "host" | "none")
+            }
+        }
+    }
+
+    /// Swarm networks can be used by services on other nodes, which local
+    /// endpoints don't show.
+    #[must_use]
+    pub fn is_swarm(&self) -> bool {
+        self.scope == "swarm"
+    }
+
+    /// What `network prune` removes: custom, local networks without
+    /// endpoints, excluding ingress and config-only networks (as Docker does).
+    #[must_use]
+    pub fn is_prunable(&self, engine: EngineKind) -> bool {
+        self.endpoints.is_empty()
+            && !self.is_builtin(engine)
+            && !self.is_swarm()
+            && self.role == NetworkRole::Regular
+    }
+
+    #[must_use]
+    pub fn short_id(&self) -> &str {
+        self.id
+            .get(..self.id.floor_char_boundary(self.id.len().min(12)))
+            .unwrap_or(&self.id)
+    }
+
+    #[must_use]
+    pub fn compose_project(&self) -> Option<&str> {
+        self.labels
+            .iter()
+            .find(|(key, _)| key == "com.docker.compose.project")
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskUsage {
     pub images: Vec<Image>,
@@ -224,6 +320,31 @@ pub enum ImagePrune {
 
 #[cfg(test)]
 mod tests {
+    use crate::EngineKind;
+
+    #[test]
+    fn builtin_networks_depend_on_the_engine_and_prune_rules_match_docker() {
+        let mut network = crate::fixtures::networks().into_iter().next().unwrap();
+        assert_eq!(network.name, "bridge");
+        assert!(network.is_builtin(EngineKind::Docker));
+        assert!(!network.is_builtin(EngineKind::Podman));
+        network.name = "podman".into();
+        assert!(!network.is_builtin(EngineKind::Docker));
+        assert!(network.is_builtin(EngineKind::Podman));
+
+        network.name = "custom".into();
+        assert!(network.is_prunable(EngineKind::Docker));
+        for protect in [
+            |n: &mut crate::Network| n.role = crate::NetworkRole::Ingress,
+            |n: &mut crate::Network| n.role = crate::NetworkRole::ConfigOnly,
+            |n: &mut crate::Network| n.scope = "swarm".into(),
+        ] {
+            let mut network = network.clone();
+            protect(&mut network);
+            assert!(!network.is_prunable(EngineKind::Docker));
+        }
+    }
+
     #[test]
     fn image_names_and_volume_projects() {
         let mut image = crate::fixtures::images().into_iter().next().unwrap();

@@ -24,7 +24,9 @@ use berth_docker::{
 use futures::StreamExt as _;
 use gpui::{AsyncApp, Context, EventEmitter, Task, WeakEntity};
 
+mod networks;
 mod storage;
+use networks::Networks;
 pub use storage::PruneTarget;
 use storage::Storage;
 
@@ -81,12 +83,13 @@ pub struct Store {
     engine: Option<Arc<dyn Engine>>,
     connection: Connection,
     containers: Vec<Container>,
-    /// In-flight operations, keyed by container/image id or volume name.
+    /// In-flight operations, keyed by container/image/network id or volume name.
     pending: HashMap<String, Op>,
     /// Start events seen per container, so views can tell a restart apart
     /// even when every inspect reports "running".
     starts: HashMap<String, u64>,
     storage: Storage,
+    networks: Networks,
     /// Bumped whenever a different engine is installed. Async work captures
     /// it and drops its result if the engine changed meanwhile, so a slow
     /// reply from the old engine can't land in the new engine's state.
@@ -107,6 +110,7 @@ impl Store {
             pending: HashMap::new(),
             starts: HashMap::new(),
             storage: Storage::default(),
+            networks: Networks::default(),
             generation: 0,
             session,
         }
@@ -157,6 +161,7 @@ impl Store {
         self.pending.clear();
         self.starts.clear();
         self.storage = Storage::default();
+        self.networks = Networks::default();
         self.reconnect(cx);
     }
 
@@ -346,6 +351,8 @@ async fn run_session(
         store.pending.clear();
         store.storage.refresh_queued = false;
         store.refresh_storage(cx);
+        store.networks.cancel_refresh();
+        store.refresh_networks(cx);
         cx.notify();
     });
     if synced.is_err() {
@@ -386,6 +393,18 @@ async fn handle_event(
         ObjectKind::Network => false,
     };
     if affects_storage && this.update(cx, Store::refresh_storage).is_err() {
+        return false;
+    }
+    // Endpoints come and go as containers start and stop.
+    let affects_networks = match event.kind {
+        ObjectKind::Network => true,
+        ObjectKind::Container => matches!(
+            event.action,
+            EventAction::Start | EventAction::Die | EventAction::Restart | EventAction::Destroy
+        ),
+        ObjectKind::Image | ObjectKind::Volume => false,
+    };
+    if affects_networks && this.update(cx, Store::refresh_networks).is_err() {
         return false;
     }
     if event.kind != ObjectKind::Container {
@@ -476,6 +495,95 @@ mod tests {
                 "a stale removal pruned the new engine's volume"
             );
             assert_eq!(store.pending(&volume), None);
+        });
+    }
+
+    #[gpui::test]
+    fn networks_follow_container_state_and_removals(cx: &mut TestAppContext) {
+        let engine: Arc<dyn Engine> = Arc::new(FixtureEngine::default());
+        let connector: Connector = Arc::new(move || Ok(engine.clone()));
+        let store = cx.new(|cx| Store::new(connector, cx));
+        let settle = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+        };
+        let network =
+            |store: &Store, name: &str| store.networks().iter().find(|n| n.name == name).cloned();
+        settle(cx);
+        let (rustfs, photon) = store.read_with(cx, |store, _| {
+            assert!(store.networks_loaded());
+            let bridge = network(store, "bridge").unwrap();
+            assert_eq!(bridge.endpoints.len(), 1);
+            let unused: Vec<_> = store.unused_networks().map(|n| n.name.as_str()).collect();
+            assert_eq!(
+                unused,
+                [
+                    "blue-zone-workshop_default",
+                    "photon_dev_default",
+                    "scratch_default"
+                ]
+            );
+            assert_eq!(store.prune_count(PruneTarget::UnusedNetworks), Some(3));
+            (
+                bridge.endpoints[0].container_id.clone(),
+                network(store, "photon_dev_default").unwrap().id,
+            )
+        });
+
+        store.update(cx, |store, cx| {
+            store.run(vec![rustfs], Op::Stop, cx);
+            store.remove_networks(vec![photon.clone()], cx);
+        });
+        settle(cx);
+        store.read_with(cx, |store, _| {
+            assert_eq!(network(store, "bridge").unwrap().endpoints, []);
+            assert!(network(store, "photon_dev_default").is_none());
+            assert_eq!(store.pending(&photon), None);
+        });
+    }
+
+    /// A change while a list is in flight must not be lost: the outdated
+    /// reply is dropped and a follow-up refresh picks the change up.
+    #[gpui::test]
+    fn network_changes_during_a_refresh_trigger_a_follow_up(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let latency = Duration::from_millis(100);
+        let fixture = Arc::new(FixtureEngine::default().with_list_latency(latency));
+        let engine: Arc<dyn Engine> = fixture.clone();
+        let connector: Connector = Arc::new(move || Ok(engine.clone()));
+        let store = cx.new(|cx| Store::new(connector, cx));
+        // Past the debounce, then until the delayed reply has landed.
+        let settle = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            std::thread::sleep(latency.saturating_mul(2));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        let photon = store.read_with(cx, |store, _| {
+            store
+                .networks()
+                .iter()
+                .find(|n| n.name == "photon_dev_default")
+                .map(|n| n.id.clone())
+                .unwrap()
+        });
+
+        // Start a refresh and let it get past the debounce to the engine.
+        store.update(cx, Store::refresh_networks);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        // Removed behind the store's back while that list is in flight.
+        futures::executor::block_on(fixture.remove_network(&photon)).unwrap();
+        settle(cx);
+        settle(cx);
+        store.read_with(cx, |store, _| {
+            assert!(
+                !store.networks().iter().any(|n| n.id == photon),
+                "the removal's event was swallowed by the in-flight refresh"
+            );
         });
     }
 }

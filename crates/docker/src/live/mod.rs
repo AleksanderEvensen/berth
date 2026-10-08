@@ -26,7 +26,7 @@ use tokio_util::task::{AbortOnDrop, AbortOnDropHandle};
 use crate::{
     ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
     EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, Image, ImagePrune, LogLine,
-    LogOptions, PruneReport, RemoveOptions, StatsSample, Volume,
+    LogOptions, Network, PruneReport, RemoveOptions, StatsSample, Volume,
 };
 
 /// A live engine whose Tokio work never depends on the caller's executor.
@@ -366,6 +366,37 @@ impl Engine for BollardEngine {
                 .await
                 .map_err(mapping::error)
         })
+    }
+
+    fn list_networks(&self) -> BoxFuture<'static, EngineResult<Vec<Network>>> {
+        let docker = self.docker.clone();
+        self.spawn(async move {
+            let values = docker
+                .list_networks(None::<query::ListNetworksOptions>)
+                .await
+                .map_err(mapping::error)?;
+            // The list leaves `Containers` empty; inspect fills it in.
+            let inspected = futures::future::join_all(values.into_iter().filter_map(|value| {
+                let docker = docker.clone();
+                let id = value.id?;
+                Some(async move {
+                    docker
+                        .inspect_network(&id, None::<query::InspectNetworkOptions>)
+                        .await
+                })
+            }))
+            .await;
+            inspected
+                .into_iter()
+                .filter_map(mapping::inspected_network)
+                .collect()
+        })
+    }
+
+    fn remove_network(&self, id: &str) -> BoxFuture<'static, EngineResult<()>> {
+        let docker = self.docker.clone();
+        let id = id.to_owned();
+        self.spawn(async move { docker.remove_network(&id).await.map_err(mapping::error) })
     }
 
     fn prune_containers(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {

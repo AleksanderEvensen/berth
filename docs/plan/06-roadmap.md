@@ -7,7 +7,7 @@ with a note saying what is missing.
 
 **Status (audited 2026-10-08, at `8bdee48`):** M0–M3 done apart from the
 gaps listed under them. M4 has started: settings screen, light theme, accent
-picker, reduce motion and persistence are in.
+picker, reduce motion, persistence and the Networks screen are in.
 
 ## M0 — Visual prototype ✅
 - [x] Workspace: `apps/berth`, `crates/ui`, `crates/docker`.
@@ -69,7 +69,7 @@ picker, reduce motion and persistence are in.
 - [ ] Keyboard map — every action reachable by keyboard (NFR-U1); a shortcut
       reference. Bound today: sidebar, search, settings, focus cycling, quit,
       dialog confirm/cancel.
-- [ ] Networks screen.
+- [x] Networks screen.
 - Deferred from M3:
   - [ ] Activity monitor "Engine" row (daemon usage isn't in the Docker API —
         read `/proc` for `dockerd` on Linux).
@@ -82,8 +82,9 @@ picker, reduce motion and persistence are in.
   - [ ] .rpm
 - Stories:
   - [ ] A3 — Command palette (`ctrl+k`): run any action, jump to any container/image/volume.
-  - [ ] E1 — Networks: list (driver, scope, subnet, attached containers), delete, prune unused.
-        (`prune_networks` exists in the engine; listing/removal and the screen do not.)
+  - [x] E1 — Networks: list (driver, scope, subnet, attached containers), delete, prune unused.
+        Swarm networks count as possibly in use (services on other nodes have no
+        local endpoints), so Berth doesn't delete them.
   - [x] H1 — Engine endpoint: auto-detect, Docker context, custom socket/URL; active one shown.
   - [x] H2 — Appearance: System / Light / Dark, accent colour.
   - [ ] C4 — Volume info. *Done:* driver, mountpoint, created, labels, compose

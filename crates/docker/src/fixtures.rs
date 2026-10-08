@@ -12,8 +12,9 @@ use futures::{FutureExt as _, StreamExt as _};
 use crate::{
     ComposeRef, Container, ContainerAction, ContainerState, DiskUsage, Endpoint, Engine,
     EngineError, EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, ExecOptions,
-    ExecSession, Image, ImagePrune, LogLine, LogOptions, Mount, MountKind, ObjectKind, PortBinding,
-    Protocol, PruneReport, RemoveOptions, StatsSample, Volume,
+    ExecSession, Image, ImagePrune, LogLine, LogOptions, Mount, MountKind, Network,
+    NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol, PruneReport, RemoveOptions,
+    StatsSample, Subnet, Volume,
 };
 
 fn port(host: u16, container: u16) -> PortBinding {
@@ -393,6 +394,113 @@ fn fixture_volume(name: &str, size: u64, labels: Vec<(String, String)>) -> Volum
     }
 }
 
+/// The engine's built-in networks, one per Compose project and two
+/// leftovers from projects that are gone. Endpoints are filled in on list.
+#[must_use]
+pub fn networks() -> Vec<Network> {
+    networks_for(&containers())
+}
+
+fn networks_for(containers: &[Container]) -> Vec<Network> {
+    let projects: std::collections::BTreeSet<&str> = containers
+        .iter()
+        .filter_map(|c| c.compose.as_ref())
+        .map(|c| c.project.as_str())
+        .chain(["blue-zone-workshop", "scratch"])
+        .collect();
+    let mut networks = vec![
+        fixture_network("bridge", "bridge", Some("172.17"), vec![]),
+        fixture_network("host", "host", None, vec![]),
+        fixture_network("none", "null", None, vec![]),
+    ];
+    let mut spare = 30_u8..;
+    for project in projects {
+        // Reuse the subnet the project's containers already have addresses in.
+        let prefix = containers
+            .iter()
+            .filter(|c| c.compose.as_ref().is_some_and(|c| c.project == project))
+            .find_map(|c| c.ip.as_deref())
+            .and_then(|ip| ip.rsplitn(3, '.').nth(2))
+            .map_or_else(
+                || format!("172.{}", spare.next().unwrap_or(u8::MAX)),
+                str::to_owned,
+            );
+        networks.push(fixture_network(
+            &format!("{project}_default"),
+            "bridge",
+            Some(&prefix),
+            vec![
+                ("com.docker.compose.network".into(), "default".into()),
+                ("com.docker.compose.project".into(), project.into()),
+            ],
+        ));
+    }
+    networks
+}
+
+fn fixture_network(
+    name: &str,
+    driver: &str,
+    prefix: Option<&str>,
+    labels: Vec<(String, String)>,
+) -> Network {
+    // A stable, unique, 64-hex ID derived from the name.
+    let hex: String = name
+        .bytes()
+        .flat_map(|b| [b >> 4, b & 0xf])
+        .map(|n| char::from_digit(u32::from(n), 16).unwrap_or('0'))
+        .collect();
+    let id: String = hex.chars().cycle().take(64).collect();
+    Network {
+        id,
+        name: name.into(),
+        driver: driver.into(),
+        scope: "local".into(),
+        created: Some("2026-09-22T09:30:00Z".into()),
+        internal: false,
+        attachable: false,
+        role: NetworkRole::Regular,
+        ipv6: false,
+        subnets: prefix
+            .map(|prefix| Subnet {
+                subnet: format!("{prefix}.0.0/16"),
+                gateway: Some(format!("{prefix}.0.1")),
+            })
+            .into_iter()
+            .collect(),
+        labels,
+        endpoints: Vec::new(),
+    }
+}
+
+/// Running containers attached to `network`: the default bridge for
+/// standalone containers, `<project>_default` for Compose services.
+fn network_endpoints(containers: &[Container], network: &Network) -> Vec<NetworkEndpoint> {
+    let mut endpoints: Vec<NetworkEndpoint> = containers
+        .iter()
+        .filter(|c| c.state.is_active())
+        .filter(|c| {
+            c.compose.as_ref().map_or_else(
+                || network.name == "bridge",
+                |compose| network.name == format!("{}_default", compose.project),
+            )
+        })
+        .map(|c| NetworkEndpoint {
+            container_id: c.id.clone(),
+            name: c.name.clone(),
+            ipv4: c.ip.as_ref().map(|ip| format!("{ip}/16")),
+            ipv6: None,
+        })
+        .collect();
+    endpoints.sort_by(|a, b| a.name.cmp(&b.name));
+    endpoints
+}
+
+fn with_endpoints(containers: &[Container], mut network: Network) -> Network {
+    network.endpoints = network_endpoints(containers, &network);
+    network
+}
+
 fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -428,6 +536,7 @@ const CONTAINER_BYTES: u64 = 8_000_000;
 pub struct FixtureEngine {
     state: Arc<Mutex<FixtureState>>,
     latency: Option<Duration>,
+    list_latency: Option<Duration>,
     log_history_lines: u32,
 }
 
@@ -436,7 +545,7 @@ struct FixtureState {
     containers: Vec<Container>,
     images: Vec<Image>,
     volumes: Vec<Volume>,
-    networks: Vec<String>,
+    networks: Vec<Network>,
     build_cache: Vec<(String, u64, bool)>,
     subscribers: Vec<mpsc::Sender<EngineResult<EngineEvent>>>,
 }
@@ -473,17 +582,7 @@ impl FixtureEngine {
             state: Arc::new(Mutex::new(FixtureState {
                 images: images_for(&containers),
                 volumes: volumes_for(&containers),
-                networks: containers
-                    .iter()
-                    .filter_map(|c| c.compose.as_ref())
-                    .map(|c| format!("{}_default", c.project))
-                    .chain([
-                        "blue-zone-workshop_default".into(),
-                        "scratch_default".into(),
-                    ])
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
+                networks: networks_for(&containers),
                 build_cache: vec![
                     ("cache-api".into(), 220_000_000, false),
                     ("cache-workshop".into(), 380_000_000, false),
@@ -493,6 +592,7 @@ impl FixtureEngine {
                 subscribers: Vec::new(),
             })),
             latency: None,
+            list_latency: None,
             log_history_lines: 240,
         }
     }
@@ -502,6 +602,14 @@ impl FixtureEngine {
     #[must_use]
     pub const fn with_latency(mut self, latency: Duration) -> Self {
         self.latency = Some(latency);
+        self
+    }
+
+    /// Delay network listings: the state is read immediately, the reply
+    /// arrives later — so changes made meanwhile are missing from it.
+    #[must_use]
+    pub const fn with_list_latency(mut self, latency: Duration) -> Self {
+        self.list_latency = Some(latency);
         self
     }
 
@@ -755,6 +863,62 @@ impl Engine for FixtureEngine {
         })
     }
 
+    fn list_networks(&self) -> BoxFuture<'static, EngineResult<Vec<Network>>> {
+        let list: Vec<Network> = self.with_state(|s| {
+            s.networks
+                .iter()
+                .cloned()
+                .map(|network| with_endpoints(&s.containers, network))
+                .collect()
+        });
+        let Some(latency) = self.list_latency else {
+            return future::ready(Ok(list)).boxed();
+        };
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(latency);
+            let _ = tx.send(list);
+        });
+        rx.map(|r| r.map_err(|_| EngineError::Transport("fixture worker gone".into())))
+            .boxed()
+    }
+
+    fn remove_network(&self, id: &str) -> BoxFuture<'static, EngineResult<()>> {
+        let id = id.to_owned();
+        self.mutate(move |s| {
+            let index = s
+                .networks
+                .iter()
+                .position(|n| n.id == id || n.name == id)
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
+            let network = s
+                .networks
+                .get(index)
+                .ok_or_else(|| EngineError::NotFound(id.clone()))?;
+            if network.is_builtin(EngineKind::Docker) {
+                return Err(EngineError::Engine {
+                    status: 403,
+                    message: format!(
+                        "{} is a pre-defined network and cannot be removed",
+                        network.name
+                    ),
+                });
+            }
+            if !network_endpoints(&s.containers, network).is_empty() {
+                return Err(EngineError::Engine {
+                    status: 403,
+                    message: format!(
+                        "error while removing network: network {} has active endpoints",
+                        network.name
+                    ),
+                });
+            }
+            let network = s.networks.remove(index);
+            s.emit(ObjectKind::Network, &network.id, EventAction::Destroy);
+            Ok(())
+        })
+    }
+
     fn prune_containers(&self) -> BoxFuture<'static, EngineResult<PruneReport>> {
         self.mutate(|s| {
             let mut report = PruneReport {
@@ -824,18 +988,20 @@ impl Engine for FixtureEngine {
                 deleted: vec![],
                 reclaimed_bytes: 0,
             };
+            // Like Docker, names are reported and IDs are in the events.
+            let mut ids = Vec::new();
             s.networks.retain(|network| {
-                let in_use = s
-                    .containers
-                    .iter()
-                    .filter_map(|c| c.compose.as_ref())
-                    .any(|c| format!("{}_default", c.project) == *network);
-                if !in_use {
-                    report.deleted.push(network.clone());
+                let network = with_endpoints(&s.containers, network.clone());
+                let keep = !network.is_prunable(EngineKind::Docker);
+                if !keep {
+                    report.deleted.push(network.name.clone());
+                    ids.push(network.id);
                 }
-                in_use
+                keep
             });
-            s.emit_deleted(ObjectKind::Network, &report);
+            for id in ids {
+                s.emit(ObjectKind::Network, &id, EventAction::Destroy);
+            }
             Ok(report)
         })
     }

@@ -167,7 +167,10 @@ impl Store {
                     .filter(|v| !self.volume_in_use(v))
                     .count(),
             ),
-            PruneTarget::UnusedNetworks | PruneTarget::BuildCache => None,
+            PruneTarget::UnusedNetworks => {
+                self.networks.loaded.then(|| self.unused_networks().count())
+            }
+            PruneTarget::BuildCache => None,
         }
     }
 
@@ -360,8 +363,13 @@ impl Store {
                 }
                 store.storage.pruning = false;
                 if failures.is_empty() {
+                    // Networks free no disk space; "Reclaimed 0 B" reads as failure.
                     cx.emit(StoreEvent::Info {
-                        title: format!("Reclaimed {}", format::bytes(reclaimed)),
+                        title: if reclaimed > 0 {
+                            format!("Reclaimed {}", format::bytes(reclaimed))
+                        } else {
+                            "Clean up finished".into()
+                        },
                         detail: format!("Removed {deleted} items."),
                     });
                 } else {
@@ -371,6 +379,7 @@ impl Store {
                     });
                 }
                 store.refresh_storage(cx);
+                store.refresh_networks(cx);
                 cx.notify();
             })
             .ok();
@@ -378,7 +387,7 @@ impl Store {
         .detach();
     }
 
-    fn not_connected(what: &str, cx: &mut Context<Self>) {
+    pub(super) fn not_connected(what: &str, cx: &mut Context<Self>) {
         cx.emit(StoreEvent::Error {
             title: format!("Couldn't {what}"),
             detail: "Not connected to a container engine.".into(),

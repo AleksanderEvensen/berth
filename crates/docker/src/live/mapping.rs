@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     ComposeRef, Container, ContainerState, DiskUsage, Endpoint, EngineError, EngineEvent,
-    EngineInfo, EngineKind, EventAction, Image, Mount, MountKind, ObjectKind, PortBinding,
-    Protocol, PruneReport, Volume,
+    EngineInfo, EngineKind, EngineResult, EventAction, Image, Mount, MountKind, Network,
+    NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol, PruneReport, Subnet, Volume,
 };
 
 pub(super) fn image(value: api::ImageSummary) -> Image {
@@ -40,6 +40,66 @@ pub(super) fn volume(value: api::Volume) -> Volume {
         labels: labels(Some(value.labels)),
         size,
         ref_count,
+    }
+}
+
+pub(super) fn network(value: api::Network) -> Network {
+    let non_empty = |s: Option<String>| s.filter(|s| !s.is_empty());
+    let mut endpoints: Vec<NetworkEndpoint> = value
+        .containers
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(container_id, endpoint)| NetworkEndpoint {
+            name: endpoint.name.unwrap_or_else(|| container_id.clone()),
+            container_id,
+            ipv4: non_empty(endpoint.ipv4_address),
+            ipv6: non_empty(endpoint.ipv6_address),
+        })
+        .collect();
+    endpoints.sort_by(|a, b| a.name.cmp(&b.name));
+    Network {
+        id: value.id.unwrap_or_default(),
+        name: value.name.unwrap_or_default(),
+        driver: value.driver.unwrap_or_default(),
+        scope: value.scope.unwrap_or_default(),
+        created: value.created.map(|date| date.to_rfc3339()),
+        internal: value.internal.unwrap_or_default(),
+        attachable: value.attachable.unwrap_or_default(),
+        role: if value.ingress == Some(true) {
+            NetworkRole::Ingress
+        } else if value.config_only == Some(true) {
+            NetworkRole::ConfigOnly
+        } else {
+            NetworkRole::Regular
+        },
+        ipv6: value.enable_ipv6.unwrap_or_default(),
+        subnets: value
+            .ipam
+            .and_then(|ipam| ipam.config)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|config| {
+                Some(Subnet {
+                    subnet: non_empty(config.subnet)?,
+                    gateway: non_empty(config.gateway),
+                })
+            })
+            .collect(),
+        labels: labels(value.labels),
+        endpoints,
+    }
+}
+
+/// The inspect result for a listed network. Removed in between (404):
+/// skipped. Any other failure fails the refresh, since the list entry has no
+/// endpoints and would make a connected network look unused.
+pub(super) fn inspected_network(
+    result: Result<api::Network, bollard::errors::Error>,
+) -> Option<EngineResult<Network>> {
+    match result.map_err(error) {
+        Ok(value) => Some(Ok(network(value))),
+        Err(EngineError::NotFound(_)) => None,
+        Err(err) => Some(Err(err)),
     }
 }
 

@@ -220,14 +220,35 @@ fn network_and_cache_prunes_are_stateful_and_keep_used_resources() {
     let engine = FixtureEngine::default();
     let mut events = engine.events();
     let report = block_on(engine.prune_networks()).unwrap();
+    // Stopped containers hold no endpoints, so photon_dev's network goes too.
     assert_eq!(
         report.deleted,
-        ["blue-zone-workshop_default", "scratch_default"]
+        [
+            "blue-zone-workshop_default",
+            "photon_dev_default",
+            "scratch_default"
+        ]
     );
     assert_eq!(report.reclaimed_bytes, 0);
-    for id in &report.deleted {
-        event(&mut events, ObjectKind::Network, id);
+    for name in &report.deleted {
+        let id = networks().into_iter().find(|n| &n.name == name).unwrap().id;
+        event(&mut events, ObjectKind::Network, &id);
     }
+    let left: Vec<_> = block_on(engine.list_networks())
+        .unwrap()
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    assert_eq!(
+        left,
+        [
+            "bridge",
+            "host",
+            "none",
+            "berth-dev_default",
+            "tihlde-voting_default"
+        ]
+    );
     assert_eq!(
         block_on(engine.prune_networks()).unwrap().deleted,
         Vec::<String>::new()
@@ -362,4 +383,40 @@ fn mounted_resources_do_not_duplicate_the_unused_fixture_inventory() {
             .deleted
             .contains(&"scratch_maven-cache".into())
     );
+}
+
+#[test]
+fn networks_list_running_endpoints_and_guard_removal() {
+    let engine = FixtureEngine::default();
+    let mut events = engine.events();
+    let list = block_on(engine.list_networks()).unwrap();
+    let find = |name: &str| list.iter().find(|n| n.name == name).unwrap().clone();
+
+    let bridge = find("bridge");
+    assert!(bridge.is_builtin(EngineKind::Docker));
+    let names: Vec<_> = bridge.endpoints.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["rustfs"]);
+    assert_eq!(bridge.endpoints[0].ipv4.as_deref(), Some("172.17.0.2/16"));
+
+    let berth = find("berth-dev_default");
+    assert_eq!(berth.compose_project(), Some("berth-dev"));
+    assert_eq!(berth.subnets[0].subnet, "172.21.0.0/16");
+    // The restarting worker counts as active.
+    assert_eq!(berth.endpoints.len(), 3);
+    assert_eq!(find("photon_dev_default").endpoints, []);
+    assert_eq!(list.iter().filter(|n| n.id.len() == 64).count(), list.len());
+
+    for network in [&bridge, &berth] {
+        assert!(matches!(
+            block_on(engine.remove_network(&network.id)),
+            Err(EngineError::Engine { status: 403, .. })
+        ));
+    }
+    let photon = find("photon_dev_default");
+    block_on(engine.remove_network(&photon.id)).unwrap();
+    event(&mut events, ObjectKind::Network, &photon.id);
+    assert!(matches!(
+        block_on(engine.remove_network(&photon.id)),
+        Err(EngineError::NotFound(_))
+    ));
 }

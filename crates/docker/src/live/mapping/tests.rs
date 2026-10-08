@@ -806,3 +806,82 @@ fn prune_responses_preserve_ids_bytes_and_image_untagged_fallback() {
         );
     }
 }
+
+#[test]
+fn network_maps_ipam_endpoints_and_flags() {
+    let endpoint = |name: &str, ipv4: &str| api::NetworkContainer {
+        name: Some(name.into()),
+        ipv4_address: Some(ipv4.into()),
+        ipv6_address: Some(String::new()),
+        ..Default::default()
+    };
+    let value = super::network(api::Network {
+        name: Some("app_default".into()),
+        id: Some("abc123".into()),
+        driver: Some("bridge".into()),
+        scope: Some("local".into()),
+        internal: Some(true),
+        enable_ipv6: Some(false),
+        ipam: Some(api::Ipam {
+            config: Some(vec![
+                api::IpamConfig {
+                    subnet: Some("172.19.0.0/16".into()),
+                    gateway: Some("172.19.0.1".into()),
+                    ..Default::default()
+                },
+                api::IpamConfig::default(),
+            ]),
+            ..Default::default()
+        }),
+        containers: Some(HashMap::from([
+            ("id-web".into(), endpoint("web", "172.19.0.3/16")),
+            ("id-db".into(), endpoint("db", "172.19.0.2/16")),
+        ])),
+        labels: Some(compose_labels()),
+        ..Default::default()
+    });
+    assert_eq!(
+        (value.id.as_str(), value.name.as_str()),
+        ("abc123", "app_default")
+    );
+    assert!(value.internal && !value.attachable && !value.ipv6);
+    assert_eq!(
+        value.subnets,
+        [Subnet {
+            subnet: "172.19.0.0/16".into(),
+            gateway: Some("172.19.0.1".into()),
+        }]
+    );
+    let names: Vec<_> = value.endpoints.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["db", "web"]);
+    assert_eq!(value.endpoints[0].container_id, "id-db");
+    assert_eq!(value.endpoints[0].ipv4.as_deref(), Some("172.19.0.2/16"));
+    assert_eq!(value.endpoints[0].ipv6, None);
+    assert!(value.labels.windows(2).all(|w| w[0].0 <= w[1].0));
+
+    let empty = super::network(api::Network::default());
+    assert!(empty.subnets.is_empty() && empty.endpoints.is_empty() && empty.created.is_none());
+}
+
+#[test]
+fn inspected_networks_skip_removed_ones_and_fail_on_other_errors() {
+    let server_error = |status_code| bollard::errors::Error::DockerResponseServerError {
+        status_code,
+        message: "boom".into(),
+    };
+    assert_eq!(
+        inspected_network(Ok(api::Network {
+            name: Some("app".into()),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap()
+        .name,
+        "app"
+    );
+    assert!(inspected_network(Err(server_error(404))).is_none());
+    assert!(matches!(
+        inspected_network(Err(server_error(500))),
+        Some(Err(EngineError::Engine { status: 500, .. }))
+    ));
+}
