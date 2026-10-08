@@ -16,7 +16,7 @@ use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
 use crate::preferences;
 use crate::screens::{
-    Chrome,
+    Chrome, ShowContainer,
     activity::ActivityScreen,
     cleanup::CleanupScreen,
     containers::ContainersScreen,
@@ -130,6 +130,8 @@ impl Shell {
         Self::present_confirms(&images, window, cx);
         Self::present_confirms(&networks, window, cx);
         Self::present_confirms(&cleanup, window, cx);
+        Self::follow_container_links(&volumes, window, cx);
+        Self::follow_container_links(&images, window, cx);
 
         Self {
             focus,
@@ -181,6 +183,24 @@ impl Shell {
                 this.confirm = Some(request.clone());
                 window.focus(&this.dialog_focus, cx);
                 cx.notify();
+            },
+        )
+        .detach();
+    }
+
+    /// Open the Containers screen on whichever container `screen` links to.
+    fn follow_container_links<T: EventEmitter<ShowContainer>>(
+        screen: &Entity<T>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            screen,
+            window,
+            |this, _, ShowContainer(id): &ShowContainer, window, cx| {
+                this.navigate(Route::Containers, window, cx);
+                this.containers
+                    .update(cx, |screen, cx| screen.reveal(id, cx));
             },
         )
         .detach();

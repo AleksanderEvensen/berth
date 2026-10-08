@@ -6,14 +6,14 @@ use std::rc::Rc;
 use berth_docker::Volume;
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
-    ResourceRow, SectionLabel, Status, Theme, empty_state, icons, status_dot,
+    ResourceRow, SectionLabel, Theme, empty_state, icons,
 };
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Render,
     SharedString, Window, div, list, prelude::*, px,
 };
 
-use super::{Chrome, detail_pane, list_column, scroll_page};
+use super::{Chrome, ShowContainer, detail_pane, list_column, scroll_page, used_by};
 use crate::dialogs::ConfirmRequest;
 use crate::format;
 use crate::selection::MultiSelect;
@@ -36,6 +36,7 @@ pub struct VolumesScreen {
 }
 
 impl EventEmitter<ConfirmRequest> for VolumesScreen {}
+impl EventEmitter<ShowContainer> for VolumesScreen {}
 
 impl VolumesScreen {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
@@ -177,7 +178,7 @@ impl VolumesScreen {
         if let Some(name) = self.selection.single()
             && let Some(volume) = store.volumes().iter().find(|v| &v.name == name)
         {
-            return scroll_page("volume-detail", volume_info(store, volume, theme))
+            return scroll_page("volume-detail", volume_info(store, volume, theme, cx))
                 .into_any_element();
         }
         self.render_bulk(store, cx)
@@ -327,7 +328,12 @@ impl Render for VolumesScreen {
     }
 }
 
-fn volume_info(store: &Store, volume: &Volume, theme: &Theme) -> impl IntoElement {
+fn volume_info(
+    store: &Store,
+    volume: &Volume,
+    theme: &Theme,
+    cx: &Context<VolumesScreen>,
+) -> impl IntoElement {
     let users = store.volume_users(&volume.name);
     let mut info = KeyValueCard::new()
         .row("Name", Cell::plain(volume.name.clone()))
@@ -346,49 +352,6 @@ fn volume_info(store: &Store, volume: &Volume, theme: &Theme) -> impl IntoElemen
         info = info.row("Compose project", Cell::plain(project.to_string()));
     }
 
-    let used_by = div()
-        .flex()
-        .flex_col()
-        .rounded(px(Theme::PANEL_RADIUS))
-        .bg(theme.surface_card)
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
-        .map(|d| {
-            if users.is_empty() {
-                d.child(
-                    div()
-                        .h(px(38.0))
-                        .px(px(Theme::SPACE_MD))
-                        .flex()
-                        .items_center()
-                        .text_color(theme.text_faint)
-                        .child("Not used by any container"),
-                )
-            } else {
-                d.children(users.iter().enumerate().map(|(ix, c)| {
-                    div()
-                        .h(px(38.0))
-                        .px(px(Theme::SPACE_MD))
-                        .flex()
-                        .items_center()
-                        .gap(px(Theme::SPACE_SM + 2.0))
-                        .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
-                        .child(status_dot(
-                            if c.state.is_active() {
-                                Status::Running
-                            } else {
-                                Status::Stopped
-                            },
-                            7.0,
-                            None,
-                            theme,
-                        ))
-                        .child(div().text_color(theme.text).child(c.name.clone()))
-                }))
-            }
-        });
-
     let labels = DataTable::new([("Key", 1.0), ("Value", 1.2)])
         .empty("No labels")
         .rows(
@@ -403,7 +366,7 @@ fn volume_info(store: &Store, volume: &Volume, theme: &Theme) -> impl IntoElemen
         .flex_col()
         .child(info)
         .child(Heading::new("Used by"))
-        .child(used_by)
+        .child(used_by(&users, theme, cx))
         .child(Heading::new("Labels"))
         .child(labels)
 }

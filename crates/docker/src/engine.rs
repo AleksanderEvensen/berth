@@ -18,7 +18,7 @@ use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
-use crate::{Container, DiskUsage, Image, ImagePrune, Network, PruneReport, Volume};
+use crate::{Container, DiskUsage, Image, ImageDetails, ImagePrune, Network, PruneReport, Volume};
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
@@ -346,6 +346,9 @@ pub trait Engine: Send + Sync + 'static {
 
     /// Fast image list; container counts are included when the API reports them.
     fn list_images(&self) -> BoxFuture<'static, EngineResult<Vec<Image>>>;
+
+    /// One image's config: platform, command, env, volumes, exposed ports.
+    fn inspect_image(&self, id: &str) -> BoxFuture<'static, EngineResult<ImageDetails>>;
 
     /// Fast volume list, without size or reference counts.
     fn list_volumes(&self) -> BoxFuture<'static, EngineResult<Vec<Volume>>>;

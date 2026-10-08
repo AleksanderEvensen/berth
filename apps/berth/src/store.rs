@@ -165,6 +165,11 @@ impl Store {
         self.reconnect(cx);
     }
 
+    /// Bumped whenever an engine is installed (connect, reconnect, switch).
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether async work started at `generation` still talks to the
     /// installed engine.
     const fn is_current(&self, generation: u64) -> bool {

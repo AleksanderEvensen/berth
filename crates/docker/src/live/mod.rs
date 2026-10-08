@@ -25,8 +25,8 @@ use tokio_util::task::{AbortOnDrop, AbortOnDropHandle};
 
 use crate::{
     ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
-    EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, Image, ImagePrune, LogLine,
-    LogOptions, Network, PruneReport, RemoveOptions, StatsSample, Volume,
+    EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, Image, ImageDetails,
+    ImagePrune, LogLine, LogOptions, Network, PruneReport, RemoveOptions, StatsSample, Volume,
 };
 
 /// A live engine whose Tokio work never depends on the caller's executor.
@@ -303,6 +303,15 @@ impl Engine for BollardEngine {
                 .await
                 .map_err(mapping::error)?;
             Ok(values.into_iter().map(mapping::image).collect())
+        })
+    }
+
+    fn inspect_image(&self, id: &str) -> BoxFuture<'static, EngineResult<ImageDetails>> {
+        let docker = self.docker.clone();
+        let id = id.to_owned();
+        self.spawn(async move {
+            let value = docker.inspect_image(&id).await.map_err(mapping::error)?;
+            Ok(mapping::image_details(value))
         })
     }
 

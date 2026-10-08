@@ -63,6 +63,8 @@ pub struct ContainersScreen {
     live: Live,
     /// Whether the shell is showing this screen.
     visible: bool,
+    /// A container to scroll into view once the rows are next synced.
+    reveal: Option<String>,
 }
 
 impl EventEmitter<ConfirmRequest> for ContainersScreen {}
@@ -89,6 +91,7 @@ impl ContainersScreen {
             index: HashMap::new(),
             live: Live::default(),
             visible: true,
+            reveal: None,
         }
     }
 
@@ -129,7 +132,8 @@ impl ContainersScreen {
     /// Rebuild row descriptors from the current tree and splice only the
     /// changed range into the list state, so the scroll position survives
     /// containers moving between sections.
-    fn sync_rows(&mut self, tree: &ContainerTree<'_>, store: &Store) {
+    /// Returns whether any rows changed.
+    fn sync_rows(&mut self, tree: &ContainerTree<'_>, store: &Store) -> bool {
         let mut rows = Vec::new();
         let mut stack_members = HashMap::new();
         for (running, nodes) in [(true, &tree.running), (false, &tree.stopped)] {
@@ -167,7 +171,7 @@ impl ContainersScreen {
                 }
             }
         }
-        self.rows.sync(rows);
+        let changed = self.rows.sync(rows);
         self.stack_members = stack_members;
         self.index = store
             .containers()
@@ -175,6 +179,7 @@ impl ContainersScreen {
             .enumerate()
             .map(|(ix, c)| (c.id.clone(), ix))
             .collect();
+        changed
     }
 
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
@@ -293,6 +298,26 @@ impl ContainersScreen {
                 store.update(cx, |store, cx| store.run(ids.clone(), Op::Remove, cx));
             }),
         });
+    }
+
+    /// Select a container and scroll it into view on the Info tab, expanding
+    /// its stack and dropping a search that would hide it.
+    pub fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let Some(container) = store.containers().iter().find(|c| c.id == id) else {
+            return;
+        };
+        if let Some(compose) = &container.compose {
+            self.collapsed.remove(&compose.project);
+        }
+        let hidden = !self.query.is_empty() && !matches_query(container, &self.query);
+        if hidden {
+            self.close_search(cx);
+        }
+        self.selection = Some(Selection::Container(id.to_string()));
+        self.tab = 0;
+        self.reveal = Some(id.to_string());
+        cx.notify();
     }
 
     fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
@@ -700,7 +725,14 @@ impl Render for ContainersScreen {
         let tree = ContainerTree::build(containers);
         let store = self.store.clone();
         let store = store.read(cx);
-        self.sync_rows(&tree, store);
+        let rows_changed = self.sync_rows(&tree, store);
+        if let Some(id) = self.reveal.take()
+            && let Some(ix) = self
+                .rows
+                .position(|row| matches!(row, Row::Container { id: row_id, .. } if *row_id == id))
+        {
+            self.rows.reveal(ix, rows_changed);
+        }
         let list = self.render_list(store, &tree, cx).into_any_element();
         let detail = self.render_detail(store, &tree, cx).into_any_element();
         div().size_full().flex().child(list).child(detail)

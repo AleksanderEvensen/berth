@@ -79,6 +79,22 @@ pub fn age(created_unix: i64, now_unix: i64) -> String {
     "just now".to_string()
 }
 
+/// An argv as a shell line: `nginx -g "daemon off;"`. Empty arguments and
+/// ones with whitespace, quotes or backslashes are double-quoted.
+#[must_use]
+pub fn command(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| {
+            if arg.is_empty() || arg.contains(|c: char| c.is_whitespace() || "\"'\\".contains(c)) {
+                format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +118,20 @@ mod tests {
         assert_eq!(age(now - 15 * 86_400, now), "2 weeks ago");
         assert_eq!(age(now - 400 * 86_400, now), "1 year ago");
         assert_eq!(age(now + 50, now), "just now");
+    }
+
+    #[test]
+    fn formats_commands() {
+        let argv = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(command(&[]), "");
+        assert_eq!(
+            command(&argv(&["nginx", "-g", "daemon off;"])),
+            r#"nginx -g "daemon off;""#
+        );
+        assert_eq!(
+            command(&argv(&["sh", "-c", r#"echo "hi""#])),
+            r#"sh -c "echo \"hi\"""#
+        );
+        assert_eq!(command(&argv(&["a", ""])), r#"a """#);
     }
 }

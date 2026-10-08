@@ -3,17 +3,17 @@
 
 use std::rc::Rc;
 
-use berth_docker::Image;
+use berth_docker::{Image, ImageDetails};
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
-    ResourceRow, SectionLabel, Status, Theme, empty_state, icons, status_dot,
+    ResourceRow, SectionLabel, Theme, empty_state, icons,
 };
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Render,
-    SharedString, Window, div, list, prelude::*, px,
+    SharedString, Task, Window, div, list, prelude::*, px,
 };
 
-use super::{Chrome, detail_pane, list_column, scroll_page};
+use super::{Chrome, ShowContainer, detail_pane, list_column, scroll_page, used_by};
 use crate::dialogs::ConfirmRequest;
 use crate::format;
 use crate::selection::MultiSelect;
@@ -37,6 +37,33 @@ impl Group {
     }
 }
 
+/// Inspect data for the single selected image.
+#[derive(Debug)]
+enum Details {
+    Loading,
+    Failed(String),
+    Loaded(ImageDetails),
+}
+
+/// [`Details`] for one image, and the engine session that produced them.
+#[derive(Debug)]
+struct Fetched {
+    id: String,
+    generation: u64,
+    details: Details,
+}
+
+/// Whether `id` needs (re)fetching. Image ids are content digests, so loaded
+/// details never go stale; anything else is retried on a new engine session.
+fn needs_fetch(cached: Option<&Fetched>, id: &str, generation: u64) -> bool {
+    match cached {
+        Some(f) if f.id == id => {
+            !matches!(f.details, Details::Loaded(_)) && f.generation != generation
+        }
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Row {
     Section { group: Group, count: usize },
@@ -49,9 +76,13 @@ pub struct ImagesScreen {
     order: Vec<String>,
     selection: MultiSelect<String>,
     chrome: Chrome,
+    /// Inspect details for the single selected image.
+    details: Option<Fetched>,
+    fetch: Option<Task<()>>,
 }
 
 impl EventEmitter<ConfirmRequest> for ImagesScreen {}
+impl EventEmitter<ShowContainer> for ImagesScreen {}
 
 impl ImagesScreen {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
@@ -68,7 +99,52 @@ impl ImagesScreen {
             order: Vec::new(),
             selection: MultiSelect::default(),
             chrome: Chrome::default(),
+            details: None,
+            fetch: None,
         }
+    }
+
+    /// Fetch inspect details when the single selected image changes, or
+    /// retry after a failure once a new engine session starts.
+    fn sync_details(&mut self, cx: &Context<Self>) {
+        let Some(id) = self.selection.single().cloned() else {
+            self.details = None;
+            self.fetch = None;
+            return;
+        };
+        let store = self.store.read(cx);
+        let generation = store.generation();
+        if !needs_fetch(self.details.as_ref(), &id, generation) {
+            return;
+        }
+        let Some(engine) = store.engine() else {
+            self.details = Some(Fetched {
+                id,
+                generation,
+                details: Details::Failed("Not connected".into()),
+            });
+            self.fetch = None;
+            return;
+        };
+        self.details = Some(Fetched {
+            id: id.clone(),
+            generation,
+            details: Details::Loading,
+        });
+        self.fetch = Some(cx.spawn(async move |this, cx| {
+            let result = engine.inspect_image(&id).await;
+            this.update(cx, |this, cx| {
+                if let Some(fetched) = &mut this.details
+                    && fetched.id == id
+                    && fetched.generation == generation
+                {
+                    fetched.details =
+                        result.map_or_else(|e| Details::Failed(e.to_string()), Details::Loaded);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
@@ -121,6 +197,14 @@ impl ImagesScreen {
     }
 
     fn click(&mut self, id: &str, event: &ClickEvent, cx: &mut Context<Self>) {
+        // Clicking an image whose details failed to load retries the fetch.
+        if self
+            .details
+            .as_ref()
+            .is_some_and(|f| f.id == id && matches!(f.details, Details::Failed(_)))
+        {
+            self.details = None;
+        }
         self.selection
             .click(&id.to_string(), event.modifiers(), &self.order);
         cx.notify();
@@ -215,8 +299,16 @@ impl ImagesScreen {
         if let Some(id) = self.selection.single()
             && let Some(image) = store.images().iter().find(|i| &i.id == id)
         {
-            return scroll_page("image-detail", image_info(store, image, now, theme))
-                .into_any_element();
+            let details = self
+                .details
+                .as_ref()
+                .filter(|fetched| &fetched.id == id)
+                .map(|fetched| &fetched.details);
+            return scroll_page(
+                "image-detail",
+                image_info(store, image, details, now, theme, cx),
+            )
+            .into_any_element();
         }
         self.render_bulk(store, cx)
     }
@@ -289,6 +381,7 @@ impl ImagesScreen {
 
 impl Render for ImagesScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_details(cx);
         let store_entity = self.store.clone();
         let store = store_entity.read(cx);
         self.sync_rows(store);
@@ -355,61 +448,38 @@ impl Render for ImagesScreen {
     }
 }
 
-fn image_info(store: &Store, image: &Image, now: i64, theme: &Theme) -> impl IntoElement {
+fn image_info(
+    store: &Store,
+    image: &Image,
+    details: Option<&Details>,
+    now: i64,
+    theme: &Theme,
+    cx: &Context<ImagesScreen>,
+) -> impl IntoElement {
     let users = store.image_users(image);
     let tags = if image.repo_tags.is_empty() {
         Cell::muted("None (dangling)")
     } else {
         Cell::plain(image.repo_tags.join(", "))
     };
+    let loaded = match details {
+        Some(Details::Loaded(details)) => Some(details),
+        _ => None,
+    };
+    let platform = match details {
+        None | Some(Details::Loading) => Cell::muted("Loading…"),
+        Some(Details::Failed(_)) => Cell::muted("Unknown"),
+        Some(Details::Loaded(d)) => d
+            .platform
+            .clone()
+            .map_or_else(|| Cell::muted("Unknown"), Cell::plain),
+    };
     let info = KeyValueCard::new()
         .row("ID", Cell::mono(image.short_id().to_string()))
         .row("Tags", tags)
         .row("Created", Cell::plain(format::age(image.created, now)))
-        .row("Size", Cell::plain(format::bytes(image.size)));
-
-    let used_by = div()
-        .flex()
-        .flex_col()
-        .rounded(px(Theme::PANEL_RADIUS))
-        .bg(theme.surface_card)
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
-        .map(|d| {
-            if users.is_empty() {
-                d.child(
-                    div()
-                        .h(px(38.0))
-                        .px(px(Theme::SPACE_MD))
-                        .flex()
-                        .items_center()
-                        .text_color(theme.text_faint)
-                        .child("Not used by any container"),
-                )
-            } else {
-                d.children(users.iter().enumerate().map(|(ix, c)| {
-                    div()
-                        .h(px(38.0))
-                        .px(px(Theme::SPACE_MD))
-                        .flex()
-                        .items_center()
-                        .gap(px(Theme::SPACE_SM + 2.0))
-                        .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
-                        .child(status_dot(
-                            if c.state.is_active() {
-                                Status::Running
-                            } else {
-                                Status::Stopped
-                            },
-                            7.0,
-                            None,
-                            theme,
-                        ))
-                        .child(div().text_color(theme.text).child(c.name.clone()))
-                }))
-            }
-        });
+        .row("Size", Cell::plain(format::bytes(image.size)))
+        .row("Platform", platform);
 
     let labels = DataTable::new([("Key", 1.0), ("Value", 1.2)])
         .empty("No labels")
@@ -424,10 +494,82 @@ fn image_info(store: &Store, image: &Image, now: i64, theme: &Theme) -> impl Int
         .flex()
         .flex_col()
         .child(info)
+        .when_some(loaded, |d, details| d.child(image_config(details)))
+        .when_some(
+            match details {
+                Some(Details::Failed(error)) => Some(error.clone()),
+                _ => None,
+            },
+            |d, error| {
+                d.child(
+                    div()
+                        .pt(px(Theme::SPACE_MD))
+                        .text_size(px(Theme::TEXT_SM))
+                        .text_color(theme.text_faint)
+                        .child(format!("Couldn't load the image config: {error}")),
+                )
+            },
+        )
         .child(Heading::new("Used by"))
-        .child(used_by)
+        .child(used_by(&users, theme, cx))
         .child(Heading::new("Labels"))
         .child(labels)
+}
+
+/// Config, environment, volumes and exposed ports from inspect (D4).
+fn image_config(details: &ImageDetails) -> impl IntoElement {
+    let argv = |argv: &[String]| {
+        if argv.is_empty() {
+            Cell::muted("None")
+        } else {
+            Cell::mono(format::command(argv))
+        }
+    };
+    let mut config = KeyValueCard::new()
+        .row("Command", argv(&details.command))
+        .row("Entrypoint", argv(&details.entrypoint))
+        .row(
+            "Working dir",
+            details
+                .working_dir
+                .clone()
+                .map_or_else(|| Cell::muted("/"), Cell::mono),
+        );
+    if let Some(user) = &details.user {
+        config = config.row("User", Cell::plain(user.clone()));
+    }
+
+    let env = DataTable::new([("Key", 1.0), ("Value", 1.6)])
+        .empty("No environment variables")
+        .rows(details.env.iter().map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            vec![Cell::plain(key.to_string()), Cell::mono(value.to_string())]
+        }));
+
+    let volumes = DataTable::new([("Path", 1.0)])
+        .empty("No volumes")
+        .rows(details.volumes.iter().map(|v| vec![Cell::mono(v.clone())]));
+
+    let ports = DataTable::new([("Port", 1.0), ("Protocol", 1.0)])
+        .empty("No exposed ports")
+        .rows(details.exposed_ports.iter().map(|p| {
+            vec![
+                Cell::plain(p.port.to_string()),
+                Cell::muted(p.protocol.label()),
+            ]
+        }));
+
+    div()
+        .flex()
+        .flex_col()
+        .child(Heading::new("Config"))
+        .child(config)
+        .child(Heading::new("Environment"))
+        .child(env)
+        .child(Heading::new("Volumes"))
+        .child(volumes)
+        .child(Heading::new("Exposed ports"))
+        .child(ports)
 }
 
 const fn plural(n: usize) -> &'static str {
@@ -445,4 +587,31 @@ fn repo_name(display: &str) -> String {
         .next()
         .unwrap_or(without_tag)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Details, Fetched, ImageDetails, needs_fetch};
+
+    fn fetched(details: Details, generation: u64) -> Fetched {
+        Fetched {
+            id: "a".into(),
+            generation,
+            details,
+        }
+    }
+
+    #[test]
+    fn failures_and_stale_loads_retry_on_a_new_session() {
+        assert!(needs_fetch(None, "a", 1));
+        let loaded = fetched(Details::Loaded(ImageDetails::default()), 1);
+        assert!(!needs_fetch(Some(&loaded), "a", 1));
+        assert!(!needs_fetch(Some(&loaded), "a", 2));
+        assert!(needs_fetch(Some(&loaded), "b", 1));
+        for details in [Details::Failed("Not connected".into()), Details::Loading] {
+            let cached = fetched(details, 1);
+            assert!(!needs_fetch(Some(&cached), "a", 1));
+            assert!(needs_fetch(Some(&cached), "a", 2));
+        }
+    }
 }

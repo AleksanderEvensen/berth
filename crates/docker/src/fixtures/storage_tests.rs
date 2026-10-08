@@ -420,3 +420,31 @@ fn networks_list_running_endpoints_and_guard_removal() {
         Err(EngineError::NotFound(_))
     ));
 }
+
+#[test]
+fn inspect_image_reports_config_and_unknown_ids_are_not_found() {
+    let engine = FixtureEngine::default();
+    let images = block_on(engine.list_images()).unwrap();
+    let postgres = images
+        .iter()
+        .find(|i| i.repo_tags.iter().any(|t| t.contains("postgres:")))
+        .unwrap();
+    let details = block_on(engine.inspect_image(&postgres.id)).unwrap();
+    assert_eq!(details.id, postgres.id);
+    assert_eq!(details.platform.as_deref(), Some("linux/amd64"));
+    assert_eq!(details.command, ["postgres"]);
+    assert_eq!(
+        details.exposed_ports,
+        [ExposedPort {
+            port: 5432,
+            protocol: Protocol::Tcp
+        }]
+    );
+    let dangling = images.iter().find(|i| i.is_dangling()).unwrap();
+    let details = block_on(engine.inspect_image(&dangling.id)).unwrap();
+    assert_eq!(details.exposed_ports, []);
+    assert!(matches!(
+        block_on(engine.inspect_image("sha256:missing")),
+        Err(EngineError::NotFound(_))
+    ));
+}

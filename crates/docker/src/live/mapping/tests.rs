@@ -632,6 +632,67 @@ fn images_normalize_tags_unknown_counts_and_sorted_labels() {
 }
 
 #[test]
+#[expect(
+    clippy::zero_sized_map_values,
+    reason = "bollard models port and volume sets as maps"
+)]
+fn image_details_map_platform_config_and_sorted_ports_and_volumes() {
+    let set = |keys: &[&str]| -> HashMap<String, HashMap<(), ()>> {
+        keys.iter().map(|k| ((*k).into(), HashMap::new())).collect()
+    };
+    let mapped = image_details(api::ImageInspect {
+        id: Some("sha256:abc".into()),
+        os: Some("linux".into()),
+        architecture: Some("arm64".into()),
+        variant: Some("v8".into()),
+        config: Some(api::ImageConfig {
+            entrypoint: Some(vec!["docker-entrypoint.sh".into()]),
+            cmd: Some(vec!["postgres".into()]),
+            working_dir: Some(String::new()),
+            user: Some("postgres".into()),
+            env: Some(vec!["PGDATA=/var/lib/postgresql/data".into()]),
+            volumes: Some(set(&["/var/lib/postgresql/data", "/backup"])),
+            exposed_ports: Some(set(&["5432/tcp", "53/udp", "80", "bogus/tcp", "1/quic"])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    assert_eq!(mapped.id, "sha256:abc");
+    assert_eq!(mapped.platform.as_deref(), Some("linux/arm64/v8"));
+    assert_eq!(mapped.entrypoint, ["docker-entrypoint.sh"]);
+    assert_eq!(mapped.command, ["postgres"]);
+    assert_eq!(mapped.working_dir, None);
+    assert_eq!(mapped.user.as_deref(), Some("postgres"));
+    assert_eq!(mapped.volumes, ["/backup", "/var/lib/postgresql/data"]);
+    assert_eq!(
+        mapped.exposed_ports,
+        [
+            ExposedPort {
+                port: 53,
+                protocol: Protocol::Udp
+            },
+            ExposedPort {
+                port: 80,
+                protocol: Protocol::Tcp
+            },
+            ExposedPort {
+                port: 5432,
+                protocol: Protocol::Tcp
+            },
+        ]
+    );
+    let empty = image_details(api::ImageInspect::default());
+    assert_eq!(empty, ImageDetails::default());
+    let no_variant = image_details(api::ImageInspect {
+        os: Some("linux".into()),
+        architecture: Some("amd64".into()),
+        variant: Some(String::new()),
+        ..Default::default()
+    });
+    assert_eq!(no_variant.platform.as_deref(), Some("linux/amd64"));
+}
+
+#[test]
 fn volumes_preserve_metadata_and_unknown_usage() {
     let mapped = volume(api::Volume {
         name: "berth_pgdata".into(),

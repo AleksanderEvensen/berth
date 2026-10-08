@@ -12,9 +12,9 @@ use futures::{FutureExt as _, StreamExt as _};
 use crate::{
     ComposeRef, Container, ContainerAction, ContainerState, DiskUsage, Endpoint, Engine,
     EngineError, EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, ExecOptions,
-    ExecSession, Image, ImagePrune, LogLine, LogOptions, Mount, MountKind, Network,
-    NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol, PruneReport, RemoveOptions,
-    StatsSample, Subnet, Volume,
+    ExecSession, ExposedPort, Image, ImageDetails, ImagePrune, LogLine, LogOptions, Mount,
+    MountKind, Network, NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol,
+    PruneReport, RemoveOptions, StatsSample, Subnet, Volume,
 };
 
 fn port(host: u16, container: u16) -> PortBinding {
@@ -505,6 +505,56 @@ fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Plausible inspect config for a fixture image, keyed off its tag.
+#[must_use]
+pub fn image_details(image: &Image) -> ImageDetails {
+    let tag = image.repo_tags.first().map_or("", String::as_str);
+    let tcp = |port| ExposedPort {
+        port,
+        protocol: Protocol::Tcp,
+    };
+    let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let path = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    let mut details = ImageDetails {
+        id: image.id.clone(),
+        platform: Some("linux/amd64".into()),
+        command: strings(&["/bin/sh"]),
+        env: strings(&[path]),
+        ..ImageDetails::default()
+    };
+    if tag.contains("postgres") {
+        details.entrypoint = strings(&["docker-entrypoint.sh"]);
+        details.command = strings(&["postgres"]);
+        details.env = strings(&[path, "PG_MAJOR=17", "PGDATA=/var/lib/postgresql/data"]);
+        details.volumes = strings(&["/var/lib/postgresql/data"]);
+        details.exposed_ports = vec![tcp(5432)];
+    } else if tag.contains("redis") {
+        details.entrypoint = strings(&["docker-entrypoint.sh"]);
+        details.command = strings(&["redis-server"]);
+        details.working_dir = Some("/data".into());
+        details.volumes = strings(&["/data"]);
+        details.exposed_ports = vec![tcp(6379)];
+    } else if tag.contains("nginx") {
+        details.entrypoint = strings(&["/docker-entrypoint.sh"]);
+        details.command = strings(&["nginx", "-g", "daemon off;"]);
+        details.env = strings(&[path, "NGINX_VERSION=1.29.1"]);
+        details.exposed_ports = vec![tcp(80)];
+    } else if tag.contains("kafka") {
+        details.platform = Some("linux/arm64/v8".into());
+        details.command = strings(&["/etc/kafka/docker/run"]);
+        details.working_dir = Some("/opt/kafka".into());
+        details.user = Some("appuser".into());
+        details.volumes = strings(&["/etc/kafka/secrets", "/var/lib/kafka/data"]);
+        details.exposed_ports = vec![tcp(9092)];
+    } else if !image.is_dangling() {
+        details.command = strings(&["node", "dist/main.js"]);
+        details.working_dir = Some("/app".into());
+        details.env = strings(&[path, "NODE_ENV=production"]);
+        details.exposed_ports = vec![tcp(3000)];
+    }
+    details
+}
+
 fn image_references(containers: &[Container], image: &Image) -> u32 {
     count(
         containers
@@ -771,6 +821,11 @@ impl Engine for FixtureEngine {
                 .collect()
         })))
         .boxed()
+    }
+
+    fn inspect_image(&self, id: &str) -> BoxFuture<'static, EngineResult<ImageDetails>> {
+        let found = self.with_state(|s| s.images.iter().find(|i| i.id == id).map(image_details));
+        future::ready(found.ok_or_else(|| EngineError::NotFound(id.to_string()))).boxed()
     }
 
     fn list_volumes(&self) -> BoxFuture<'static, EngineResult<Vec<Volume>>> {

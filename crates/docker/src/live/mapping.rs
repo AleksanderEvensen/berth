@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     ComposeRef, Container, ContainerState, DiskUsage, Endpoint, EngineError, EngineEvent,
-    EngineInfo, EngineKind, EngineResult, EventAction, Image, Mount, MountKind, Network,
-    NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol, PruneReport, Subnet, Volume,
+    EngineInfo, EngineKind, EngineResult, EventAction, ExposedPort, Image, ImageDetails, Mount,
+    MountKind, Network, NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol,
+    PruneReport, Subnet, Volume,
 };
 
 pub(super) fn image(value: api::ImageSummary) -> Image {
@@ -22,6 +23,45 @@ pub(super) fn image(value: api::ImageSummary) -> Image {
         created: value.created,
         containers: u32::try_from(value.containers).ok(),
         labels: labels(Some(value.labels)),
+    }
+}
+
+pub(super) fn image_details(value: api::ImageInspect) -> ImageDetails {
+    let config = value.config.unwrap_or_default();
+    let platform = value.os.filter(|os| !os.is_empty()).map(|os| {
+        [Some(os), value.architecture, value.variant]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("/")
+    });
+    let mut volumes: Vec<String> = config.volumes.unwrap_or_default().into_keys().collect();
+    volumes.sort();
+    let mut exposed_ports: Vec<ExposedPort> = config
+        .exposed_ports
+        .unwrap_or_default()
+        .into_keys()
+        .filter_map(|spec| {
+            // `80/tcp`; a bare port means TCP.
+            let (port, kind) = spec.split_once('/').unwrap_or((&spec, "tcp"));
+            Some(ExposedPort {
+                port: port.parse().ok()?,
+                protocol: protocol(kind)?,
+            })
+        })
+        .collect();
+    exposed_ports.sort();
+    ImageDetails {
+        id: value.id.unwrap_or_default(),
+        platform,
+        entrypoint: config.entrypoint.unwrap_or_default(),
+        command: config.cmd.unwrap_or_default(),
+        working_dir: config.working_dir.filter(|s| !s.is_empty()),
+        user: config.user.filter(|s| !s.is_empty()),
+        env: config.env.unwrap_or_default(),
+        volumes,
+        exposed_ports,
     }
 }
 

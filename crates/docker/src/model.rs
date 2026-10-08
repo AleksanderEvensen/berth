@@ -33,7 +33,7 @@ impl ContainerState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Protocol {
     Tcp,
     Udp,
@@ -178,6 +178,31 @@ impl Image {
             .cloned()
             .unwrap_or_else(|| self.short_id().to_owned())
     }
+}
+
+/// A port an image declares with `EXPOSE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExposedPort {
+    pub port: u16,
+    pub protocol: Protocol,
+}
+
+/// Image config from inspect — the parts the list call doesn't report (D4).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImageDetails {
+    pub id: String,
+    /// `os/arch[/variant]`, e.g. `linux/arm64/v8`.
+    pub platform: Option<String>,
+    pub entrypoint: Vec<String>,
+    pub command: Vec<String>,
+    pub working_dir: Option<String>,
+    pub user: Option<String>,
+    /// `KEY=value` pairs.
+    pub env: Vec<String>,
+    /// Paths declared with `VOLUME`, sorted.
+    pub volumes: Vec<String>,
+    /// Sorted by port, then protocol.
+    pub exposed_ports: Vec<ExposedPort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

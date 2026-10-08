@@ -6,8 +6,11 @@ pub mod networks;
 pub mod settings;
 pub mod volumes;
 
-use berth_ui::{ListHeader, Status, Theme};
-use gpui::{AnyElement, Div, IntoElement, SharedString, div, prelude::*, px};
+use berth_docker::Container;
+use berth_ui::{ListHeader, Status, Theme, icon, icons, status_dot};
+use gpui::{
+    AnyElement, Context, Div, EventEmitter, IntoElement, SharedString, div, prelude::*, px,
+};
 
 use crate::chrome;
 use crate::store::Connection;
@@ -29,6 +32,80 @@ pub fn engine_summary(connection: &Connection) -> (Status, SharedString, SharedS
             (Status::Error, "Not connected".into(), error.clone().into())
         }
     }
+}
+
+/// Asks the shell to open a container on the Containers screen (the
+/// clickable "Used by" rows of volume and image info).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowContainer(pub String);
+
+/// A card listing `users`; clicking a row emits [`ShowContainer`].
+pub fn used_by<V: EventEmitter<ShowContainer>>(
+    users: &[&Container],
+    theme: &Theme,
+    cx: &Context<V>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(Theme::PANEL_RADIUS))
+        .bg(theme.surface_card)
+        .border_1()
+        .border_color(theme.border)
+        .overflow_hidden()
+        .map(|d| {
+            if users.is_empty() {
+                d.child(
+                    div()
+                        .h(px(38.0))
+                        .px(px(Theme::SPACE_MD))
+                        .flex()
+                        .items_center()
+                        .text_color(theme.text_faint)
+                        .child("Not used by any container"),
+                )
+            } else {
+                d.children(users.iter().enumerate().map(|(ix, c)| {
+                    let id = c.id.clone();
+                    div()
+                        .id(SharedString::from(format!("used-by-{id}")))
+                        .h(px(38.0))
+                        .px(px(Theme::SPACE_MD))
+                        .flex()
+                        .items_center()
+                        .gap(px(Theme::SPACE_SM + 2.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.row_hover))
+                        .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
+                        .child(status_dot(
+                            if c.state.is_active() {
+                                Status::Running
+                            } else {
+                                Status::Stopped
+                            },
+                            7.0,
+                            None,
+                            theme,
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text)
+                                .child(c.name.clone()),
+                        )
+                        .child(
+                            icon(icons::CHEVRON_RIGHT)
+                                .size(px(14.0))
+                                .text_color(theme.text_faint),
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(ShowContainer(id.clone()));
+                        }))
+                }))
+            }
+        })
 }
 
 /// Layout facts the shell hands each screen: clearance for the floating

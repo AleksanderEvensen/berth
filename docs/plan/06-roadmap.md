@@ -7,7 +7,8 @@ with a note saying what is missing.
 
 **Status (audited 2026-10-08, at `8bdee48`):** M0–M3 done apart from the
 gaps listed under them. M4 has started: settings screen, light theme, accent
-picker, reduce motion, persistence and the Networks screen are in.
+picker, reduce motion, persistence, the Networks screen and full volume and
+image info (C4, D4) are in.
 
 ## M0 — Visual prototype ✅
 - [x] Workspace: `apps/berth`, `crates/ui`, `crates/docker`.
@@ -87,11 +88,11 @@ picker, reduce motion, persistence and the Networks screen are in.
         local endpoints), so Berth doesn't delete them.
   - [x] H1 — Engine endpoint: auto-detect, Docker context, custom socket/URL; active one shown.
   - [x] H2 — Appearance: System / Light / Dark, accent colour.
-  - [ ] C4 — Volume info. *Done:* driver, mountpoint, created, labels, compose
-        project, used-by list. *Missing:* used-by containers aren't clickable.
-  - [ ] D4 — Image info. *Done:* ID, tags, created, size, used-by, labels.
-        *Missing:* platform, command, entrypoint, workdir, env, volumes,
-        exposed ports (needs an `inspect_image` engine call); clickable used-by.
+  - [x] C4 — Volume info: driver, mountpoint, created, labels, compose
+        project; used-by containers open on the Containers screen.
+  - [x] D4 — Image info: ID, tags, created, size, platform, command,
+        entrypoint, workdir, env, volumes, exposed ports (`inspect_image`),
+        clickable used-by, labels.
   - [ ] D5 — Pull an image by reference with progress (no engine call yet).
 
 ## M5 — macOS / Windows
