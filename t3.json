@@ -3,25 +3,25 @@
   "defaultThreadEnvMode": "worktree",
   "scripts": [
     {
-      "name": "Fetch dependencies",
-      "command": "cargo fetch",
+      "name": "Setup worktree",
+      "command": "just setup",
       "icon": "configure",
       "runOnWorktreeCreate": true,
       "async": false
     },
     {
       "name": "Test workspace",
-      "command": "cargo test --workspace",
+      "command": "just test",
       "icon": "test"
     },
     {
       "name": "Clippy",
-      "command": "cargo clippy --workspace --all-targets",
+      "command": "just lint",
       "icon": "lint"
     },
     {
       "name": "Format",
-      "command": "cargo fmt --all",
+      "command": "just fmt",
       "icon": "configure"
     }
   ]
