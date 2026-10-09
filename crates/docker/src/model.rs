@@ -60,6 +60,37 @@ pub struct PortBinding {
     pub protocol: Protocol,
 }
 
+impl PortBinding {
+    /// Container ports that usually serve HTTP(S).
+    const fn is_web_like(&self) -> bool {
+        matches!(
+            self.container_port,
+            80 | 443 | 3000 | 5173 | 8000 | 8025 | 8080 | 8443 | 9001
+        )
+    }
+
+    /// A browser URL for a published TCP port. Wildcard bindings map to
+    /// `localhost`.
+    #[must_use]
+    pub fn url(&self) -> Option<String> {
+        if self.protocol != Protocol::Tcp {
+            return None;
+        }
+        let port = self.host_port?;
+        let host = match self.host_ip.as_deref() {
+            None | Some("" | "0.0.0.0" | "::") => "localhost".to_string(),
+            Some(ip) if ip.contains(':') => format!("[{ip}]"),
+            Some(ip) => ip.to_string(),
+        };
+        let scheme = if matches!(self.container_port, 443 | 8443) {
+            "https"
+        } else {
+            "http"
+        };
+        Some(format!("{scheme}://{host}:{port}"))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountKind {
     Volume,
@@ -113,35 +144,19 @@ impl Container {
             .unwrap_or(&self.id)
     }
 
-    /// A browser URL for the container's most web-like published TCP port,
-    /// preferring common HTTP ports. Wildcard bindings map to `localhost`.
+    /// Published TCP ports that can be opened in a browser, most web-like
+    /// first: common HTTP ports lead, the rest keep the engine's order.
+    #[must_use]
+    pub fn web_ports(&self) -> Vec<&PortBinding> {
+        let mut ports: Vec<_> = self.ports.iter().filter(|p| p.url().is_some()).collect();
+        ports.sort_by_key(|p| !p.is_web_like());
+        ports
+    }
+
+    /// A browser URL for the container's most web-like published TCP port.
     #[must_use]
     pub fn web_url(&self) -> Option<String> {
-        let tcp = || {
-            self.ports
-                .iter()
-                .filter(|p| p.protocol == Protocol::Tcp && p.host_port.is_some())
-        };
-        let binding = tcp()
-            .find(|p| {
-                matches!(
-                    p.container_port,
-                    80 | 443 | 3000 | 5173 | 8000 | 8025 | 8080 | 8443 | 9001
-                )
-            })
-            .or_else(|| tcp().next())?;
-        let port = binding.host_port?;
-        let host = match binding.host_ip.as_deref() {
-            None | Some("" | "0.0.0.0" | "::") => "localhost".to_string(),
-            Some(ip) if ip.contains(':') => format!("[{ip}]"),
-            Some(ip) => ip.to_string(),
-        };
-        let scheme = if matches!(binding.container_port, 443 | 8443) {
-            "https"
-        } else {
-            "http"
-        };
-        Some(format!("{scheme}://{host}:{port}"))
+        self.web_ports().first().and_then(|p| p.url())
     }
 }
 
@@ -408,5 +423,43 @@ mod tests {
             container.id = id.into();
             assert_eq!(container.short_id(), expected);
         }
+    }
+
+    #[test]
+    fn web_ports_prefer_http_and_skip_udp_and_unpublished() {
+        use crate::{PortBinding, Protocol};
+        let port = |host_ip: Option<&str>, host_port, container_port, protocol| PortBinding {
+            host_ip: host_ip.map(Into::into),
+            host_port,
+            container_port,
+            protocol,
+        };
+        let mut container = crate::fixtures::containers().into_iter().next().unwrap();
+        container.ports = vec![
+            port(None, Some(5432), 5432, Protocol::Tcp),
+            port(None, Some(53), 53, Protocol::Udp),
+            port(None, None, 9000, Protocol::Tcp),
+            port(Some("127.0.0.1"), Some(9443), 8443, Protocol::Tcp),
+            port(Some("::1"), Some(8081), 8080, Protocol::Tcp),
+        ];
+        let urls: Vec<_> = container
+            .web_ports()
+            .iter()
+            .filter_map(|p| p.url())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://127.0.0.1:9443",
+                "http://[::1]:8081",
+                "http://localhost:5432",
+            ]
+        );
+        assert_eq!(
+            container.web_url().as_deref(),
+            Some("https://127.0.0.1:9443")
+        );
+        container.ports.clear();
+        assert_eq!(container.web_url(), None);
     }
 }

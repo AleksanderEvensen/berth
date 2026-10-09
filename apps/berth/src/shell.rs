@@ -16,7 +16,7 @@ use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
 use crate::preferences;
 use crate::screens::{
-    Chrome, ShowContainer,
+    Chrome, ShowContainer, ShowVolume,
     activity::ActivityScreen,
     cleanup::CleanupScreen,
     containers::ContainersScreen,
@@ -136,6 +136,16 @@ impl Shell {
         Self::present_confirms(&cleanup, window, cx);
         Self::follow_container_links(&volumes, window, cx);
         Self::follow_container_links(&images, window, cx);
+        cx.subscribe_in(
+            &containers,
+            window,
+            |this, _, ShowVolume(name): &ShowVolume, window, cx| {
+                this.navigate(Route::Volumes, window, cx);
+                this.volumes
+                    .update(cx, |screen, cx| screen.reveal(name, cx));
+            },
+        )
+        .detach();
 
         Self {
             focus,

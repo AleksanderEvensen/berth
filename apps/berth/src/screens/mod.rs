@@ -39,6 +39,11 @@ pub fn engine_summary(connection: &Connection) -> (Status, SharedString, SharedS
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowContainer(pub String);
 
+/// Asks the shell to open a volume on the Volumes screen (named-volume
+/// mounts in container info).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowVolume(pub String);
+
 /// A card listing `users`; clicking a row emits [`ShowContainer`].
 pub fn used_by<V: EventEmitter<ShowContainer>>(
     users: &[&Container],

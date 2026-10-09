@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Stack};
+use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, PortBinding, Stack};
 use berth_ui::SearchField;
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
@@ -14,11 +14,13 @@ use berth_ui::{
     status_dot,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent,
-    Render, SharedString, Subscription, Window, div, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement,
+    KeyDownEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window, anchored,
+    deferred, div, list, prelude::*, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 
+use super::ShowVolume;
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
 use crate::live::{Live, LiveKey, LiveTab};
@@ -41,6 +43,41 @@ enum Row {
 enum Selection {
     Stack(String),
     Container(String),
+}
+
+/// Environment for the selected container. List calls don't report it, so
+/// it is fetched with inspect unless the store already has it.
+#[derive(Debug)]
+enum Env {
+    Loading,
+    Failed(String),
+    Loaded(Vec<String>),
+}
+
+/// [`Env`] for one container, and the engine session that produced it.
+#[derive(Debug)]
+struct FetchedEnv {
+    id: String,
+    generation: u64,
+    env: Env,
+}
+
+/// Whether `id` needs (re)fetching. A container's config never changes, so
+/// a loaded environment stays valid; failures retry on a new engine session.
+fn needs_fetch(cached: Option<&FetchedEnv>, id: &str, generation: u64) -> bool {
+    match cached {
+        Some(f) if f.id == id => !matches!(f.env, Env::Loaded(_)) && f.generation != generation,
+        _ => true,
+    }
+}
+
+/// The open "which port?" menu: container id, where it was opened, and the
+/// focus to give back when it closes.
+#[derive(Debug, Clone)]
+struct PortMenu {
+    id: String,
+    position: Point<Pixels>,
+    previous_focus: Option<FocusHandle>,
 }
 
 pub struct ContainersScreen {
@@ -68,9 +105,16 @@ pub struct ContainersScreen {
     visible: bool,
     /// A container to scroll into view once the rows are next synced.
     reveal: Option<String>,
+    /// Fetched environment of the selected container (Info tab).
+    env: Option<FetchedEnv>,
+    env_fetch: Option<Task<()>>,
+    port_menu: Option<PortMenu>,
+    /// Focused while the port menu is open, so Escape reaches it.
+    menu_focus: FocusHandle,
 }
 
 impl EventEmitter<ConfirmRequest> for ContainersScreen {}
+impl EventEmitter<ShowVolume> for ContainersScreen {}
 
 impl ContainersScreen {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
@@ -96,6 +140,96 @@ impl ContainersScreen {
             live: Live::default(),
             visible: true,
             reveal: None,
+            env: None,
+            env_fetch: None,
+            port_menu: None,
+            menu_focus: cx.focus_handle(),
+        }
+    }
+
+    /// Close the port menu, returning focus to where it was if the menu
+    /// still holds it.
+    fn close_port_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = self.port_menu.take() {
+            if self.menu_focus.is_focused(window)
+                && let Some(previous) = menu.previous_focus
+            {
+                previous.focus(window, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Fetch the environment when the Info tab shows a container the store
+    /// only knows from a list call, or retry a failure on a new session.
+    fn sync_env(&mut self, cx: &Context<Self>) {
+        let store = self.store.read(cx);
+        let id = match self.selection.single() {
+            Some(Selection::Container(id)) if self.tab == 0 && self.visible => id.clone(),
+            _ => {
+                self.env = None;
+                self.env_fetch = None;
+                return;
+            }
+        };
+        let known = store
+            .containers()
+            .iter()
+            .find(|c| c.id == id)
+            .is_none_or(|c| c.env.is_some());
+        let generation = store.generation();
+        if known || !needs_fetch(self.env.as_ref(), &id, generation) {
+            return;
+        }
+        let Some(engine) = store.engine() else {
+            self.env = Some(FetchedEnv {
+                id,
+                generation,
+                env: Env::Failed("Not connected".into()),
+            });
+            self.env_fetch = None;
+            return;
+        };
+        self.env = Some(FetchedEnv {
+            id: id.clone(),
+            generation,
+            env: Env::Loading,
+        });
+        self.env_fetch = Some(cx.spawn(async move |this, cx| {
+            let result = engine.inspect_container(&id).await;
+            this.update(cx, |this, cx| {
+                if let Some(fetched) = &mut this.env
+                    && fetched.id == id
+                    && fetched.generation == generation
+                {
+                    fetched.env = result.map_or_else(
+                        |e| Env::Failed(e.to_string()),
+                        |c| Env::Loaded(c.env.unwrap_or_default()),
+                    );
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The environment to show for `c`: the store's when it has one.
+    fn env_of<'a>(&'a self, c: &'a Container) -> Option<Result<&'a [String], &'a str>> {
+        if let Some(env) = &c.env {
+            return Some(Ok(env));
+        }
+        match &self.env {
+            Some(FetchedEnv {
+                id,
+                env: Env::Loaded(env),
+                ..
+            }) if *id == c.id => Some(Ok(env)),
+            Some(FetchedEnv {
+                id,
+                env: Env::Failed(error),
+                ..
+            }) if *id == c.id => Some(Err(error)),
+            _ => None,
         }
     }
 
@@ -633,7 +767,23 @@ impl ContainersScreen {
             .selected(selected)
             .dimmed(!active);
 
-        if let Some(url) = c.web_url().filter(|_| active) {
+        let web_ports = c.web_ports();
+        if active && web_ports.len() > 1 {
+            let id = id.clone();
+            row = row.action(
+                IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
+                    .active(self.port_menu.as_ref().is_some_and(|m| m.id == id))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.port_menu = Some(PortMenu {
+                            id: id.clone(),
+                            position: event.position(),
+                            previous_focus: window.focused(cx),
+                        });
+                        window.focus(&this.menu_focus, cx);
+                        cx.notify();
+                    })),
+            );
+        } else if let Some(url) = web_ports.first().and_then(|p| p.url()).filter(|_| active) {
             row = row.action(
                 IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
                     .on_click(move |_, _, cx| cx.open_url(&url)),
@@ -682,7 +832,9 @@ impl ContainersScreen {
             (Some(Selection::Container(id)), 0) => {
                 store.containers().iter().find(|c| &c.id == id).map_or_else(
                     || empty_state("Gone", "This container was removed.", theme).into_any_element(),
-                    |c| scroll_page(container_info(c, theme)).into_any_element(),
+                    |c| {
+                        scroll_page(container_info(c, self.env_of(c), theme, cx)).into_any_element()
+                    },
                 )
             }
             (Some(Selection::Stack(project)), 0) => {
@@ -859,6 +1011,7 @@ impl Render for ContainersScreen {
         let mut live = std::mem::take(&mut self.live);
         live.sync(want, window, cx);
         self.live = live;
+        self.sync_env(cx);
         let store = self.store.read(cx);
         let filtered: Vec<Container>;
         let containers = if self.query.is_empty() {
@@ -885,8 +1038,95 @@ impl Render for ContainersScreen {
         }
         let list = self.render_list(store, &tree, cx).into_any_element();
         let detail = self.render_detail(store, &tree, cx).into_any_element();
-        div().size_full().flex().child(list).child(detail)
+        let menu = self.port_menu.as_ref().and_then(|menu| {
+            let c = store
+                .containers()
+                .iter()
+                .find(|c| c.id == menu.id && c.state.is_active())?;
+            Some(port_menu(c, menu.position, &self.menu_focus, cx))
+        });
+        if menu.is_none() {
+            // The container stopped or went away while the menu was open.
+            self.close_port_menu(window, cx);
+        }
+        div()
+            .size_full()
+            .flex()
+            .child(list)
+            .child(detail)
+            .children(menu)
     }
+}
+
+/// Every published web port of `c`, opened from the row link (B4).
+fn port_menu(
+    c: &Container,
+    position: Point<Pixels>,
+    focus: &FocusHandle,
+    cx: &Context<ContainersScreen>,
+) -> AnyElement {
+    let theme = Theme::of(cx);
+    let items = c.web_ports().into_iter().enumerate().filter_map(|(ix, p)| {
+        let url = p.url()?;
+        Some(
+            div()
+                .id(("port-menu-item", ix))
+                .h(px(30.0))
+                .px(px(Theme::SPACE_SM))
+                .flex()
+                .items_center()
+                .gap(px(Theme::SPACE_LG))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.element_hover))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text)
+                        .child(url.trim_start_matches("http://").to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(Theme::TEXT_SM))
+                        .text_color(theme.text_faint)
+                        .child(format!("{}/{}", p.container_port, p.protocol.label())),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.open_url(&url);
+                    this.close_port_menu(window, cx);
+                })),
+        )
+    });
+    deferred(
+        anchored().position(position).snap_to_window().child(
+            div()
+                .id("port-menu")
+                .track_focus(focus)
+                .occlude()
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        this.close_port_menu(window, cx);
+                    }
+                }))
+                .min_w(px(220.0))
+                .p(px(4.0))
+                .flex()
+                .flex_col()
+                .bg(theme.surface_overlay)
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(Theme::PANEL_RADIUS))
+                .shadow_lg()
+                .text_size(px(Theme::TEXT_MD))
+                .children(items)
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.close_port_menu(window, cx);
+                })),
+        ),
+    )
+    .with_priority(1)
+    .into_any_element()
 }
 
 /// Why a live tab shows nothing: stacks have no single stream, stopped
@@ -990,17 +1230,42 @@ fn status_value(c: &Container, theme: &Theme) -> impl IntoElement {
         .child(div().text_color(theme.text).child(c.status.clone()))
 }
 
-fn container_info(c: &Container, theme: &Theme) -> impl IntoElement {
+fn port_cell(c: &Container, p: &PortBinding) -> Cell {
+    match (p.host_port, p.url()) {
+        (Some(port), Some(url)) if c.state.is_active() => {
+            Cell::link(port.to_string()).on_click(move |_, _, cx| cx.open_url(&url))
+        }
+        (Some(port), _) => Cell::plain(port.to_string()),
+        (None, _) => Cell::muted("—"),
+    }
+}
+
+fn container_info(
+    c: &Container,
+    env: Option<Result<&[String], &str>>,
+    theme: &Theme,
+    cx: &Context<ContainersScreen>,
+) -> impl IntoElement {
+    let command = c.command.clone().filter(|cmd| !cmd.is_empty());
     let identity = KeyValueCard::new()
-        .row("Name", Cell::plain(c.name.clone()))
-        .row("ID", Cell::mono(c.short_id().to_string()))
-        .row("Image", Cell::plain(c.image.clone()))
-        .row_element("Status", status_value(c, theme));
+        .row("Name", Cell::plain(c.name.clone()).copyable())
+        .row(
+            "ID",
+            Cell::mono(c.short_id().to_string()).copy_value(c.id.clone()),
+        )
+        .row("Image", Cell::plain(c.image.clone()).copyable())
+        .row_element("Status", status_value(c, theme))
+        .row(
+            "Command",
+            command.map_or_else(|| Cell::muted("None"), |cmd| Cell::mono(cmd).copyable()),
+        );
 
     let mut network = KeyValueCard::new().row(
         "IP address",
-        c.ip.as_ref()
-            .map_or_else(|| Cell::muted("Not running"), |ip| Cell::mono(ip.clone())),
+        c.ip.as_ref().map_or_else(
+            || Cell::muted("Not running"),
+            |ip| Cell::mono(ip.clone()).copyable(),
+        ),
     );
     if let Some(compose) = &c.compose {
         network = network
@@ -1013,44 +1278,66 @@ fn container_info(c: &Container, theme: &Theme) -> impl IntoElement {
         ("Container port", 1.0),
         ("Protocol", 1.0),
     ])
+    .id("ports")
     .empty("No published ports")
     .rows(c.ports.iter().map(|p| {
         vec![
-            match p.host_port {
-                Some(port) if c.state.is_active() => Cell::link(port.to_string()),
-                Some(port) => Cell::plain(port.to_string()),
-                None => Cell::muted("—"),
-            },
+            port_cell(c, p),
             Cell::plain(p.container_port.to_string()),
             Cell::muted(p.protocol.label()),
         ]
     }));
 
     let mounts = DataTable::new([("Source", 1.2), ("Destination", 1.0)])
+        .id("mounts")
         .empty("No mounts")
         .rows(c.mounts.iter().map(|m| {
             vec![
                 match m.kind {
-                    MountKind::Volume => Cell::link(m.source.clone()),
-                    MountKind::Bind | MountKind::Tmpfs => Cell::plain(m.source.clone()),
+                    MountKind::Volume => {
+                        let name = m.source.clone();
+                        Cell::link(m.source.clone())
+                            .copyable()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ShowVolume(name.clone()));
+                            }))
+                    }
+                    MountKind::Bind | MountKind::Tmpfs => Cell::plain(m.source.clone()).copyable(),
                 },
                 Cell::plain(if m.read_only {
                     format!("{} (read-only)", m.destination)
                 } else {
                     m.destination.clone()
-                }),
+                })
+                .copy_value(m.destination.clone()),
             ]
         }));
 
+    let env_table = DataTable::new([("Key", 1.0), ("Value", 1.6)]).id("env");
+    let env = match env {
+        None => env_table.empty("Loading…"),
+        Some(Err(error)) => env_table.empty(format!("Couldn't load the environment: {error}")),
+        Some(Ok(env)) => env_table
+            .empty("No environment variables")
+            .rows(env.iter().map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                vec![
+                    Cell::plain(key.to_string()).copyable(),
+                    Cell::mono(value.to_string()).copyable(),
+                ]
+            })),
+    };
+
     let labels = DataTable::new([("Key", 1.0), ("Value", 1.2)])
+        .id("labels")
         .empty("No labels")
         .rows(c.labels.iter().map(|(k, v)| {
             let key = if k.starts_with("com.docker.compose.") {
-                Cell::muted(k.clone())
+                Cell::muted(k.clone()).copyable()
             } else {
-                Cell::plain(k.clone())
+                Cell::plain(k.clone()).copyable()
             };
-            vec![key, Cell::plain(v.clone())]
+            vec![key, Cell::plain(v.clone()).copyable()]
         }));
 
     div()
@@ -1061,6 +1348,7 @@ fn container_info(c: &Container, theme: &Theme) -> impl IntoElement {
         .child(network)
         .child(div().child(Heading::new("Ports")).child(ports))
         .child(div().child(Heading::new("Mounts")).child(mounts))
+        .child(div().child(Heading::new("Environment")).child(env))
         .child(div().child(Heading::new("Labels")).child(labels))
 }
 
