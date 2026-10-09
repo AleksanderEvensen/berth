@@ -14,14 +14,15 @@ use berth_ui::{
     status_dot,
 };
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent, Render,
-    SharedString, Subscription, Window, div, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, KeyDownEvent,
+    Render, SharedString, Subscription, Window, div, list, prelude::*, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
 use crate::live::{Live, LiveKey, LiveTab};
+use crate::selection::MultiSelect;
 use crate::store::{Connection, Op, Store};
 use crate::virtual_rows::VirtualRows;
 
@@ -36,7 +37,7 @@ enum Row {
     Container { id: String, depth: usize },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Selection {
     Stack(String),
     Container(String),
@@ -46,7 +47,9 @@ pub struct ContainersScreen {
     store: Entity<Store>,
     /// Compose projects the user collapsed (stacks start expanded).
     collapsed: HashSet<String>,
-    selection: Option<Selection>,
+    selection: MultiSelect<Selection>,
+    /// Selectable stacks and containers in display order (for shift-ranges).
+    order: Vec<Selection>,
     tab: usize,
     search: Option<(Entity<InputState>, Subscription)>,
     /// Lower-cased, trimmed search query; empty = no filter.
@@ -79,7 +82,8 @@ impl ContainersScreen {
         Self {
             store,
             collapsed: HashSet::new(),
-            selection: None,
+            selection: MultiSelect::default(),
+            order: Vec::new(),
             tab: 0,
             search: None,
             query: String::new(),
@@ -115,7 +119,7 @@ impl ContainersScreen {
             3 => LiveTab::Terminal,
             _ => return None,
         };
-        let Some(Selection::Container(id)) = self.selection.as_ref().filter(|_| self.visible)
+        let Some(Selection::Container(id)) = self.selection.single().filter(|_| self.visible)
         else {
             return None;
         };
@@ -171,6 +175,14 @@ impl ContainersScreen {
                 }
             }
         }
+        self.order = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Section { .. } => None,
+                Row::Stack { project } => Some(Selection::Stack(project.clone())),
+                Row::Container { id, .. } => Some(Selection::Container(id.clone())),
+            })
+            .collect();
         let changed = self.rows.sync(rows);
         self.stack_members = stack_members;
         self.index = store
@@ -264,16 +276,24 @@ impl ContainersScreen {
     }
 
     fn drop_stale_selection(&mut self, containers: &[Container]) {
-        let exists = match &self.selection {
-            None => return,
-            Some(Selection::Container(id)) => containers.iter().any(|c| &c.id == id),
-            Some(Selection::Stack(project)) => containers
+        self.selection.retain(|selection| match selection {
+            Selection::Container(id) => containers.iter().any(|c| &c.id == id),
+            Selection::Stack(project) => containers
                 .iter()
                 .any(|c| c.compose.as_ref().is_some_and(|cr| &cr.project == project)),
-        };
-        if !exists {
-            self.selection = None;
-        }
+        });
+    }
+
+    /// Select every listed stack and container (`ctrl+a`).
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection.select_all(&self.order);
+        cx.notify();
+    }
+
+    /// Drop the selection (`Esc`).
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection.clear();
+        cx.notify();
     }
 
     fn run(&self, ids: Vec<String>, op: Op, cx: &mut Context<Self>) {
@@ -314,14 +334,16 @@ impl ContainersScreen {
         if hidden {
             self.close_search(cx);
         }
-        self.selection = Some(Selection::Container(id.to_string()));
+        self.selection
+            .select_one(Selection::Container(id.to_string()));
         self.tab = 0;
         self.reveal = Some(id.to_string());
         cx.notify();
     }
 
-    fn select(&mut self, selection: Selection, cx: &mut Context<Self>) {
-        self.selection = Some(selection);
+    fn click(&mut self, selection: &Selection, event: &ClickEvent, cx: &mut Context<Self>) {
+        self.selection
+            .click(selection, event.modifiers(), &self.order);
         cx.notify();
     }
 
@@ -472,7 +494,7 @@ impl ContainersScreen {
     ) -> ResourceRow {
         let project = stack.project.to_string();
         let active = stack.is_active();
-        let selected = self.selection == Some(Selection::Stack(project.clone()));
+        let selected = self.selection.contains(&Selection::Stack(project.clone()));
         let total = stack.containers.len();
         let busy = stack
             .containers
@@ -520,7 +542,9 @@ impl ContainersScreen {
         };
         let select = {
             let project = project.clone();
-            cx.listener(move |this, _, _, cx| this.select(Selection::Stack(project.clone()), cx))
+            cx.listener(move |this, event: &ClickEvent, _, cx| {
+                this.click(&Selection::Stack(project.clone()), event, cx);
+            })
         };
 
         ResourceRow::new(
@@ -558,7 +582,7 @@ impl ContainersScreen {
     ) -> ResourceRow {
         let id = c.id.clone();
         let active = c.state.is_active();
-        let selected = self.selection == Some(Selection::Container(id.clone()));
+        let selected = self.selection.contains(&Selection::Container(id.clone()));
         let title = match (&c.compose, depth) {
             (Some(compose), 1) => compose.service.clone(),
             _ => c.name.clone(),
@@ -591,7 +615,9 @@ impl ContainersScreen {
         };
         let select = {
             let id = id.clone();
-            cx.listener(move |this, _, _, cx| this.select(Selection::Container(id.clone()), cx))
+            cx.listener(move |this, event: &ClickEvent, _, cx| {
+                this.click(&Selection::Container(id.clone()), event, cx);
+            })
         };
 
         let mut row = ResourceRow::new(SharedString::from(format!("ctr-{id}")), title)
@@ -643,10 +669,13 @@ impl ContainersScreen {
                 cx.notify();
             }));
 
-        let body: AnyElement = match (&self.selection, self.tab) {
+        let bulk = self.selection.len() > 1;
+        let body: AnyElement = match (self.selection.single(), self.tab) {
+            (None, _) if bulk => self.render_bulk(store, cx),
             (None, _) => empty_state(
                 "No selection",
-                "Select a container or compose stack to inspect it.",
+                "Select a container or compose stack to inspect it. \
+                 Shift- or Ctrl-click to select several.",
                 theme,
             )
             .into_any_element(),
@@ -697,9 +726,130 @@ impl ContainersScreen {
                     .items_center()
                     .justify_center()
                     .px(px(120.0))
-                    .child(tabs),
+                    .when(!bulk, |d| d.child(tabs)),
             ))
             .child(div().flex_1().min_h_0().child(body))
+    }
+
+    /// Containers the selection covers: selected containers plus the
+    /// members a selected stack shows (a search can hide some), in store
+    /// order.
+    fn selected_containers<'a>(&self, store: &'a Store) -> Vec<&'a Container> {
+        let in_selected_stack = |c: &Container| {
+            c.compose.as_ref().is_some_and(|cr| {
+                self.selection
+                    .contains(&Selection::Stack(cr.project.clone()))
+                    && self
+                        .stack_members
+                        .get(&cr.project)
+                        .is_some_and(|members| members.contains(&c.id))
+            })
+        };
+        store
+            .containers()
+            .iter()
+            .filter(|c| {
+                self.selection.contains(&Selection::Container(c.id.clone())) || in_selected_stack(c)
+            })
+            .collect()
+    }
+
+    /// Detail pane for several selected rows: counts and bulk start, stop
+    /// and delete.
+    fn render_bulk(&self, store: &Store, cx: &Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx);
+        let selected = self.selected_containers(store);
+        // The store skips containers with an operation in flight, so leave
+        // them out of the actions and report them as busy instead.
+        let (busy, containers): (Vec<&Container>, Vec<&Container>) = selected
+            .iter()
+            .partition(|c| store.pending(&c.id).is_some());
+        let (running, stopped): (Vec<&Container>, Vec<&Container>) =
+            containers.iter().partition(|c| c.state.is_active());
+        let ids =
+            |list: &[&Container]| -> Vec<String> { list.iter().map(|c| c.id.clone()).collect() };
+        let start_ids = ids(&stopped);
+        let stop_ids = ids(&running);
+        let delete_ids = ids(&containers);
+        let names: Vec<SharedString> = containers
+            .iter()
+            .map(|c| SharedString::from(c.name.clone()))
+            .collect();
+        let total = containers.len();
+
+        let mut actions = div().flex().gap(px(Theme::SPACE_SM));
+        if !start_ids.is_empty() {
+            let count = start_ids.len();
+            actions = actions.child(
+                Button::new("start-selected", format!("Start {count}"))
+                    .icon(icons::PLAY)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run(start_ids.clone(), Op::Start, cx);
+                    })),
+            );
+        }
+        if !stop_ids.is_empty() {
+            let count = stop_ids.len();
+            actions = actions.child(
+                Button::new("stop-selected", format!("Stop {count}"))
+                    .icon(icons::STOP)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run(stop_ids.clone(), Op::Stop, cx);
+                    })),
+            );
+        }
+        if total > 0 {
+            actions = actions.child(
+                Button::new("delete-selected", format!("Delete {total}"))
+                    .icon(icons::TRASH)
+                    .solid()
+                    .tone(ButtonTone::Danger)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_delete(
+                            format!("Delete {total} container{}?", plural(total)),
+                            "Running containers are stopped first. Volumes are kept.",
+                            names.clone(),
+                            delete_ids.clone(),
+                            cx,
+                        );
+                    })),
+            );
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(Theme::SPACE_SM))
+            .child(
+                div()
+                    .text_size(px(Theme::TEXT_LG + 2.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(format!("{} selected", self.selection.len())),
+            )
+            .child(
+                div()
+                    .text_size(px(Theme::TEXT_SM))
+                    .text_color(theme.text_faint)
+                    .child(match busy.len() {
+                        0 => format!(
+                            "{total} container{} · {} running",
+                            plural(total),
+                            running.len()
+                        ),
+                        n => format!(
+                            "{} container{} · {} running · {n} busy",
+                            selected.len(),
+                            plural(selected.len()),
+                            running.len()
+                        ),
+                    }),
+            )
+            .child(div().pt(px(Theme::SPACE_MD)).child(actions))
+            .into_any_element()
     }
 }
 
@@ -777,6 +927,10 @@ fn matches_query(c: &Container, query: &str) -> bool {
         || c.compose
             .as_ref()
             .is_some_and(|cr| hit(&cr.project) || hit(&cr.service))
+}
+
+const fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 fn lifecycle_button(key: &str, active: bool) -> IconButton {

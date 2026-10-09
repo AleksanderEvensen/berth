@@ -147,6 +147,18 @@ impl ImagesScreen {
         }));
     }
 
+    /// Select every listed row (`ctrl+a`).
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection.select_all(&self.order);
+        cx.notify();
+    }
+
+    /// Drop the selection (`Esc`).
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection.clear();
+        cx.notify();
+    }
+
     pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
         if self.chrome != chrome {
             self.chrome = chrome;

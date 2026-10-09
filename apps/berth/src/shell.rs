@@ -42,6 +42,10 @@ actions!(
         #[derive(Eq)]
         FocusPrev,
         #[derive(Eq)]
+        SelectAll,
+        #[derive(Eq)]
+        ClearSelection,
+        #[derive(Eq)]
         Quit
     ]
 );
@@ -234,6 +238,28 @@ impl Shell {
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(Route::Settings, window, cx);
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        match self.route {
+            Route::Containers => self.containers.update(cx, ContainersScreen::select_all),
+            Route::Volumes => self.volumes.update(cx, VolumesScreen::select_all),
+            Route::Images => self.images.update(cx, ImagesScreen::select_all),
+            Route::Networks => self.networks.update(cx, NetworksScreen::select_all),
+            Route::Activity | Route::Cleanup | Route::Settings => {}
+        }
+    }
+
+    fn clear_selection(&mut self, _: &ClearSelection, _: &mut Window, cx: &mut Context<Self>) {
+        match self.route {
+            Route::Containers => self
+                .containers
+                .update(cx, ContainersScreen::clear_selection),
+            Route::Volumes => self.volumes.update(cx, VolumesScreen::clear_selection),
+            Route::Images => self.images.update(cx, ImagesScreen::clear_selection),
+            Route::Networks => self.networks.update(cx, NetworksScreen::clear_selection),
+            Route::Activity | Route::Cleanup | Route::Settings => {}
+        }
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -585,6 +611,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::clear_selection))
             .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
             .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
             .relative()

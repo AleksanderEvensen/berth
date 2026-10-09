@@ -5,10 +5,11 @@ and meets the acceptance criteria of its story in
 [01-user-stories.md](01-user-stories.md). Partially done items stay unticked
 with a note saying what is missing.
 
-**Status (audited 2026-10-08, at `8bdee48`):** M0–M3 done apart from the
-gaps listed under them. M4 has started: settings screen, light theme, accent
+**Status (audited 2026-10-09, at `ce159f2`):** M0–M3 done apart from the
+gaps listed under M1. M4 has started: settings screen, light theme, accent
 picker, reduce motion, persistence, the Networks screen and full volume and
-image info (C4, D4) are in.
+image info (C4, D4) are in. M5 endpoint discovery (macOS context sockets,
+Windows named pipe) is in; the rest of M5 is not.
 
 ## M0 — Visual prototype ✅
 - [x] Workspace: `apps/berth`, `crates/ui`, `crates/docker`.
@@ -38,10 +39,11 @@ image info (C4, D4) are in.
         should navigate to the Volumes screen); copy button for IDs.
   - [x] B10 — Search/filter the container list.
 
-## M2 — Volumes, images, cleanup (P0)
+## M2 — Volumes, images, cleanup (P0) ✅
 - [x] Volumes + Images screens, multi-selection model (FR-12), bulk delete.
 - [x] `/system/df` sizes; Clean-up page with prunes (G1).
-- [ ] FR-12 keyboard parts: `ctrl+a` select all and `Esc` to clear are not bound.
+- [x] FR-12 keyboard parts: `ctrl+a` selects every listed row, `Esc` clears
+      (not while typing in an input or the terminal).
 - Stories:
   - [x] C1 — Volumes in "In use" / "Unused" with sizes and total.
   - [x] C2 — Delete a volume; in-use volumes guarded.
@@ -49,8 +51,8 @@ image info (C4, D4) are in.
   - [x] D1 — Images in "In use" / "Unused" / "Dangling" with size, age, total.
   - [x] D2 — Delete image from row; multi-select delete.
   - [x] D3 — Remove dangling / unused images with reclaimable preview.
-  - [ ] B11 — Multi-select containers. *Missing:* the Containers screen still
-        uses single selection; `MultiSelect` is only wired into Volumes and Images.
+  - [x] B11 — Multi-select containers and stacks; the detail pane shows the
+        count with bulk start, stop and delete.
   - [x] G1 — Clean-up page: per-category reclaimable space, pick, prune, report.
 
 ## M3 — Live views (P1) ✅
@@ -69,7 +71,7 @@ image info (C4, D4) are in.
 - [ ] Command palette.
 - [ ] Keyboard map — every action reachable by keyboard (NFR-U1); a shortcut
       reference. Bound today: sidebar, search, settings, focus cycling, quit,
-      dialog confirm/cancel.
+      select all / clear selection, dialog confirm/cancel.
 - [x] Networks screen.
 - Deferred from M3:
   - [ ] Activity monitor "Engine" row (daemon usage isn't in the Docker API —
@@ -97,9 +99,10 @@ image info (C4, D4) are in.
 
 ## M5 — macOS / Windows
 - [ ] macOS: traffic-light inset chrome (titlebar already clears the traffic lights).
-- [ ] macOS: context-socket discovery.
+- [x] macOS: context-socket discovery (Docker contexts, then Docker Desktop /
+      OrbStack / Colima sockets).
 - [ ] macOS: signed, notarized universal `.dmg`.
-- [ ] Windows: named pipe.
+- [x] Windows: named pipe (`npipe://`, default `//./pipe/docker_engine`).
 - [ ] Windows: caption buttons.
 - [ ] Windows: MSI.
 

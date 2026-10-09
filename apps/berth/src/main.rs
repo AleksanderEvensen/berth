@@ -22,7 +22,14 @@ use gpui::{
     WindowOptions, px, size,
 };
 
-use shell::{FocusNext, FocusPrev, FocusSearch, OpenSettings, Quit, Shell, ToggleSidebar};
+use shell::{
+    ClearSelection, FocusNext, FocusPrev, FocusSearch, OpenSettings, Quit, SelectAll, Shell,
+    ToggleSidebar,
+};
+
+/// Where list selection keys apply: anywhere in the shell except text
+/// inputs, the terminal and the confirm dialog, which own these keys.
+const LIST_KEYS: &str = "Shell && !Input && !Terminal && !ConfirmDialog";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -43,6 +50,9 @@ fn main() {
                 KeyBinding::new("cmd-,", OpenSettings, None),
                 KeyBinding::new("tab", FocusNext, Some("Shell")),
                 KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
+                KeyBinding::new("ctrl-a", SelectAll, Some(LIST_KEYS)),
+                KeyBinding::new("cmd-a", SelectAll, Some(LIST_KEYS)),
+                KeyBinding::new("escape", ClearSelection, Some(LIST_KEYS)),
                 KeyBinding::new("ctrl-q", Quit, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("enter", dialogs::Confirm, Some(dialogs::CONFIRM_CONTEXT)),

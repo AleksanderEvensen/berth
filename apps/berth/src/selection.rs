@@ -1,5 +1,6 @@
 //! Multi-selection shared by resource lists (FR-12): click selects one,
-//! ctrl/cmd-click toggles, shift-click extends from the anchor.
+//! ctrl/cmd-click toggles, shift-click extends from the anchor, `ctrl+a`
+//! selects every visible key and `Esc` clears.
 
 use std::collections::HashSet;
 use std::hash::Hash;
@@ -56,11 +57,34 @@ impl<K: Clone + Eq + Hash> MultiSelect<K> {
         self.anchor = Some(key.clone());
     }
 
+    /// Select exactly `key`, as a plain click does.
+    pub fn select_one(&mut self, key: K) {
+        self.selected.clear();
+        self.selected.insert(key.clone());
+        self.anchor = Some(key);
+    }
+
+    /// Select every key in `order` (the visible, selectable keys).
+    pub fn select_all(&mut self, order: &[K]) {
+        self.selected = order.iter().cloned().collect();
+        if self
+            .anchor
+            .as_ref()
+            .is_none_or(|a| !self.selected.contains(a))
+        {
+            self.anchor = order.first().cloned();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+    }
+
     pub fn contains(&self, key: &K) -> bool {
         self.selected.contains(key)
     }
 
-    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.selected.len()
     }
@@ -120,5 +144,22 @@ mod tests {
 
         sel.retain(|k| *k != 5);
         assert!(sel.is_empty());
+    }
+
+    #[test]
+    fn select_all_and_clear() {
+        let order: Vec<u32> = (0..4).collect();
+        let mut sel = MultiSelect::default();
+        sel.select_all(&order);
+        assert_eq!(sel.len(), 4);
+
+        // The anchor is the first key, so shift-click ranges from there.
+        sel.click(&2, mods(true, false), &order);
+        assert_eq!(sel.len(), 3);
+
+        sel.clear();
+        assert!(sel.is_empty());
+        sel.click(&3, mods(true, false), &order);
+        assert_eq!(sel.single(), Some(&3));
     }
 }
