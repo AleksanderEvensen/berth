@@ -9,8 +9,8 @@ use berth_ui::{
     ResourceRow, SectionLabel, Theme, empty_state, icons,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Render,
-    SharedString, Window, div, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Modifiers,
+    Render, SharedString, Window, div, list, prelude::*, px,
 };
 
 use super::{Chrome, ShowContainer, detail_pane, list_column, scroll_page, used_by};
@@ -33,6 +33,8 @@ pub struct VolumesScreen {
     order: Vec<String>,
     selection: MultiSelect<String>,
     chrome: Chrome,
+    /// A volume to scroll into view once the rows are next synced.
+    reveal: Option<String>,
 }
 
 impl EventEmitter<ConfirmRequest> for VolumesScreen {}
@@ -53,6 +55,7 @@ impl VolumesScreen {
             order: Vec::new(),
             selection: MultiSelect::default(),
             chrome: Chrome::default(),
+            reveal: None,
         }
     }
 
@@ -75,7 +78,17 @@ impl VolumesScreen {
         }
     }
 
-    fn sync_rows(&mut self, store: &Store) {
+    /// Select only `name` and scroll it into view.
+    pub fn reveal(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.to_string();
+        self.selection
+            .click(&name, Modifiers::default(), &self.order);
+        self.reveal = Some(name);
+        cx.notify();
+    }
+
+    /// Returns whether any rows changed.
+    fn sync_rows(&mut self, store: &Store) -> bool {
         let (mut in_use, mut unused): (Vec<&Volume>, Vec<&Volume>) =
             store.volumes().iter().partition(|v| store.volume_in_use(v));
         in_use.sort_by(|a, b| a.name.cmp(&b.name));
@@ -96,8 +109,9 @@ impl VolumesScreen {
                 order.push(v.name.clone());
             }
         }
-        self.rows.sync(rows);
+        let changed = self.rows.sync(rows);
         self.order = order;
+        changed
     }
 
     fn click(&mut self, name: &str, event: &ClickEvent, cx: &mut Context<Self>) {
@@ -267,7 +281,14 @@ impl Render for VolumesScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store_entity = self.store.clone();
         let store = store_entity.read(cx);
-        self.sync_rows(store);
+        let rows_changed = self.sync_rows(store);
+        if let Some(name) = self.reveal.take()
+            && let Some(ix) = self
+                .rows
+                .position(|row| matches!(row, Row::Volume(row_name) if *row_name == name))
+        {
+            self.rows.reveal(ix, rows_changed);
+        }
         let theme = Theme::of(cx);
 
         let unused: Vec<String> = store

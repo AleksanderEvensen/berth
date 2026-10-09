@@ -32,11 +32,11 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] B1 — Running / Stopped sections with counts.
   - [x] B2 — Compose projects as expandable stacks.
   - [x] B3 — Start/stop/restart/delete for containers and stacks, with confirm and pending spinners.
-  - [ ] B4 — Open published port. *Missing:* menu listing all ports when there
-        are several (the row button opens the first web port only).
-  - [ ] B5 — Info tab. *Missing:* env and command sections; port and
-        named-volume cells are styled as links but not clickable (volumes
-        should navigate to the Volumes screen); copy button for IDs.
+  - [x] B4 — Open published port; with several web ports the row button
+        opens a menu listing them all.
+  - [x] B5 — Info tab: identity, command, network, ports (host ports open in
+        the browser), mounts (named volumes open on the Volumes screen),
+        environment (from inspect), labels; copy buttons for ID and command.
   - [x] B10 — Search/filter the container list.
 
 ## M2 — Volumes, images, cleanup (P0) ✅
