@@ -62,7 +62,7 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] B6 — Logs: follow, filter, timestamps, copy, clear, ANSI (wrap toggle deferred to M4).
   - [x] B7 — Stats: CPU, memory, network, block I/O sparklines.
   - [x] B8 — Terminal: interactive exec with tty.
-  - [x] F1 — Activity monitor tree table, sortable, totals and sparklines (engine row deferred to M4).
+  - [x] F1 — Activity monitor tree table, sortable, totals and sparklines.
 
 ## M4 — Polish & ship Linux (P1)
 - [x] Light theme.
@@ -74,8 +74,6 @@ Windows named pipe) is in; the rest of M5 is not.
       select all / clear selection, dialog confirm/cancel.
 - [x] Networks screen.
 - Deferred from M3:
-  - [ ] Activity monitor "Engine" row (daemon usage isn't in the Docker API —
-        read `/proc` for `dockerd` on Linux).
   - [ ] Logs wrap toggle.
 - Packaging:
   - [ ] AppImage

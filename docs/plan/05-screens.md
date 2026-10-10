@@ -85,8 +85,8 @@ OrbStack are called out explicitly.
 - Info: driver, scope, subnet/gateway, internal/attachable, connected containers.
 
 ## Activity monitor (`orb-activity-monitor.png`)
-- Full-width (no list column). Tree table: Containers → stacks → containers,
-  plus an "Engine" row; columns CPU %, Memory, Network, Disk, sortable.
+- Full-width (no list column). Tree table: Containers → stacks → containers;
+  columns CPU %, Memory, Network, Disk, sortable.
 - Bottom strip: four summary cards with totals + sparklines.
 - Zebra striping replaced by hairline row dividers + hover wash.
 

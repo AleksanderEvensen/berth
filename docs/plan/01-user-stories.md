@@ -123,7 +123,7 @@ and prune unused.
 ## F. Activity monitor
 
 **F1 (P1)** — A tree table of stacks → containers with CPU %, memory, network
-and disk rates, sortable by column, plus totals and sparklines for the engine.
+and disk rates, sortable by column, plus totals and sparklines.
 
 ## G. Clean-up
 
