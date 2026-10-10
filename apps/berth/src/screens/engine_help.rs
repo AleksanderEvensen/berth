@@ -73,7 +73,8 @@ impl Problem {
 
     /// How Berth gets from a fixed engine to a connection.
     fn recovery(&self) -> String {
-        const AFTER: &str = "so it won't pick up a new socket on its own. After option 1 or 2,";
+        const AFTER: &str = "so Berth keeps retrying it and won't find a socket elsewhere. \
+                             If your fix puts the engine on another socket,";
         match &self.pin {
             None => "Set up one of the options below; Berth keeps retrying and connects as \
                      soon as one of them works."
@@ -147,13 +148,19 @@ impl Problem {
                     },
                     Step {
                         label: Some(
-                            "Arch: install docker-rootless-extras from the AUR, give your \
-                             user subordinate IDs (skip if /etc/subuid already lists you), then",
+                            "Arch: install docker-rootless-extras from the AUR. It needs at \
+                             least 65536 subordinate IDs for you in both /etc/subuid and \
+                             /etc/subgid; check with",
                         ),
-                        commands: &[
-                            "sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER",
-                            "systemctl --user enable --now docker.socket",
-                        ],
+                        commands: &["grep \"^$USER:\" /etc/subuid /etc/subgid"],
+                    },
+                    Step {
+                        label: Some(
+                            "If either file has no line for you, add one with a range no \
+                             other line overlaps (the ArchWiki's Docker page, \"Rootless \
+                             Docker daemon\", shows how). Then",
+                        ),
+                        commands: &["systemctl --user enable --now docker.socket"],
                     },
                 ],
                 note: None,
@@ -380,10 +387,23 @@ mod tests {
         assert_eq!(Problem::of(&Connection::Connecting), None);
     }
 
+    fn missing(pin: Option<Pin>) -> Connection {
+        Connection::Disconnected {
+            error: EngineError::Connect(ConnectError::NotFound {
+                tried: vec!["unix:///missing.sock".into()],
+            }),
+            pin,
+        }
+    }
+
     #[test]
     fn only_discovery_promises_to_reconnect_by_itself() {
-        let recovery = |pin| Problem::of(&denied(pin)).expect("a guide").recovery();
-        assert!(recovery(None).contains("keeps retrying"));
+        let recovery =
+            |connection: Connection| Problem::of(&connection).expect("a guide").recovery();
+        assert!(recovery(denied(None)).contains("connects as soon as"));
+        assert!(recovery(missing(None)).contains("connects as soon as"));
+        // A pinned socket that is missing stays missing whichever fix runs,
+        // the system daemon included, so the switch applies to every option.
         for (pin, fix) in [
             (Pin::Settings, "back to Auto"),
             (Pin::DockerHost, "unset DOCKER_HOST"),
@@ -393,19 +413,18 @@ mod tests {
                 "docker context use default",
             ),
         ] {
-            let text = recovery(Some(pin));
-            assert!(!text.contains("keeps retrying"), "{text}");
-            assert!(text.contains(fix), "{text}");
+            for connection in [denied(Some(pin.clone())), missing(Some(pin.clone()))] {
+                let text = recovery(connection);
+                assert!(!text.contains("connects as soon as"), "{text}");
+                assert!(!text.contains("option"), "{text}");
+                assert!(text.contains(fix), "{text}");
+            }
         }
     }
 
     #[test]
     fn the_docker_group_comes_last_and_is_flagged() {
-        let missing = Connection::Disconnected {
-            error: EngineError::Connect(ConnectError::NotFound { tried: Vec::new() }),
-            pin: None,
-        };
-        for connection in [denied(None), missing] {
+        for connection in [denied(None), missing(None)] {
             let fixes = Problem::of(&connection).expect("a guide").fixes();
             assert!(matches!(fixes[0].tag, Some(Tag::Accent(_))));
             let last = &fixes[2];
@@ -415,6 +434,13 @@ mod tests {
                 fixes[..2]
                     .iter()
                     .all(|f| commands(f).all(|c| !c.contains("-aG docker")))
+            );
+            // Subordinate ID ranges must not be guessed: they can collide.
+            assert!(
+                fixes
+                    .iter()
+                    .flat_map(commands)
+                    .all(|c| !c.contains("--add-sub"))
             );
         }
     }
