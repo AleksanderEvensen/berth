@@ -1,6 +1,10 @@
 //! Logs tab: a follow-tail log stream over a [`LogBuffer`], rendered as a
 //! virtualized monospace list with ANSI colours (B6, FR-7, NFR-P4).
 //!
+//! Unwrapped lines all share one height, so a `uniform_list` shows them.
+//! Wrapped lines vary in height and need a `gpui::list`, whose [`ListState`]
+//! is spliced as the buffer changes, but only while wrapping is on.
+//!
 //! The stream lives exactly as long as this view; the containers screen
 //! creates it when the tab becomes visible and drops it when it isn't
 //! (NFR-P5). Arriving lines are applied in batches, at most once a frame.
@@ -12,9 +16,10 @@ use berth_docker::{Engine, LogLine, LogOptions, LogStream};
 use berth_ui::ansi::ansi_color;
 use berth_ui::{IconButton, SearchField, Theme, icon, icons};
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, FontStyle, FontWeight, HighlightStyle, IntoElement,
-    Render, ScrollWheelEvent, SharedString, StyledText, Subscription, Task, UnderlineStyle,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    AnyElement, ClipboardItem, Context, Entity, FollowMode, FontStyle, FontWeight, HighlightStyle,
+    IntoElement, ListAlignment, ListOffset, ListState, Render, ScrollStrategy, ScrollWheelEvent,
+    SharedString, StyledText, Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window,
+    div, list, prelude::*, px, uniform_list,
 };
 use gpui_base::input::{InputEvent, InputState};
 
@@ -44,6 +49,10 @@ pub struct LogsView {
     /// Pinned to the newest line; scrolling up pauses it.
     follow: bool,
     timestamps: bool,
+    /// Long lines wrap onto several rows instead of being clipped.
+    wrap: bool,
+    /// Rows of the wrapped view; synced with the buffer only while `wrap`.
+    lines: ListState,
     /// SGR state each stream (stdout, stderr) ended its last line in.
     styles: [SgrStyle; 2],
     search: Entity<InputState>,
@@ -78,6 +87,8 @@ impl LogsView {
             scroll: UniformListScrollHandle::new(),
             follow: true,
             timestamps: false,
+            wrap: false,
+            lines: ListState::new(0, ListAlignment::Top, px(400.0)),
             styles: [SgrStyle::default(); 2],
             search,
             state: StreamState::Streaming,
@@ -107,6 +118,7 @@ impl LogsView {
     }
 
     fn append(&mut self, batch: Vec<berth_docker::EngineResult<LogLine>>, cx: &mut Context<Self>) {
+        let shown_before = self.buffer.len();
         let mut evicted = 0u32;
         for item in batch {
             match item {
@@ -122,7 +134,21 @@ impl LogsView {
                 Err(err) => self.state = StreamState::Failed(err.to_string()),
             }
         }
-        if self.follow {
+        if self.wrap {
+            // Evicted rows leave the front and new ones join the end; the
+            // list keeps the same lines under the reader by itself.
+            let evicted = usize::try_from(evicted).unwrap_or(usize::MAX);
+            if let Some(kept) = shown_before.checked_sub(evicted) {
+                self.lines.splice(0..evicted, 0);
+                self.lines
+                    .splice(kept..kept, self.buffer.len().saturating_sub(kept));
+            } else {
+                self.lines.reset(self.buffer.len());
+            }
+            if self.follow {
+                self.lines.set_follow_mode(FollowMode::Tail);
+            }
+        } else if self.follow {
             self.scroll.scroll_to_bottom();
         } else if evicted > 0 {
             // Rows moved up as the oldest were evicted: keep the same lines
@@ -143,8 +169,11 @@ impl LogsView {
             cx.background_executor().timer(FILTER_DEBOUNCE).await;
             let started = this.update(cx, |view, cx| {
                 view.buffer.set_filter(&query);
+                if view.wrap {
+                    view.lines.reset(view.buffer.len());
+                }
                 view.follow = true;
-                view.scroll.scroll_to_bottom();
+                view.scroll_to_end();
                 cx.notify();
             });
             if started.is_err() {
@@ -154,9 +183,14 @@ impl LogsView {
             // stay responsive over a million lines.
             loop {
                 let done = this.update(cx, |view, cx| {
+                    let at = view.buffer.scanned_len();
                     let done = view.buffer.scan(FILTER_SLICE);
+                    if view.wrap {
+                        let found = view.buffer.scanned_len().saturating_sub(at);
+                        view.lines.splice(at..at, found);
+                    }
                     if view.follow {
-                        view.scroll.scroll_to_bottom();
+                        view.scroll_to_end();
                     }
                     cx.notify();
                     done
@@ -169,10 +203,21 @@ impl LogsView {
         }));
     }
 
+    fn scroll_to_end(&self) {
+        if self.wrap {
+            self.lines.set_follow_mode(FollowMode::Tail);
+        } else {
+            self.scroll.scroll_to_bottom();
+        }
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let dy = f32::from(event.delta.pixel_delta(px(ROW_HEIGHT)).y);
         let follow = if dy > 0.0 {
             false
+        } else if self.wrap {
+            // Resuming is picked up after layout; see `watch_tail`.
+            self.follow
         } else {
             self.follow || self.scroll.is_scrolled_to_end().unwrap_or(true)
         };
@@ -182,9 +227,55 @@ impl LogsView {
         }
     }
 
+    /// The wrapped list resumes following by itself whenever a layout finds
+    /// it at the bottom (scrolled back down, resized, or too short to
+    /// scroll); pick that up after the next frame is laid out. Its
+    /// unmeasured rows make `is_scrolled_to_end` unknown before then.
+    fn watch_tail(window: &Window, cx: &Context<Self>) {
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |this, cx| {
+                    if this.wrap && this.lines.is_following_tail() && !this.follow {
+                        this.follow = true;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
     fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         self.follow = true;
-        self.scroll.scroll_to_bottom();
+        self.scroll_to_end();
+        cx.notify();
+    }
+
+    /// Switch between clipped and wrapped lines, keeping the top line in
+    /// view when not following.
+    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.wrap = !self.wrap;
+        if self.wrap {
+            let offset = self.scroll.0.borrow().base_handle.offset();
+            let top = usize::from(px((-f32::from(offset.y) / ROW_HEIGHT).max(0.0)));
+            self.lines.reset(self.buffer.len());
+            self.lines.set_follow_mode(FollowMode::Tail);
+            if !self.follow {
+                self.lines.scroll_to(ListOffset {
+                    item_ix: top,
+                    offset_in_item: px(0.0),
+                });
+            }
+        } else {
+            let top = self.lines.logical_scroll_top().item_ix;
+            self.lines.reset(0);
+            if self.follow {
+                self.scroll.scroll_to_bottom();
+            } else {
+                self.scroll.scroll_to_item_strict(top, ScrollStrategy::Top);
+            }
+        }
         cx.notify();
     }
 
@@ -208,8 +299,16 @@ impl LogsView {
         let needle = self.buffer.needle();
         range
             .filter_map(|ix| self.buffer.get(ix))
-            .map(|entry| log_row(entry, needle, self.timestamps, theme))
+            .map(|entry| log_row(entry, needle, self.timestamps, false, theme))
             .collect()
+    }
+
+    fn render_wrapped_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx);
+        self.buffer.get(ix).map_or_else(
+            || div().into_any_element(),
+            |entry| log_row(entry, self.buffer.needle(), self.timestamps, true, theme),
+        )
     }
 
     fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -255,8 +354,17 @@ impl LogsView {
                     .active(self.timestamps)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.timestamps = !this.timestamps;
+                        if this.wrap {
+                            // The timestamp column changes how lines wrap.
+                            this.lines.remeasure();
+                        }
                         cx.notify();
                     })),
+            )
+            .child(
+                IconButton::new("logs-wrap", icons::WRAP)
+                    .active(self.wrap)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
             )
             .child(
                 IconButton::new("logs-copy", icons::COPY)
@@ -268,6 +376,9 @@ impl LogsView {
                     .disabled(self.buffer.total() == 0)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.buffer.clear();
+                        if this.wrap {
+                            this.lines.reset(0);
+                        }
                         this.follow = true;
                         cx.notify();
                     })),
@@ -276,7 +387,10 @@ impl LogsView {
 }
 
 impl Render for LogsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.wrap && !self.follow {
+            Self::watch_tail(window, cx);
+        }
         let theme = Theme::of(cx);
         let body: AnyElement = if self.buffer.is_empty() {
             let (title, detail) = match (&self.state, self.buffer.needle()) {
@@ -285,6 +399,14 @@ impl Render for LogsView {
                 (_, None) => ("No logs", "This container hasn't written anything."),
             };
             berth_ui::empty_state(title, detail, theme).into_any_element()
+        } else if self.wrap {
+            list(
+                self.lines.clone(),
+                cx.processor(|this, ix: usize, _, cx| this.render_wrapped_row(ix, cx)),
+            )
+            .size_full()
+            .pb(px(Theme::SPACE_SM))
+            .into_any_element()
         } else {
             uniform_list(
                 "log-lines",
@@ -351,6 +473,7 @@ fn log_row(
     entry: &LogEntry,
     needle: Option<&Needle>,
     timestamps: bool,
+    wrap: bool,
     theme: &Theme,
 ) -> AnyElement {
     let text = SharedString::from(entry.text.to_string());
@@ -361,9 +484,17 @@ fn log_row(
     let stderr = entry.stream == LogStream::Stderr;
     div()
         .w_full()
-        .h(px(ROW_HEIGHT))
         .flex()
-        .items_center()
+        .map(|row| {
+            if wrap {
+                row.min_h(px(ROW_HEIGHT)).items_start()
+            } else {
+                row.h(px(ROW_HEIGHT))
+                    .items_center()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+            }
+        })
         .pl(px(Theme::SPACE_LG - 2.0))
         .pr(px(Theme::SPACE_LG))
         .border_l_2()
@@ -372,8 +503,6 @@ fn log_row(
         } else {
             gpui::transparent_black()
         })
-        .whitespace_nowrap()
-        .overflow_hidden()
         .hover(|s| s.bg(theme.row_hover))
         .when_some(entry.timestamp.filter(|_| timestamps), |row, ts| {
             row.child(

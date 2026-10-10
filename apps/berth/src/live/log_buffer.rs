@@ -196,6 +196,14 @@ impl LogBuffer {
         self.filter.as_ref().map_or(self.entries.len(), Filter::len)
     }
 
+    /// Shown lines that come from the history scan; [`Self::scan`] inserts
+    /// new matches at this index, ahead of lines pushed since.
+    pub fn scanned_len(&self) -> usize {
+        self.filter
+            .as_ref()
+            .map_or(self.entries.len(), |f| f.matches.len())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -361,7 +369,9 @@ mod tests {
         assert!(!buffer.scan(4));
         buffer.push(entry("hit new"));
         assert_eq!(buffer.len(), 5, "4 scanned + 1 live");
+        assert_eq!(buffer.scanned_len(), 4);
         assert!(buffer.scan(100));
+        assert_eq!(buffer.scanned_len(), 10);
         assert!(!buffer.scanning());
         let shown: Vec<_> = buffer.shown().map(|e| e.text.to_string()).collect();
         assert_eq!(shown.first().map(String::as_str), Some("hit 0"));

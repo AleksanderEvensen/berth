@@ -74,7 +74,7 @@ Windows named pipe) is in; the rest of M5 is not.
       select all / clear selection, dialog confirm/cancel.
 - [x] Networks screen.
 - Deferred from M3:
-  - [ ] Logs wrap toggle.
+  - [x] Logs wrap toggle.
 - Packaging:
   - [ ] AppImage
   - [ ] Flatpak

@@ -71,6 +71,7 @@ icon_assets![
     (CHECK, "check"),
     (DANGER, "danger-circle"),
     (CLOCK, "clock-circle"),
+    (WRAP, "text-wrap"),
     (ARROW_DOWN, "arrow-down"),
     (ARROW_LEFT, "arrow-left"),
     (SUN, "sun"),
