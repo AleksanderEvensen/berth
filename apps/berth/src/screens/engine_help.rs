@@ -7,78 +7,125 @@ use berth_docker::{ConnectError, EngineError};
 use berth_ui::{Heading, IconButton, Theme, icons};
 use gpui::{ClipboardItem, FontWeight, Hsla, IntoElement, SharedString, div, prelude::*, px};
 
-/// Why the engine socket can't be used, when there is something to fix.
+use crate::store::{Connection, Pin};
+
+/// Why the engine can't be used, when there is something to fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Problem {
+pub struct Problem {
+    cause: Cause,
+    pin: Option<Pin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cause {
     PermissionDenied { endpoint: String },
     NotFound { tried: Vec<String> },
 }
 
 impl Problem {
-    pub fn of(error: &EngineError) -> Option<Self> {
-        match error {
+    pub fn of(connection: &Connection) -> Option<Self> {
+        let Connection::Disconnected { error, pin } = connection else {
+            return None;
+        };
+        let cause = match error {
             EngineError::Connect(ConnectError::PermissionDenied { endpoint }) => {
-                Some(Self::PermissionDenied {
+                Cause::PermissionDenied {
                     endpoint: endpoint.clone(),
-                })
+                }
             }
-            EngineError::Connect(ConnectError::NotFound { tried }) => Some(Self::NotFound {
+            EngineError::Connect(ConnectError::NotFound { tried }) => Cause::NotFound {
                 tried: tried.clone(),
-            }),
-            _ => None,
-        }
+            },
+            _ => return None,
+        };
+        Some(Self {
+            cause,
+            pin: pin.clone(),
+        })
     }
 
     /// One line for tight spots like the sidebar footer.
     pub const fn short(&self) -> &'static str {
-        match self {
-            Self::PermissionDenied { .. } => "Permission denied · How to fix",
-            Self::NotFound { .. } => "No engine found · How to fix",
+        match self.cause {
+            Cause::PermissionDenied { .. } => "Permission denied · How to fix",
+            Cause::NotFound { .. } => "No engine found · How to fix",
         }
     }
 
     const fn title(&self) -> &'static str {
-        match self {
-            Self::PermissionDenied { .. } => "Berth can't open the engine socket",
-            Self::NotFound { .. } => "No container engine found",
+        match self.cause {
+            Cause::PermissionDenied { .. } => "Berth can't open the engine socket",
+            Cause::NotFound { .. } => "No container engine found",
         }
     }
 
     fn intro(&self) -> String {
-        match self {
-            Self::PermissionDenied { endpoint } => format!(
-                "Your user isn't allowed to use {endpoint}. Pick one of the options below; \
-                 Berth keeps retrying and connects as soon as a socket works."
+        let cause = match &self.cause {
+            Cause::PermissionDenied { endpoint } => {
+                format!("Your user isn't allowed to use {endpoint}.")
+            }
+            Cause::NotFound { tried } => {
+                format!("Berth looked at {} and found no engine.", tried.join(", "))
+            }
+        };
+        format!("{cause} {}", self.recovery())
+    }
+
+    /// How Berth gets from a fixed engine to a connection.
+    fn recovery(&self) -> String {
+        const AFTER: &str = "so it won't pick up a new socket on its own. After option 1 or 2,";
+        match &self.pin {
+            None => "Set up one of the options below; Berth keeps retrying and connects as \
+                     soon as one of them works."
+                .into(),
+            Some(Pin::Settings) => format!(
+                "Settings → Engine pins Berth to this endpoint, {AFTER} set Connect to \
+                 back to Auto."
             ),
-            Self::NotFound { tried } => format!(
-                "Berth looked at {}. Install and start one of the engines below; \
-                 Berth keeps retrying and connects as soon as a socket works.",
-                tried.join(", ")
+            Some(Pin::DockerHost) => format!(
+                "DOCKER_HOST pins Berth to this endpoint, {AFTER} unset DOCKER_HOST and \
+                 restart Berth, or enter the new socket under Custom in Settings → Engine."
+            ),
+            Some(Pin::ContextVar(name)) => format!(
+                "DOCKER_CONTEXT selects the “{name}” context, which pins Berth to this \
+                 endpoint, {AFTER} unset DOCKER_CONTEXT and restart Berth, or enter the new \
+                 socket under Custom in Settings → Engine."
+            ),
+            Some(Pin::CurrentContext(name)) => format!(
+                "The docker CLI's current context, “{name}”, pins Berth to this endpoint, \
+                 {AFTER} run `docker context use default`, or enter the new socket under \
+                 Custom in Settings → Engine."
             ),
         }
     }
 
     const fn fixes(&self) -> [Fix; 3] {
-        let last = match self {
-            Self::PermissionDenied { .. } => Fix {
+        let last = match self.cause {
+            Cause::PermissionDenied { .. } => Fix {
                 title: "Join the docker group",
                 tag: Some(Tag::Warning("Root-equivalent")),
                 description: "Lets your user use the system-wide Docker daemon. Anything \
                               running as you can then get root on this machine without a \
                               password, so only do this on a machine you trust.",
-                commands: &["sudo usermod -aG docker $USER"],
+                steps: &[Step {
+                    label: None,
+                    commands: &["sudo usermod -aG docker $USER"],
+                }],
                 note: Some("Log out and back in for the new group to apply."),
             },
-            Self::NotFound { .. } => Fix {
+            Cause::NotFound { .. } => Fix {
                 title: "Start the system Docker daemon",
                 tag: Some(Tag::Warning("Root-equivalent")),
                 description: "Runs Docker as root for the whole machine. Using it without \
                               sudo needs the docker group, which gives anything running as \
                               you root on this machine without a password.",
-                commands: &[
-                    "sudo systemctl enable --now docker",
-                    "sudo usermod -aG docker $USER",
-                ],
+                steps: &[Step {
+                    label: None,
+                    commands: &[
+                        "sudo systemctl enable --now docker",
+                        "sudo usermod -aG docker $USER",
+                    ],
+                }],
                 note: Some("Log out and back in for the new group to apply."),
             },
         };
@@ -86,20 +133,40 @@ impl Problem {
             Fix {
                 title: "Rootless Docker",
                 tag: Some(Tag::Accent("Recommended")),
-                description: "Runs the Docker daemon as your user, so containers can't touch \
-                              the rest of the system.",
-                commands: &["dockerd-rootless-setuptool.sh install"],
-                note: Some(
-                    "Needs your distribution's rootless extras package \
-                     (docker-ce-rootless-extras, or docker-rootless-extras on Arch).",
-                ),
+                description: "Runs the Docker daemon as your user instead of root. Containers \
+                              can still reach what your user can, such as files you \
+                              bind-mount, but a mistake or a bad image can't gain root on \
+                              this machine through Docker.",
+                steps: &[
+                    Step {
+                        label: Some(
+                            "Debian, Ubuntu, Fedora: install docker-ce-rootless-extras (and \
+                             uidmap on Debian/Ubuntu) from Docker's repository, then",
+                        ),
+                        commands: &["dockerd-rootless-setuptool.sh install"],
+                    },
+                    Step {
+                        label: Some(
+                            "Arch: install docker-rootless-extras from the AUR, give your \
+                             user subordinate IDs (skip if /etc/subuid already lists you), then",
+                        ),
+                        commands: &[
+                            "sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER",
+                            "systemctl --user enable --now docker.socket",
+                        ],
+                    },
+                ],
+                note: None,
             },
             Fix {
                 title: "Rootless Podman",
                 tag: None,
-                description: "Podman's Docker-compatible API, also running as your user. \
-                              Docker Compose works against it too.",
-                commands: &["systemctl --user enable --now podman.socket"],
+                description: "Podman's Docker-compatible API, also running as your user \
+                              instead of root. Docker Compose works against it too.",
+                steps: &[Step {
+                    label: None,
+                    commands: &["systemctl --user enable --now podman.socket"],
+                }],
                 note: Some("Needs Podman installed."),
             },
             last,
@@ -117,8 +184,14 @@ struct Fix {
     title: &'static str,
     tag: Option<Tag>,
     description: &'static str,
-    commands: &'static [&'static str],
+    steps: &'static [Step],
     note: Option<&'static str>,
+}
+
+/// Commands to run in order, optionally introduced by a line saying when.
+struct Step {
+    label: Option<&'static str>,
+    commands: &'static [&'static str],
 }
 
 /// The full guide: title, what went wrong, and the options in order.
@@ -177,6 +250,30 @@ fn render_fix(number: usize, fix: &Fix, theme: &Theme) -> impl IntoElement + use
                 .text_color(theme.text_muted)
                 .child(fix.description),
         )
+        .children(fix.steps.iter().map(|step| render_step(step, theme)))
+        .children(fix.note.map(|note| {
+            div()
+                .px(px(Theme::SPACE_XS))
+                .pt(px(Theme::SPACE_SM))
+                .text_size(px(Theme::TEXT_SM))
+                .text_color(theme.text_faint)
+                .child(note)
+        }))
+}
+
+fn render_step(step: &Step, theme: &Theme) -> impl IntoElement + use<> {
+    div()
+        .flex()
+        .flex_col()
+        .children(step.label.map(|label| {
+            div()
+                .px(px(Theme::SPACE_XS))
+                .pt(px(Theme::SPACE_XS))
+                .pb(px(Theme::SPACE_SM))
+                .text_size(px(Theme::TEXT_SM))
+                .text_color(theme.text_muted)
+                .child(label)
+        }))
         .child(
             div()
                 .flex()
@@ -187,20 +284,12 @@ fn render_fix(number: usize, fix: &Fix, theme: &Theme) -> impl IntoElement + use
                 .border_color(theme.border)
                 .overflow_hidden()
                 .children(
-                    fix.commands
+                    step.commands
                         .iter()
                         .enumerate()
                         .map(|(ix, command)| render_command(ix, command, theme)),
                 ),
         )
-        .children(fix.note.map(|note| {
-            div()
-                .px(px(Theme::SPACE_XS))
-                .pt(px(Theme::SPACE_SM))
-                .text_size(px(Theme::TEXT_SM))
-                .text_color(theme.text_faint)
-                .child(note)
-        }))
 }
 
 fn render_command(ix: usize, command: &'static str, theme: &Theme) -> impl IntoElement + use<> {
@@ -247,51 +336,85 @@ fn render_tag(label: &'static str, color: Hsla) -> impl IntoElement {
 mod tests {
     use super::*;
 
+    const SOCKET: &str = "unix:///var/run/docker.sock";
+
+    fn denied(pin: Option<Pin>) -> Connection {
+        Connection::Disconnected {
+            error: EngineError::Connect(ConnectError::PermissionDenied {
+                endpoint: SOCKET.into(),
+            }),
+            pin,
+        }
+    }
+
+    fn commands(fix: &Fix) -> impl Iterator<Item = &'static str> {
+        fix.steps.iter().flat_map(|s| s.commands.iter().copied())
+    }
+
     #[test]
     fn only_socket_problems_get_a_guide() {
-        let denied = EngineError::Connect(ConnectError::PermissionDenied {
-            endpoint: "unix:///var/run/docker.sock".into(),
-        });
+        let problem = Problem::of(&denied(None)).expect("a guide");
         assert_eq!(
-            Problem::of(&denied),
-            Some(Problem::PermissionDenied {
-                endpoint: "unix:///var/run/docker.sock".into()
-            })
+            problem.cause,
+            Cause::PermissionDenied {
+                endpoint: SOCKET.into()
+            }
         );
-        let missing = EngineError::Connect(ConnectError::NotFound {
-            tried: vec!["unix:///var/run/docker.sock".into()],
-        });
+        let missing = Connection::Disconnected {
+            error: EngineError::Connect(ConnectError::NotFound {
+                tried: vec![SOCKET.into()],
+            }),
+            pin: None,
+        };
         assert!(matches!(
-            Problem::of(&missing),
-            Some(Problem::NotFound { .. })
+            Problem::of(&missing).map(|p| p.cause),
+            Some(Cause::NotFound { .. })
         ));
-        let refused = EngineError::Connect(ConnectError::Refused {
-            endpoint: "tcp://localhost:2375".into(),
-        });
+        let refused = Connection::Disconnected {
+            error: EngineError::Connect(ConnectError::Refused {
+                endpoint: "tcp://localhost:2375".into(),
+            }),
+            pin: None,
+        };
         assert_eq!(Problem::of(&refused), None);
+        assert_eq!(Problem::of(&Connection::Connecting), None);
+    }
+
+    #[test]
+    fn only_discovery_promises_to_reconnect_by_itself() {
+        let recovery = |pin| Problem::of(&denied(pin)).expect("a guide").recovery();
+        assert!(recovery(None).contains("keeps retrying"));
+        for (pin, fix) in [
+            (Pin::Settings, "back to Auto"),
+            (Pin::DockerHost, "unset DOCKER_HOST"),
+            (Pin::ContextVar("ci".into()), "unset DOCKER_CONTEXT"),
+            (
+                Pin::CurrentContext("ci".into()),
+                "docker context use default",
+            ),
+        ] {
+            let text = recovery(Some(pin));
+            assert!(!text.contains("keeps retrying"), "{text}");
+            assert!(text.contains(fix), "{text}");
+        }
     }
 
     #[test]
     fn the_docker_group_comes_last_and_is_flagged() {
-        for problem in [
-            Problem::PermissionDenied {
-                endpoint: "unix:///var/run/docker.sock".into(),
-            },
-            Problem::NotFound { tried: Vec::new() },
-        ] {
-            let fixes = problem.fixes();
+        let missing = Connection::Disconnected {
+            error: EngineError::Connect(ConnectError::NotFound { tried: Vec::new() }),
+            pin: None,
+        };
+        for connection in [denied(None), missing] {
+            let fixes = Problem::of(&connection).expect("a guide").fixes();
             assert!(matches!(fixes[0].tag, Some(Tag::Accent(_))));
             let last = &fixes[2];
             assert!(matches!(last.tag, Some(Tag::Warning("Root-equivalent"))));
-            assert!(
-                last.commands
-                    .iter()
-                    .any(|c| c.contains("usermod -aG docker"))
-            );
+            assert!(commands(last).any(|c| c.contains("usermod -aG docker")));
             assert!(
                 fixes[..2]
                     .iter()
-                    .all(|f| f.commands.iter().all(|c| !c.contains("sudo")))
+                    .all(|f| commands(f).all(|c| !c.contains("-aG docker")))
             );
         }
     }

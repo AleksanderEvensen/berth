@@ -594,7 +594,7 @@ impl ContainersScreen {
                 .child(Spinner::new("connecting").size(18.0))
                 .child(title("Connecting to engine…"))
                 .into_any_element(),
-            Connection::Disconnected { error } => column
+            Connection::Disconnected { error, .. } => column
                 .child(title("Can't reach the engine"))
                 .child(detail(error.to_string()))
                 .child(div().pt(px(Theme::SPACE_SM)).child(
@@ -820,10 +820,7 @@ impl ContainersScreen {
             }));
 
         let bulk = self.selection.len() > 1;
-        let problem = match store.connection() {
-            Connection::Disconnected { error } => Problem::of(error),
-            _ => None,
-        };
+        let problem = Problem::of(store.connection());
         let body: AnyElement = problem.as_ref().map_or_else(
             || match (self.selection.single(), self.tab) {
                 (None, _) if bulk => self.render_bulk(store, cx),

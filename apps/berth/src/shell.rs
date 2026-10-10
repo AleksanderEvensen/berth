@@ -27,7 +27,7 @@ use crate::screens::{
     settings::{Page, SettingsScreen},
     volumes::VolumesScreen,
 };
-use crate::store::{Connection, Connector, Store, StoreEvent};
+use crate::store::{Connector, Store, StoreEvent};
 
 actions!(
     berth,
@@ -386,10 +386,7 @@ impl Shell {
         let connection = self.store.read(cx).connection();
         let (status, name, detail) = engine_summary(connection);
         // With a fix to offer, the text opens the guide on Settings → Engine.
-        let fixable = matches!(
-            connection,
-            Connection::Disconnected { error } if Problem::of(error).is_some()
-        );
+        let fixable = Problem::of(connection).is_some();
         div()
             .flex()
             .items_center()

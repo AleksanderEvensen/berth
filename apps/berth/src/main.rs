@@ -15,7 +15,7 @@ use std::time::Duration;
 use berth_docker::{BollardEngine, DiscoveryEnv, discover, fixtures::FixtureEngine};
 use berth_settings::EngineChoice;
 use preferences::EngineTarget;
-use store::Connector;
+use store::{ConnectFailure, Connector, Pin};
 
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
@@ -118,22 +118,30 @@ fn connector(target: EngineTarget) -> Connector {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let mut env = DiscoveryEnv::from_process();
-        match choice {
+        match &choice {
             EngineChoice::Auto => {}
             // An explicit context wins over DOCKER_HOST, like `docker --context`.
             EngineChoice::Context { name } => {
                 env.docker_host = None;
-                env.docker_context = Some(name);
+                env.docker_context = Some(name.clone());
             }
-            EngineChoice::Host { host } => env.docker_host = Some(host),
+            EngineChoice::Host { host } => env.docker_host = Some(host.clone()),
         }
-        let discovered = discover(&env)?;
+        let pinned = !matches!(choice, EngineChoice::Auto);
+        let discovered = discover(&env).map_err(|error| ConnectFailure {
+            error: error.into(),
+            pin: pinned.then_some(Pin::Settings),
+        })?;
         log::info!(
             "connecting to {} ({:?})",
             discovered.endpoint,
             discovered.source
         );
-        let engine = BollardEngine::connect(&discovered.endpoint)?;
+        let engine =
+            BollardEngine::connect(&discovered.endpoint).map_err(|error| ConnectFailure {
+                error: error.into(),
+                pin: Pin::of(&choice, &env, &discovered.source),
+            })?;
         Ok(Arc::new(engine))
     })
 }

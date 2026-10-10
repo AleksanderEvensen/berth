@@ -18,9 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use berth_docker::{
-    Container, ContainerAction, Engine, EngineError, EngineEvent, EngineInfo, EventAction,
-    ObjectKind, RemoveOptions,
+    Container, ContainerAction, DiscoveryEnv, EndpointSource, Engine, EngineError, EngineEvent,
+    EngineInfo, EventAction, ObjectKind, RemoveOptions,
 };
+use berth_settings::EngineChoice;
 use futures::StreamExt as _;
 use gpui::{AsyncApp, Context, EventEmitter, Task, WeakEntity};
 
@@ -36,7 +37,55 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 pub enum Connection {
     Connecting,
     Connected(EngineInfo),
-    Disconnected { error: EngineError },
+    Disconnected {
+        error: EngineError,
+        /// Set when the endpoint was fixed rather than discovered: a socket
+        /// that appears elsewhere won't be found until the pin changes.
+        pin: Option<Pin>,
+    },
+}
+
+/// What fixed the engine endpoint, bypassing socket discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pin {
+    /// Settings → Engine names a context or a custom host.
+    Settings,
+    /// The `DOCKER_HOST` environment variable.
+    DockerHost,
+    /// The `DOCKER_CONTEXT` environment variable selects this context.
+    ContextVar(String),
+    /// The docker CLI's current context (`docker context use`).
+    CurrentContext(String),
+}
+
+impl Pin {
+    /// The pin behind `source`, discovered from `env` under `choice`.
+    pub fn of(choice: &EngineChoice, env: &DiscoveryEnv, source: &EndpointSource) -> Option<Self> {
+        match (choice, source) {
+            (EngineChoice::Context { .. } | EngineChoice::Host { .. }, _) => Some(Self::Settings),
+            (EngineChoice::Auto, EndpointSource::DockerHost) => Some(Self::DockerHost),
+            (EngineChoice::Auto, EndpointSource::Context(name)) if env.docker_context.is_some() => {
+                Some(Self::ContextVar(name.clone()))
+            }
+            (EngineChoice::Auto, EndpointSource::Context(name)) => {
+                Some(Self::CurrentContext(name.clone()))
+            }
+            (EngineChoice::Auto, EndpointSource::Default(_)) => None,
+        }
+    }
+}
+
+/// A failed connect, with the pin that chose the endpoint if any.
+#[derive(Debug, Clone)]
+pub struct ConnectFailure {
+    pub error: EngineError,
+    pub pin: Option<Pin>,
+}
+
+impl From<EngineError> for ConnectFailure {
+    fn from(error: EngineError) -> Self {
+        Self { error, pin: None }
+    }
 }
 
 /// An operation in flight on a container.
@@ -70,7 +119,7 @@ impl Op {
 
 /// Produces a connected engine. Runs on a background thread at the start of
 /// every session, so a reconnect also re-runs endpoint discovery.
-pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn Engine>, EngineError> + Send + Sync>;
+pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn Engine>, ConnectFailure> + Send + Sync>;
 
 pub enum StoreEvent {
     Error { title: String, detail: String },
@@ -301,7 +350,10 @@ impl Store {
                         let alive = this
                             .update(cx, |store, cx| {
                                 store.engine = None;
-                                store.connection = Connection::Disconnected { error };
+                                store.connection = Connection::Disconnected {
+                                    error: error.error,
+                                    pin: error.pin,
+                                };
                                 cx.notify();
                             })
                             .is_ok();
@@ -326,7 +378,7 @@ enum SessionEnd {
     /// The store was dropped.
     Dropped,
     /// Couldn't connect / sync.
-    Failed(EngineError),
+    Failed(ConnectFailure),
     /// Connected, then the event stream ended.
     StreamClosed,
 }
@@ -344,11 +396,11 @@ async fn run_session(
     let mut events = engine.events();
     let info = match engine.info().await {
         Ok(info) => info,
-        Err(err) => return SessionEnd::Failed(err),
+        Err(err) => return SessionEnd::Failed(err.into()),
     };
     let containers = match engine.list_containers().await {
         Ok(list) => list,
-        Err(err) => return SessionEnd::Failed(err),
+        Err(err) => return SessionEnd::Failed(err.into()),
     };
     let synced = this.update(cx, |store, cx| {
         store.connection = Connection::Connected(info);
@@ -444,6 +496,42 @@ mod tests {
     use gpui::{AppContext as _, TestAppContext};
 
     use super::*;
+
+    #[test]
+    fn only_discovered_sockets_are_unpinned() {
+        let auto = EngineChoice::Auto;
+        let env = DiscoveryEnv::default();
+        let rootful = EndpointSource::Default("rootful Docker");
+        assert_eq!(Pin::of(&auto, &env, &rootful), None);
+        assert_eq!(
+            Pin::of(&auto, &env, &EndpointSource::DockerHost),
+            Some(Pin::DockerHost)
+        );
+        let ci = EndpointSource::Context("ci".into());
+        assert_eq!(
+            Pin::of(&auto, &env, &ci),
+            Some(Pin::CurrentContext("ci".into()))
+        );
+        let from_var = DiscoveryEnv {
+            docker_context: Some("ci".into()),
+            ..DiscoveryEnv::default()
+        };
+        assert_eq!(
+            Pin::of(&auto, &from_var, &ci),
+            Some(Pin::ContextVar("ci".into()))
+        );
+        // A choice in Settings wins, even over the variables it overrides.
+        for choice in [
+            EngineChoice::Host {
+                host: "unix:///var/run/docker.sock".into(),
+            },
+            EngineChoice::Context { name: "ci".into() },
+        ] {
+            for source in [EndpointSource::DockerHost, ci.clone()] {
+                assert_eq!(Pin::of(&choice, &from_var, &source), Some(Pin::Settings));
+            }
+        }
+    }
 
     /// A slow reply from the old engine must not touch the new engine's
     /// state — here, a volume with the same name on both.

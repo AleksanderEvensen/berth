@@ -17,7 +17,7 @@ use super::engine_help::{Problem, engine_help};
 use super::{Chrome, engine_summary};
 use crate::chrome;
 use crate::preferences;
-use crate::store::{Connection, Store};
+use crate::store::Store;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -204,10 +204,7 @@ impl SettingsScreen {
         let theme = Theme::of(cx);
         let connection = self.store.read(cx).connection();
         let (status, title, detail) = engine_summary(connection);
-        let problem = match connection {
-            Connection::Disconnected { error } => Problem::of(error),
-            _ => None,
-        };
+        let problem = Problem::of(connection);
         let connection = SettingsGroup::new().row(
             SettingRow::new(title).description(detail).control(
                 div()

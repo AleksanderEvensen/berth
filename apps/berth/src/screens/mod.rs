@@ -29,8 +29,8 @@ pub fn engine_summary(connection: &Connection) -> (Status, SharedString, SharedS
             format!("{} {}", info.name, info.version).into(),
             info.endpoint.to_string().into(),
         ),
-        Connection::Disconnected { error } => {
-            let detail = engine_help::Problem::of(error)
+        Connection::Disconnected { error, .. } => {
+            let detail = engine_help::Problem::of(connection)
                 .map_or_else(|| error.to_string(), |p| p.short().to_string());
             (Status::Error, "Not connected".into(), detail.into())
         }
