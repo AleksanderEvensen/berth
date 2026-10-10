@@ -8,7 +8,7 @@ OrbStack are called out explicitly.
 
 ```
 ┌────────────┬──────────────────────┬──────────────────────────────────────┐
-│ ◧  (title- │ Containers      ⚲  + │        [Info|Stats|Logs|Terminal]  ⋯ │ 38px titlebar (drag)
+│ ◧  (title- │ Containers         ⚲ │        [Info|Stats|Logs|Terminal]  ⋯ │ 38px titlebar (drag)
 │  bar strip)│ 3 running            │                                      │
 │ DOCKER     ├──────────────────────┤                                      │
 │ ▣ Contain 3│ RUNNING              │                                      │
@@ -40,7 +40,7 @@ OrbStack are called out explicitly.
 ## Containers (`orb-container-screen-*`)
 
 **List column**
-- Header: "Containers" + "N running"; actions: search, filter/sort menu, new (+).
+- Header: "Containers" + "N running"; actions: search, filter/sort menu.
 - Sections: *Running* (implicit in OrbStack — we label it), *Stopped*.
 - Compose stack row: chevron, stack icon, project name, `n/m running`;
   hover actions: stop/start, delete.

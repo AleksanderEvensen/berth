@@ -23,7 +23,7 @@ full window width.
 - Toggle button in the titlebar; keyboard shortcut `ctrl+b` / `cmd+b`.
 - Collapsing animates the width; state persists across restarts (P1).
 
-**A3 (P1)** — As a user I want a command palette (`ctrl+k`) to run any action or
+**A3 (P2)** — As a user I want a command palette (`ctrl+k`) to run any action or
 jump to any container/image/volume by name.
 
 **A4 (P0)** — As a Linux user I want proper window chrome under Wayland CSD
@@ -31,7 +31,13 @@ jump to any container/image/volume by name.
 
 **A5 (P1)** — As a user I want to see engine connection status (connected /
 reconnecting / not found) in the sidebar footer, with a fix-it hint when the
-socket isn't reachable (e.g. permission denied → "add yourself to the docker group").
+socket isn't reachable.
+- Permission denied explains that the user can't open the engine socket and
+  offers, in order: rootless Docker, rootless Podman (user socket), and last
+  the `docker` group, labelled as root-equivalent.
+- Each option has a short explanation and copyable commands; Berth runs
+  nothing itself and reconnects once a socket becomes reachable.
+- Not found lists the endpoints that were tried, with the same options.
 
 ## B. Containers
 
@@ -107,8 +113,6 @@ with a preview of reclaimable space.
 
 **D4 (P1)** — Image info: ID, tags, created, size, platform, command, entrypoint,
 workdir, env, volumes, exposed ports, used-by containers.
-
-**D5 (P1)** — Pull an image by reference with progress.
 
 ## E. Networks
 

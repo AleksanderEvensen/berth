@@ -40,7 +40,7 @@ and runs on top of the engine you already have.
 - Containers (incl. compose-stack grouping): list, lifecycle, inspect, logs,
   stats, terminal (exec), files.
 - Volumes: list (in use / unused), size, delete, bulk delete, browse files.
-- Images: list (in use / unused / dangling), inspect, delete, prune, pull.
+- Images: list (in use / unused / dangling), inspect, delete, prune.
 - Networks: list, inspect, delete, prune.
 - Activity monitor: per-container / per-stack CPU, memory, network, disk I/O.
 - Clean-up center: one place to prune stopped containers, dangling/unused

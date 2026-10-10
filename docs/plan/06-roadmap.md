@@ -27,8 +27,9 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] A2 — Collapsible sidebar (`ctrl+b`/`cmd+b`), animated, persisted.
   - [x] A4 — Linux CSD window chrome.
   - [ ] A5 — Engine status in the sidebar footer. *Missing:* fix-it hint for
-        permission denied ("add yourself to the docker group"); the error only
-        says `permission denied on <endpoint>`.
+        permission denied / not found (rootless Docker, rootless Podman, then
+        the `docker` group as root-equivalent, with copyable commands); the
+        error only says `permission denied on <endpoint>`.
   - [x] B1 — Running / Stopped sections with counts.
   - [x] B2 — Compose projects as expandable stacks.
   - [x] B3 — Start/stop/restart/delete for containers and stacks, with confirm and pending spinners.
@@ -68,7 +69,6 @@ Windows named pipe) is in; the rest of M5 is not.
 - [x] Accent picker.
 - [x] Settings persistence (FR-14, `$XDG_CONFIG_HOME/berth/`).
 - [x] Reduce-motion.
-- [ ] Command palette.
 - [ ] Keyboard map — every action reachable by keyboard (NFR-U1); a shortcut
       reference. Bound today: sidebar, search, settings, focus cycling, quit,
       select all / clear selection, dialog confirm/cancel.
@@ -84,7 +84,6 @@ Windows named pipe) is in; the rest of M5 is not.
   - [ ] .deb
   - [ ] .rpm
 - Stories:
-  - [ ] A3 — Command palette (`ctrl+k`): run any action, jump to any container/image/volume.
   - [x] E1 — Networks: list (driver, scope, subnet, attached containers), delete, prune unused.
         Swarm networks count as possibly in use (services on other nodes have no
         local endpoints), so Berth doesn't delete them.
@@ -95,7 +94,6 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] D4 — Image info: ID, tags, created, size, platform, command,
         entrypoint, workdir, env, volumes, exposed ports (`inspect_image`),
         clickable used-by, labels.
-  - [ ] D5 — Pull an image by reference with progress (no engine call yet).
 
 ## M5 — macOS / Windows
 - [ ] macOS: traffic-light inset chrome (titlebar already clears the traffic lights).
@@ -111,6 +109,7 @@ Windows named pipe) is in; the rest of M5 is not.
 - [ ] C5 — Browse volume files.
 - [ ] B12 — Run-container form.
 - [ ] H3 — Rebind keyboard shortcuts.
+- [ ] A3 — Command palette (`ctrl+k`): run any action, jump to any container/image/volume.
 - [ ] Builds.
 - [ ] Kubernetes.
 - [ ] SSH remotes.
