@@ -258,9 +258,9 @@ impl SettingsScreen {
             .child(page_title("Engine", theme))
             .child(section_title("Connection", theme))
             .child(connection)
-            .children(problem.map(|problem| engine_help(&problem, theme)))
             .child(section_title("Endpoint", theme))
             .child(SettingsGroup::new().row(endpoint))
+            .children(problem.map(|problem| engine_help(&problem, theme)))
     }
 
     fn render_contexts(&self, cx: &Context<Self>) -> AnyElement {
