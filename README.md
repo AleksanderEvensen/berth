@@ -30,7 +30,8 @@ just run
 ```
 
 Linux needs the usual gpui system libraries (Wayland/X11, xkbcommon, fontconfig,
-Vulkan driver). `ctrl+b` toggles the sidebar, `ctrl+q` quits.
+Vulkan driver). `ctrl+b` toggles the sidebar, `ctrl+q` quits, and `ctrl+/`
+lists every shortcut (Settings → Shortcuts).
 
 ## CI
 

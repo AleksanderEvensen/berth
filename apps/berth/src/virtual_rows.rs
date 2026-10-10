@@ -47,6 +47,12 @@ impl<R: PartialEq> VirtualRows<R> {
         }
     }
 
+    /// Scroll just far enough to show row `ix` (keyboard steps, where the
+    /// rows haven't changed since the last layout).
+    pub fn scroll_into_view(&self, ix: usize) {
+        self.state.scroll_to_reveal_item(ix);
+    }
+
     pub fn get(&self, ix: usize) -> Option<&R> {
         self.rows.get(ix)
     }

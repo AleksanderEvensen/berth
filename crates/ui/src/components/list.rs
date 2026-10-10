@@ -280,10 +280,10 @@ pub struct ResourceRow {
     subtitle: Option<SharedString>,
     meta: Option<SharedString>,
     selected: bool,
+    cursor: bool,
     dimmed: bool,
     depth: usize,
-    disclosure: Option<(bool, ClickHandler)>,
-    reserve_disclosure: bool,
+    disclosure: Disclosure,
     actions: Vec<AnyElement>,
     busy: Option<SharedString>,
     on_click: Option<ClickHandler>,
@@ -298,10 +298,10 @@ impl ResourceRow {
             subtitle: None,
             meta: None,
             selected: false,
+            cursor: false,
             dimmed: false,
             depth: 0,
-            disclosure: None,
-            reserve_disclosure: false,
+            disclosure: Disclosure::None,
             actions: Vec::new(),
             busy: None,
             on_click: None,
@@ -329,6 +329,13 @@ impl ResourceRow {
         self
     }
 
+    /// The list's keyboard cursor is on this row: ringed while the keyboard
+    /// is in use.
+    pub const fn keyboard_cursor(mut self, cursor: bool) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
     /// Stopped / unused resources read one step quieter.
     pub const fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
@@ -341,8 +348,10 @@ impl ResourceRow {
     }
 
     /// Reserve the chevron slot so leaf rows align with expandable siblings.
-    pub const fn reserve_disclosure(mut self) -> Self {
-        self.reserve_disclosure = true;
+    pub fn reserve_disclosure(mut self) -> Self {
+        if matches!(self.disclosure, Disclosure::None) {
+            self.disclosure = Disclosure::Reserved;
+        }
         self
     }
 
@@ -351,7 +360,7 @@ impl ResourceRow {
         expanded: bool,
         on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        self.disclosure = Some((expanded, Box::new(on_toggle)));
+        self.disclosure = Disclosure::Toggle(expanded, Box::new(on_toggle));
         self
     }
 
@@ -373,12 +382,17 @@ impl ResourceRow {
     }
 }
 
-fn disclosure_slot(
-    disclosure: Option<(bool, ClickHandler)>,
-    reserve_disclosure: bool,
-    theme: &Theme,
-) -> Option<AnyElement> {
-    if let Some((expanded, on_toggle)) = disclosure {
+/// The chevron slot at a row's start.
+enum Disclosure {
+    None,
+    /// An empty slot, aligning a leaf with expandable siblings.
+    Reserved,
+    /// Expanded or not, and what toggles it.
+    Toggle(bool, ClickHandler),
+}
+
+fn disclosure_slot(disclosure: Disclosure, theme: &Theme) -> Option<AnyElement> {
+    if let Disclosure::Toggle(expanded, on_toggle) = disclosure {
         Some(
             div()
                 .id("disclosure")
@@ -405,7 +419,7 @@ fn disclosure_slot(
                 })
                 .into_any_element(),
         )
-    } else if reserve_disclosure {
+    } else if matches!(disclosure, Disclosure::Reserved) {
         Some(div().flex_none().w(px(16.0)).into_any_element())
     } else {
         None
@@ -413,8 +427,9 @@ fn disclosure_slot(
 }
 
 impl RenderOnce for ResourceRow {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::of(cx);
+        let ring = (self.cursor && window.last_input_was_keyboard()).then_some(theme.accent);
         let busy = self.busy.is_some();
         let group: SharedString = "resource-row".into();
         let (title_color, subtitle_color) = if self.dimmed {
@@ -423,7 +438,7 @@ impl RenderOnce for ResourceRow {
             (theme.text, theme.text_muted)
         };
         let row_hover = theme.row_hover;
-        let disclosure_slot = disclosure_slot(self.disclosure, self.reserve_disclosure, theme);
+        let disclosure_slot = disclosure_slot(self.disclosure, theme);
         let on_click = self.on_click;
         // Bound display indentation before converting to an exactly representable float.
         let depth = f32::from(u16::try_from(self.depth).unwrap_or(u16::MAX));
@@ -449,6 +464,8 @@ impl RenderOnce for ResourceRow {
             .pl(px(depth.mul_add(22.0, Theme::SPACE_XS)))
             .pr(px(Theme::SPACE_XS + 2.0))
             .rounded(px(Theme::ROW_RADIUS))
+            .border_1()
+            .border_color(ring.unwrap_or_else(gpui::transparent_black))
             .cursor_pointer()
             .map(|d| {
                 if self.selected {

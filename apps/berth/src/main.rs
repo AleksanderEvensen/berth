@@ -1,6 +1,7 @@
 mod chrome;
 mod dialogs;
 mod format;
+mod keymap;
 mod live;
 mod preferences;
 mod screens;
@@ -18,18 +19,12 @@ use preferences::EngineTarget;
 use store::{ConnectFailure, Connector, Pin};
 
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowDecorations,
-    WindowOptions, px, size,
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    px, size,
 };
 
-use shell::{
-    ClearSelection, FocusNext, FocusPrev, FocusSearch, OpenSettings, Quit, SelectAll, Shell,
-    ToggleSidebar,
-};
-
-/// Where list selection keys apply: anywhere in the shell except text
-/// inputs, the terminal and the confirm dialog, which own these keys.
-const LIST_KEYS: &str = "Shell && !Input && !Terminal && !ConfirmDialog";
+use keymap::Quit;
+use shell::Shell;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -41,23 +36,7 @@ fn main() {
             berth_ui::init(cx);
             preferences::init(cx);
 
-            cx.bind_keys([
-                KeyBinding::new("ctrl-b", ToggleSidebar, None),
-                KeyBinding::new("cmd-b", ToggleSidebar, None),
-                KeyBinding::new("ctrl-f", FocusSearch, None),
-                KeyBinding::new("cmd-f", FocusSearch, None),
-                KeyBinding::new("ctrl-,", OpenSettings, None),
-                KeyBinding::new("cmd-,", OpenSettings, None),
-                KeyBinding::new("tab", FocusNext, Some("Shell")),
-                KeyBinding::new("shift-tab", FocusPrev, Some("Shell")),
-                KeyBinding::new("ctrl-a", SelectAll, Some(LIST_KEYS)),
-                KeyBinding::new("cmd-a", SelectAll, Some(LIST_KEYS)),
-                KeyBinding::new("escape", ClearSelection, Some(LIST_KEYS)),
-                KeyBinding::new("ctrl-q", Quit, None),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("enter", dialogs::Confirm, Some(dialogs::CONFIRM_CONTEXT)),
-                KeyBinding::new("escape", dialogs::Cancel, Some(dialogs::CONFIRM_CONTEXT)),
-            ]);
+            keymap::bind(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
 
             let connector = connector(preferences::engine_target(cx));

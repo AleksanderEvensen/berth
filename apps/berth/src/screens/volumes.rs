@@ -13,7 +13,9 @@ use gpui::{
     Render, SharedString, Window, div, list, prelude::*, px,
 };
 
-use super::{Chrome, ShowContainer, detail_pane, list_column, scroll_page, used_by};
+use super::{
+    Chrome, ListOp, ListScreen, ShowContainer, detail_pane, list_column, scroll_page, used_by,
+};
 use crate::dialogs::ConfirmRequest;
 use crate::format;
 use crate::selection::MultiSelect;
@@ -57,18 +59,6 @@ impl VolumesScreen {
             chrome: Chrome::default(),
             reveal: None,
         }
-    }
-
-    /// Select every listed row (`ctrl+a`).
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selection.select_all(&self.order);
-        cx.notify();
-    }
-
-    /// Drop the selection (`Esc`).
-    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selection.clear();
-        cx.notify();
     }
 
     pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
@@ -133,6 +123,23 @@ impl VolumesScreen {
         });
     }
 
+    /// Delete the selected volumes that aren't in use (Delete key).
+    fn delete_selected(&self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let names: Vec<String> = store
+            .volumes()
+            .iter()
+            .filter(|v| self.selection.contains(&v.name) && !store.volume_in_use(v))
+            .map(|v| v.name.clone())
+            .collect();
+        let title = match names.as_slice() {
+            [] => return,
+            [name] => format!("Delete volume {name}?"),
+            _ => format!("Delete {} volumes?", names.len()),
+        };
+        self.confirm_remove(names, title, cx);
+    }
+
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
         let row = match self.rows.get(ix) {
@@ -182,10 +189,12 @@ impl VolumesScreen {
         .subtitle(subtitle)
         .busy(store.pending(&name).map(|_| "Deleting…"))
         .selected(self.selection.contains(&name))
+        .keyboard_cursor(self.selection.is_cursor(&name))
         .action(
             IconButton::new(SharedString::from(format!("delete-{name}")), icons::TRASH)
                 .tone(ButtonTone::Danger)
                 .disabled(in_use)
+                .tab_stop(false)
                 .on_click(delete),
         )
         .on_click(click)
@@ -274,6 +283,21 @@ impl VolumesScreen {
                 )
             })
             .into_any_element()
+    }
+}
+
+impl ListScreen for VolumesScreen {
+    fn list_op(&mut self, op: ListOp, cx: &mut Context<Self>) {
+        if op == ListOp::Delete {
+            self.delete_selected(cx);
+        } else if let Some(key) = op.apply(&mut self.selection, &self.order)
+            && let Some(ix) = self
+                .rows
+                .position(|row| matches!(row, Row::Volume(k) if *k == key))
+        {
+            self.rows.scroll_into_view(ix);
+        }
+        cx.notify();
     }
 }
 

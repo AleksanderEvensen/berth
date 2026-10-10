@@ -1,7 +1,7 @@
 use gpui::{App, Entity, Focusable as _, IntoElement, RenderOnce, Window, div, prelude::*, px};
 use gpui_base::input::InputState;
 
-use super::{ClickHandler, IconButton, icon};
+use super::{ClickHandler, IconButton, icon, reveal_when_focused};
 use crate::{Theme, icons};
 
 /// A compact search field: magnifier, a `gpui-base` text input, and a clear
@@ -106,9 +106,10 @@ impl TextField {
 
 impl RenderOnce for TextField {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = self.state.read(cx).focus_handle(cx);
+        let focused = focus.is_focused(window);
         let theme = Theme::of(cx);
-        let focused = self.state.read(cx).focus_handle(cx).is_focused(window);
-        div()
+        reveal_when_focused(div(), &focus, window)
             .h(px(32.0))
             .flex()
             .items_center()

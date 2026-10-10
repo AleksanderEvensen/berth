@@ -10,8 +10,8 @@ use berth_ui::{Button, Theme};
 use futures::channel::mpsc;
 use futures::{SinkExt as _, StreamExt as _};
 use gpui::{
-    Context, Entity, Focusable as _, IntoElement, Render, Subscription, Task, Window, div,
-    prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable as _, IntoElement, Render, Subscription, Task,
+    Window, div, prelude::*, px,
 };
 
 enum Session {
@@ -128,6 +128,11 @@ impl ExecView {
             })
             .ok();
         });
+    }
+
+    /// The terminal's focus handle, to return to it without a new session.
+    pub fn terminal_focus(&self, cx: &App) -> FocusHandle {
+        self.terminal.read(cx).focus_handle(cx)
     }
 
     fn reconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {

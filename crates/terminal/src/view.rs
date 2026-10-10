@@ -127,6 +127,10 @@ impl TerminalView {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                     }
                 }
+                "a" => {
+                    self.emulator.select_all();
+                    cx.notify();
+                }
                 "v" => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                         let bytes = paste_bytes(&text, self.emulator.bracketed_paste_mode());
@@ -137,6 +141,22 @@ impl TerminalView {
             }
             cx.stop_propagation();
             return;
+        }
+        // Shift+Page Up/Down page through scrollback, as in xterm; they
+        // aren't sent to the process. Typing returns to the bottom.
+        if mods.shift && !mods.control && !mods.alt && !mods.platform {
+            let page = i32::from(self.emulator.size().rows.saturating_sub(1).max(1));
+            let lines = match keystroke.key.as_str() {
+                "pageup" => page,
+                "pagedown" => page.saturating_neg(),
+                _ => 0,
+            };
+            if lines != 0 {
+                cx.stop_propagation();
+                self.emulator.scroll(lines);
+                cx.notify();
+                return;
+            }
         }
         if let Some(bytes) = keystroke_bytes(
             &keystroke.key,
@@ -214,10 +234,15 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ring = Theme::of(cx).accent;
         div()
             .id("terminal")
             .size_full()
             .track_focus(&self.focus)
+            // The cursor can scroll out of view; the edge shows focus then.
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .focus(move |s| s.border_color(ring))
             .key_context("Terminal")
             .cursor_text()
             .on_key_down(cx.listener(Self::on_key_down))

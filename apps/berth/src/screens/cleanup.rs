@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use berth_ui::{Button, ButtonTone, Checkbox, ListHeader, Spinner, Theme, icons};
+use berth_ui::{
+    Button, ButtonTone, Checkbox, ListHeader, ScrollPane, Spinner, TabStop, Theme, icons,
+};
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FontWeight, IntoElement, Render, SharedString,
     Window, div, prelude::*, px,
@@ -157,8 +159,11 @@ impl CleanupScreen {
             (None, None) => "—".to_string(),
         };
         let row_hover = theme.row_hover;
-        div()
-            .id(SharedString::from(format!("cleanup-{target:?}")))
+        let id = SharedString::from(format!("cleanup-{target:?}"));
+        let row = div()
+            .id(id.clone())
+            .border_1()
+            .border_color(gpui::transparent_black())
             .min_h(px(60.0))
             .px(px(Theme::SPACE_MD + 2.0))
             .py(px(Theme::SPACE_MD))
@@ -203,8 +208,9 @@ impl CleanupScreen {
                     .text_color(theme.text_muted)
                     .child(metric),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle(target, cx)))
-            .into_any_element()
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(target, cx)));
+        // The row is the tab stop; Enter or Space toggles its checkbox.
+        TabStop::new(id, row).into_any_element()
     }
 }
 
@@ -253,25 +259,21 @@ impl Render for CleanupScreen {
 
         let action = self.render_action(pruning, &targets, total, known_total, cx);
 
-        let page = div()
-            .id("cleanup-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(720.0))
-                    .mx_auto()
-                    .px(px(Theme::SPACE_LG + 8.0))
-                    .pt(px(Theme::SPACE_SM))
-                    .pb(px(Theme::SPACE_LG * 2.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(Theme::SPACE_LG))
-                    .child(categories)
-                    .child(div().flex().justify_end().child(action)),
-            );
+        let page = div().flex_1().min_h_0().child(ScrollPane::new(
+            "cleanup-scroll",
+            div()
+                .w_full()
+                .max_w(px(720.0))
+                .mx_auto()
+                .px(px(Theme::SPACE_LG + 8.0))
+                .pt(px(Theme::SPACE_SM))
+                .pb(px(Theme::SPACE_LG * 2.0))
+                .flex()
+                .flex_col()
+                .gap(px(Theme::SPACE_LG))
+                .child(categories)
+                .child(div().flex().justify_end().child(action)),
+        ));
 
         div()
             .size_full()

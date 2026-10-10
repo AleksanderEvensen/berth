@@ -4,7 +4,7 @@ use gpui::{
     App, ElementId, FontWeight, IntoElement, RenderOnce, SharedString, Window, div, prelude::*, px,
 };
 
-use super::tab_stop;
+use super::{reveal_when_focused, tab_stop};
 use crate::Theme;
 
 type SelectHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
@@ -74,7 +74,8 @@ impl RenderOnce for SegmentedTabs {
                 div()
                     .id(ix)
                     .when_some(focus.get(ix), |d, focus| {
-                        d.track_focus(focus)
+                        reveal_when_focused(d, focus, window)
+                            .track_focus(focus)
                             .border_1()
                             .border_color(gpui::transparent_black())
                             .focus_visible(move |s| s.border_color(ring))

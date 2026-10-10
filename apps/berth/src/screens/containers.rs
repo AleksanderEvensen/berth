@@ -10,26 +10,38 @@ use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, Po
 use berth_ui::SearchField;
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
-    ResourceRow, SectionLabel, SegmentedTabs, Spinner, Status, Theme, empty_state, icon, icons,
-    status_dot,
+    ResourceRow, ScrollPane, SectionLabel, SegmentedTabs, Spinner, Status, TabStop, Theme,
+    empty_state, icon, icons, status_dot,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement,
-    KeyDownEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window, anchored,
-    deferred, div, list, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, FontWeight,
+    IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window,
+    anchored, deferred, div, list, prelude::*, px,
 };
 use gpui_base::input::{InputEvent, InputState};
 
 use super::engine_help::Problem;
-use super::{ShowEngineHelp, ShowVolume};
+use super::{ListOp, ListScreen, ShowEngineHelp, ShowVolume};
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
+use crate::keymap::{MENU_CONTEXT, MenuCancel, MenuConfirm, MenuNext, MenuPrev};
 use crate::live::{Live, LiveKey, LiveTab};
 use crate::selection::MultiSelect;
 use crate::store::{Connection, Op, Store};
 use crate::virtual_rows::VirtualRows;
 
 const TABS: [&str; 5] = ["Info", "Stats", "Logs", "Terminal", "Files"];
+
+const STACK_DELETE: &str = "All of its containers are stopped and removed. Volumes are kept.";
+const BULK_DELETE: &str = "Running containers are stopped first. Volumes are kept.";
+
+const fn delete_message(active: bool) -> &'static str {
+    if active {
+        "The container is stopped and removed. Its volumes are kept."
+    } else {
+        "The container is removed. Its volumes are kept."
+    }
+}
 
 /// One line of the (virtualized) container list. Descriptors only: rows are
 /// built from the store when they scroll into view.
@@ -72,12 +84,13 @@ fn needs_fetch(cached: Option<&FetchedEnv>, id: &str, generation: u64) -> bool {
     }
 }
 
-/// The open "which port?" menu: container id, where it was opened, and the
-/// focus to give back when it closes.
+/// The open "which port?" menu: container id, where it was opened, the
+/// item the arrow keys are on, and the focus to give back when it closes.
 #[derive(Debug, Clone)]
 struct PortMenu {
     id: String,
     position: Point<Pixels>,
+    highlight: Option<usize>,
     previous_focus: Option<FocusHandle>,
 }
 
@@ -110,7 +123,7 @@ pub struct ContainersScreen {
     env: Option<FetchedEnv>,
     env_fetch: Option<Task<()>>,
     port_menu: Option<PortMenu>,
-    /// Focused while the port menu is open, so Escape reaches it.
+    /// Focused while the port menu is open, so its keys reach it.
     menu_focus: FocusHandle,
 }
 
@@ -420,16 +433,209 @@ impl ContainersScreen {
         });
     }
 
-    /// Select every listed stack and container (`ctrl+a`).
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selection.select_all(&self.order);
+    /// The detail tab shown.
+    pub const fn tab(&self) -> usize {
+        self.tab
+    }
+
+    /// Focus the open terminal; returns whether one is open.
+    pub fn focus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.live.focus_terminal(window, cx)
+    }
+
+    /// Where focus goes back to when the port menu closes: kept from a menu
+    /// already open, which itself has focus now.
+    fn menu_return(&mut self, window: &Window, cx: &App) -> Option<FocusHandle> {
+        match self.port_menu.take() {
+            Some(open) => open.previous_focus,
+            None => window.focused(cx),
+        }
+    }
+
+    /// Show detail tab `tab` (Info, Stats, Logs, Terminal, Files).
+    pub fn set_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
+        if tab < TABS.len() && self.tab != tab {
+            self.tab = tab;
+            cx.notify();
+        }
+    }
+
+    /// The selected containers that have no operation in flight.
+    fn actionable<'a>(&self, store: &'a Store) -> Vec<&'a Container> {
+        self.selected_containers(store)
+            .into_iter()
+            .filter(|c| store.pending(&c.id).is_none())
+            .collect()
+    }
+
+    /// Stop what runs in the selection; start everything otherwise, as a
+    /// stack's row button does.
+    pub fn toggle_running(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let containers = self.actionable(store);
+        let running: Vec<String> = containers
+            .iter()
+            .filter(|c| c.state.is_active())
+            .map(|c| c.id.clone())
+            .collect();
+        let (ids, op) = if running.is_empty() {
+            (containers.iter().map(|c| c.id.clone()).collect(), Op::Start)
+        } else {
+            (running, Op::Stop)
+        };
+        if !ids.is_empty() {
+            self.run(ids, op, cx);
+        }
+    }
+
+    /// Restart the running containers in the selection.
+    pub fn restart(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let ids: Vec<String> = self
+            .actionable(store)
+            .iter()
+            .filter(|c| c.state.is_active())
+            .map(|c| c.id.clone())
+            .collect();
+        if !ids.is_empty() {
+            self.run(ids, Op::Restart, cx);
+        }
+    }
+
+    /// Open the selected container's published port, or with several, the
+    /// menu listing them at its row.
+    pub fn open_port(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Selection::Container(id)) = self.selection.single() else {
+            return;
+        };
+        let id = id.clone();
+        let store = self.store.read(cx);
+        let Some(c) = store
+            .containers()
+            .iter()
+            .find(|c| c.id == id && c.state.is_active())
+        else {
+            return;
+        };
+        let urls: Vec<String> = c.web_ports().iter().filter_map(|p| p.url()).collect();
+        match urls.as_slice() {
+            [] => {}
+            [url] => cx.open_url(url),
+            _ => {
+                let position = self
+                    .rows
+                    .position(
+                        |row| matches!(row, Row::Container { id: row_id, .. } if *row_id == id),
+                    )
+                    .and_then(|ix| self.rows.state.bounds_for_item(ix))
+                    .map_or_else(
+                        || self.rows.state.viewport_bounds().origin,
+                        |row| row.bottom_left(),
+                    );
+                let previous_focus = self.menu_return(window, cx);
+                self.port_menu = Some(PortMenu {
+                    id,
+                    position,
+                    highlight: Some(0),
+                    previous_focus,
+                });
+                window.focus(&self.menu_focus, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Collapse (`false`) or expand the selected stack. Collapsing from a
+    /// container in a stack selects the stack.
+    pub fn set_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        match self.selection.single().cloned() {
+            Some(Selection::Stack(project)) => {
+                if expanded {
+                    self.collapsed.remove(&project);
+                } else {
+                    self.collapsed.insert(project);
+                }
+            }
+            Some(Selection::Container(id)) if !expanded => {
+                let store = self.store.read(cx);
+                let project = store
+                    .containers()
+                    .iter()
+                    .find(|c| c.id == id)
+                    .and_then(|c| c.compose.as_ref())
+                    .map(|compose| compose.project.clone())
+                    .filter(|project| self.stack_members.contains_key(project));
+                if let Some(project) = project {
+                    if let Some(ix) = self
+                        .rows
+                        .position(|row| matches!(row, Row::Stack { project: p } if *p == project))
+                    {
+                        self.rows.scroll_into_view(ix);
+                    }
+                    self.selection.select_one(Selection::Stack(project));
+                }
+            }
+            _ => return,
+        }
         cx.notify();
     }
 
-    /// Drop the selection (`Esc`).
-    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selection.clear();
+    /// Confirm deleting the selection (Delete key), worded like the row
+    /// and bulk buttons.
+    fn delete_selected(&self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let containers = self.actionable(store);
+        let ids: Vec<String> = containers.iter().map(|c| c.id.clone()).collect();
+        let names: Vec<SharedString> = containers
+            .iter()
+            .map(|c| SharedString::from(c.name.clone()))
+            .collect();
+        let (title, message, items) = match (self.selection.single(), containers.as_slice()) {
+            (_, []) => return,
+            (Some(Selection::Stack(project)), _) => {
+                (format!("Delete stack {project}?"), STACK_DELETE, names)
+            }
+            (Some(Selection::Container(_)), [c]) => (
+                format!("Delete {}?", c.name),
+                delete_message(c.state.is_active()),
+                Vec::new(),
+            ),
+            _ => {
+                let total = ids.len();
+                (
+                    format!("Delete {total} container{}?", plural(total)),
+                    BULK_DELETE,
+                    names,
+                )
+            }
+        };
+        self.confirm_delete(title, message, items, ids, cx);
+    }
+
+    fn move_menu(&mut self, back: bool, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let Some(menu) = &mut self.port_menu else {
+            return;
+        };
+        let count = store
+            .containers()
+            .iter()
+            .find(|c| c.id == menu.id)
+            .map_or(0, |c| c.web_ports().len());
+        menu.highlight = menu_step(menu.highlight, count, back);
         cx.notify();
+    }
+
+    fn open_highlighted_port(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let url = self.port_menu.as_ref().and_then(|menu| {
+            let c = store.containers().iter().find(|c| c.id == menu.id)?;
+            c.web_ports().get(menu.highlight?)?.url()
+        });
+        if let Some(url) = url {
+            cx.open_url(&url);
+            self.close_port_menu(window, cx);
+        }
     }
 
     fn run(&self, ids: Vec<String>, op: Op, cx: &mut Context<Self>) {
@@ -642,6 +848,7 @@ impl ContainersScreen {
         let project = stack.project.to_string();
         let active = stack.is_active();
         let selected = self.selection.contains(&Selection::Stack(project.clone()));
+        let cursor = self.selection.is_cursor(&Selection::Stack(project.clone()));
         let total = stack.containers.len();
         let busy = stack
             .containers
@@ -680,7 +887,7 @@ impl ContainersScreen {
             cx.listener(move |this, _, _, cx| {
                 this.confirm_delete(
                     format!("Delete stack {project}?"),
-                    "All of its containers are stopped and removed. Volumes are kept.",
+                    STACK_DELETE,
                     names.clone(),
                     all_ids.clone(),
                     cx,
@@ -714,6 +921,7 @@ impl ContainersScreen {
         .busy(busy)
         .disclosure(expanded, toggle)
         .selected(selected)
+        .keyboard_cursor(cursor)
         .dimmed(!active)
         .action(lifecycle_button(&project, active).on_click(lifecycle))
         .action(delete_button(&project).on_click(delete))
@@ -730,6 +938,7 @@ impl ContainersScreen {
         let id = c.id.clone();
         let active = c.state.is_active();
         let selected = self.selection.contains(&Selection::Container(id.clone()));
+        let cursor = self.selection.is_cursor(&Selection::Container(id.clone()));
         let title = match (&c.compose, depth) {
             (Some(compose), 1) => compose.service.clone(),
             _ => c.name.clone(),
@@ -745,11 +954,7 @@ impl ContainersScreen {
         let delete = {
             let ids = vec![id.clone()];
             let name = c.name.clone();
-            let message = if active {
-                "The container is stopped and removed. Its volumes are kept."
-            } else {
-                "The container is removed. Its volumes are kept."
-            };
+            let message = delete_message(active);
             cx.listener(move |this, _, _, cx| {
                 this.confirm_delete(
                     format!("Delete {name}?"),
@@ -778,6 +983,7 @@ impl ContainersScreen {
             .depth(depth)
             .reserve_disclosure()
             .selected(selected)
+            .keyboard_cursor(cursor)
             .dimmed(!active);
 
         let web_ports = c.web_ports();
@@ -785,12 +991,15 @@ impl ContainersScreen {
             let id = id.clone();
             row = row.action(
                 IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
+                    .tab_stop(false)
                     .active(self.port_menu.as_ref().is_some_and(|m| m.id == id))
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        let previous_focus = this.menu_return(window, cx);
                         this.port_menu = Some(PortMenu {
                             id: id.clone(),
                             position: event.position(),
-                            previous_focus: window.focused(cx),
+                            highlight: None,
+                            previous_focus,
                         });
                         window.focus(&this.menu_focus, cx);
                         cx.notify();
@@ -799,6 +1008,7 @@ impl ContainersScreen {
         } else if let Some(url) = web_ports.first().and_then(|p| p.url()).filter(|_| active) {
             row = row.action(
                 IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
+                    .tab_stop(false)
                     .on_click(move |_, _, cx| cx.open_url(&url)),
             );
         }
@@ -806,6 +1016,7 @@ impl ContainersScreen {
             let ids = vec![id.clone()];
             row = row.action(
                 IconButton::new(SharedString::from(format!("restart-{id}")), icons::RESTART)
+                    .tab_stop(false)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.run(ids.clone(), Op::Restart, cx)),
                     ),
@@ -827,10 +1038,7 @@ impl ContainersScreen {
         let theme = Theme::of(cx);
         let tabs = SegmentedTabs::new("detail-tabs", TABS)
             .selected(self.tab)
-            .on_select(cx.listener(|this, ix: &usize, _, cx| {
-                this.tab = *ix;
-                cx.notify();
-            }));
+            .on_select(cx.listener(|this, ix: &usize, _, cx| this.set_tab(*ix, cx)));
 
         let bulk = self.selection.len() > 1;
         let body: AnyElement = match (self.selection.single(), self.tab) {
@@ -972,7 +1180,7 @@ impl ContainersScreen {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.confirm_delete(
                             format!("Delete {total} container{}?", plural(total)),
-                            "Running containers are stopped first. Volumes are kept.",
+                            BULK_DELETE,
                             names.clone(),
                             delete_ids.clone(),
                             cx,
@@ -1018,6 +1226,23 @@ impl ContainersScreen {
     }
 }
 
+impl ListScreen for ContainersScreen {
+    fn list_op(&mut self, op: ListOp, cx: &mut Context<Self>) {
+        if op == ListOp::Delete {
+            self.delete_selected(cx);
+        } else if let Some(key) = op.apply(&mut self.selection, &self.order)
+            && let Some(ix) = self.rows.position(|row| match (row, &key) {
+                (Row::Stack { project }, Selection::Stack(p)) => project == p,
+                (Row::Container { id, .. }, Selection::Container(c)) => id == c,
+                _ => false,
+            })
+        {
+            self.rows.scroll_into_view(ix);
+        }
+        cx.notify();
+    }
+}
+
 impl Render for ContainersScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let want = self.live_key(self.store.read(cx));
@@ -1056,7 +1281,7 @@ impl Render for ContainersScreen {
                 .containers()
                 .iter()
                 .find(|c| c.id == menu.id && c.state.is_active())?;
-            Some(port_menu(c, menu.position, &self.menu_focus, cx))
+            Some(port_menu(c, menu, &self.menu_focus, cx))
         });
         if menu.is_none() {
             // The container stopped or went away while the menu was open.
@@ -1074,7 +1299,7 @@ impl Render for ContainersScreen {
 /// Every published web port of `c`, opened from the row link (B4).
 fn port_menu(
     c: &Container,
-    position: Point<Pixels>,
+    menu: &PortMenu,
     focus: &FocusHandle,
     cx: &Context<ContainersScreen>,
 ) -> AnyElement {
@@ -1091,6 +1316,7 @@ fn port_menu(
                 .gap(px(Theme::SPACE_LG))
                 .rounded(px(Theme::CONTROL_RADIUS))
                 .cursor_pointer()
+                .when(menu.highlight == Some(ix), |d| d.bg(theme.element_hover))
                 .hover(|s| s.bg(theme.element_hover))
                 .child(
                     div()
@@ -1111,16 +1337,19 @@ fn port_menu(
         )
     });
     deferred(
-        anchored().position(position).snap_to_window().child(
+        anchored().position(menu.position).snap_to_window().child(
             div()
                 .id("port-menu")
                 .track_focus(focus)
+                .key_context(MENU_CONTEXT)
                 .occlude()
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" {
-                        cx.stop_propagation();
-                        this.close_port_menu(window, cx);
-                    }
+                .on_action(cx.listener(|this, _: &MenuPrev, _, cx| this.move_menu(true, cx)))
+                .on_action(cx.listener(|this, _: &MenuNext, _, cx| this.move_menu(false, cx)))
+                .on_action(cx.listener(|this, _: &MenuConfirm, window, cx| {
+                    this.open_highlighted_port(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MenuCancel, window, cx| {
+                    this.close_port_menu(window, cx);
                 }))
                 .min_w(px(220.0))
                 .p(px(4.0))
@@ -1140,6 +1369,20 @@ fn port_menu(
     )
     .with_priority(1)
     .into_any_element()
+}
+
+/// The menu item an arrow key lands on, wrapping around `count` items;
+/// `back` is up. With none highlighted, down starts at the top, up at the
+/// bottom.
+fn menu_step(from: Option<usize>, count: usize, back: bool) -> Option<usize> {
+    let last = count.checked_sub(1)?;
+    Some(match (from, back) {
+        (None, false) => 0,
+        (None, true) => last,
+        (Some(ix), true) => ix.checked_sub(1).unwrap_or(last),
+        (Some(ix), false) if ix >= last => 0,
+        (Some(ix), false) => ix.saturating_add(1),
+    })
 }
 
 /// Why a live tab shows nothing: stacks have no single stream, stopped
@@ -1191,11 +1434,13 @@ fn lifecycle_button(key: &str, active: bool) -> IconButton {
         SharedString::from(format!("lifecycle-{key}")),
         if active { icons::STOP } else { icons::PLAY },
     )
+    .tab_stop(false)
 }
 
 fn delete_button(key: &str) -> IconButton {
     IconButton::new(SharedString::from(format!("delete-{key}")), icons::TRASH)
         .tone(ButtonTone::Danger)
+        .tab_stop(false)
 }
 
 const fn status_of(state: ContainerState) -> Status {
@@ -1218,20 +1463,17 @@ pub fn image_name(image: &str) -> String {
 }
 
 fn scroll_page(content: impl IntoElement) -> impl IntoElement {
-    div()
-        .id("detail-scroll")
-        .size_full()
-        .overflow_y_scroll()
-        .child(
-            div()
-                .w_full()
-                .max_w(px(780.0))
-                .mx_auto()
-                .px(px(Theme::SPACE_LG + 8.0))
-                .pt(px(Theme::SPACE_SM))
-                .pb(px(Theme::SPACE_LG * 2.0))
-                .child(content),
-        )
+    ScrollPane::new(
+        "detail-scroll",
+        div()
+            .w_full()
+            .max_w(px(780.0))
+            .mx_auto()
+            .px(px(Theme::SPACE_LG + 8.0))
+            .pt(px(Theme::SPACE_SM))
+            .pb(px(Theme::SPACE_LG * 2.0))
+            .child(content),
+    )
 }
 
 fn status_value(c: &Container, theme: &Theme) -> impl IntoElement {
@@ -1420,10 +1662,14 @@ fn stack_info(stack: &Stack<'_>, theme: &Theme) -> impl IntoElement {
         .child(card().children(services))
         .when_some(stack.working_dir(), |d, dir| {
             d.child(Heading::new("Project")).child(
-                card().child(
+                card().child(TabStop::new(
+                    "open-project-dir",
                     div()
                         .id("open-project-dir")
                         .h(px(42.0))
+                        .rounded(px(Theme::PANEL_RADIUS))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
                         .px(px(Theme::SPACE_MD))
                         .flex()
                         .items_center()
@@ -1457,14 +1703,24 @@ fn stack_info(stack: &Stack<'_>, theme: &Theme) -> impl IntoElement {
                             let dir = dir.to_string();
                             move |_, _, cx| cx.open_with_system(std::path::Path::new(&dir))
                         }),
-                ),
+                )),
             )
         })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::image_name;
+    use super::{image_name, menu_step};
+
+    #[test]
+    fn menu_steps_wrap() {
+        assert_eq!(menu_step(None, 0, false), None);
+        assert_eq!(menu_step(None, 3, false), Some(0));
+        assert_eq!(menu_step(None, 3, true), Some(2));
+        assert_eq!(menu_step(Some(2), 3, false), Some(0));
+        assert_eq!(menu_step(Some(0), 3, true), Some(2));
+        assert_eq!(menu_step(Some(1), 3, false), Some(2));
+    }
 
     #[test]
     fn image_names() {

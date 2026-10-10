@@ -6,6 +6,7 @@ use gpui::{
     Window, div, prelude::*, px,
 };
 
+use super::{reveal_when_focused, tab_stop};
 use crate::{IconButton, Theme, icons};
 
 /// Section heading above a card ("Ports", "Mounts", "Labels").
@@ -127,11 +128,29 @@ impl Cell {
     }
 
     /// `id` keys the click handlers; it must be unique among siblings.
-    fn render_keyed(self, id: impl Into<ElementId>, theme: &Theme) -> AnyElement {
+    fn render_keyed(
+        self,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let id = id.into();
         let Some(copy) = self.copy.clone() else {
-            return self.render_value(id, theme);
+            return self.render_value(id.clone(), id, window, cx);
         };
+        // Tracks focus inside, so the copy button shows while it has focus.
+        let reveal = window
+            .use_keyed_state((id.clone(), "copy"), cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let focused = reveal.contains_focused(window, cx);
         let group: SharedString = "cell".into();
+        let value = Self { copy: None, ..self }.render_value(
+            "value",
+            (id.clone(), "value").into(),
+            window,
+            cx,
+        );
         div()
             .id(id)
             .group(group.clone())
@@ -139,11 +158,12 @@ impl Cell {
             .flex()
             .items_center()
             .gap(px(Theme::SPACE_XS))
-            .child(Self { copy: None, ..self }.render_value("value", theme))
+            .child(value)
             .child(
                 div()
+                    .track_focus(&reveal)
                     .flex_none()
-                    .opacity(0.0)
+                    .opacity(if focused { 1.0 } else { 0.0 })
                     .group_hover(group, |s| s.opacity(1.0))
                     .child(
                         IconButton::new("copy", icons::COPY)
@@ -158,7 +178,21 @@ impl Cell {
             .into_any_element()
     }
 
-    fn render_value(self, id: impl Into<ElementId>, theme: &Theme) -> AnyElement {
+    /// `focus_key` keys a clickable value's tab stop. It is looked up
+    /// outside the value's element, so it must be unique where the cell is.
+    fn render_value(
+        self,
+        id: impl Into<ElementId>,
+        focus_key: ElementId,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let id = id.into();
+        let focus = self
+            .on_click
+            .is_some()
+            .then(|| tab_stop(focus_key, window, cx));
+        let theme = Theme::of(cx);
         let d = div().min_w_0().truncate().child(self.text);
         let d = match self.style {
             CellStyle::Plain => d.text_color(theme.text),
@@ -168,16 +202,19 @@ impl Cell {
             CellStyle::Link => d.text_color(theme.accent).cursor_pointer(),
             CellStyle::Muted => d.text_color(theme.text_faint),
         };
-        match self.on_click {
-            Some(f) => d
+        match (self.on_click, focus) {
+            (Some(f), Some(focus)) => d
                 .id(id)
+                .track_focus(&focus)
+                .map(|d| reveal_when_focused(d, &focus, window))
                 .hover(Styled::underline)
+                .focus_visible(Styled::underline)
                 .on_click(move |e, w, cx| {
                     cx.stop_propagation();
                     f(e, w, cx);
                 })
                 .into_any_element(),
-            None => d.into_any_element(),
+            _ => d.into_any_element(),
         }
     }
 }
@@ -220,9 +257,9 @@ impl KeyValueCard {
 }
 
 impl RenderOnce for Cell {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = SharedString::from(format!("cell-{}", self.text));
-        self.render_keyed(id, Theme::of(cx))
+        self.render_keyed(id, window, cx)
     }
 }
 
@@ -231,8 +268,8 @@ impl RenderOnce for Cell {
 struct CellElement(SharedString, Cell);
 
 impl RenderOnce for CellElement {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        self.1.render_keyed(self.0, Theme::of(cx))
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.1.render_keyed(self.0, window, cx)
     }
 }
 
@@ -356,7 +393,7 @@ impl RenderOnce for DataTable {
                         .children(cells.into_iter().zip(weights.iter()).enumerate().map(
                             |(col, (cell, w))| {
                                 let id = SharedString::from(format!("cell-{row}-{col}"));
-                                column(*w).child(cell.render_keyed(id, theme))
+                                column(*w).child(CellElement(id, cell))
                             },
                         ))
                 })

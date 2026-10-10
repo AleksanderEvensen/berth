@@ -6,8 +6,8 @@ and meets the acceptance criteria of its story in
 with a note saying what is missing.
 
 **Status (audited 2026-10-09, at `ce159f2`):** M0–M3 done. M4 has started: settings screen, light theme, accent
-picker, reduce motion, persistence, the Networks screen and full volume and
-image info (C4, D4) are in. M5 endpoint discovery (macOS context sockets,
+picker, reduce motion, persistence, the keyboard map, the Networks screen and
+full volume and image info (C4, D4) are in. M5 endpoint discovery (macOS context sockets,
 Windows named pipe) is in; the rest of M5 is not.
 
 ## M0 — Visual prototype ✅
@@ -69,9 +69,19 @@ Windows named pipe) is in; the rest of M5 is not.
 - [x] Accent picker.
 - [x] Settings persistence (FR-14, `$XDG_CONFIG_HOME/berth/`).
 - [x] Reduce-motion.
-- [ ] Keyboard map — every action reachable by keyboard (NFR-U1); a shortcut
-      reference. Bound today: sidebar, search, settings, focus cycling, quit,
-      select all / clear selection, dialog confirm/cancel.
+- [x] Keyboard map — every action reachable by keyboard (NFR-U1); a shortcut
+      reference on Settings → Shortcuts (`ctrl+/`), drawn from the same table
+      that binds the keys. `ctrl+1`–`6` switch screens, arrows/Home/End move
+      the list selection (shift extends), Delete deletes it, `ctrl+enter` /
+      `ctrl+r` / `ctrl+o` start-stop / restart / open a port, ←/→ fold stacks,
+      `alt+1`–`5` switch container tabs (also out of the terminal),
+      `ctrl+↑/↓` move a cursor and `ctrl+space` toggles the row under it.
+      Page Up/Down and `ctrl+home`/`end` scroll the content pane (in Logs,
+      scrolling up pauses following); on screens without a list the
+      arrows, Home and End scroll it. Every other control is a tab stop with a
+      visible focus ring, scrolled into view when focused; row hover buttons
+      are not, since list keys cover them. Tab stays inside an open confirm
+      dialog, and focus returns to the window when its control disappears.
 - [x] Networks screen.
 - Deferred from M3:
   - [x] Logs wrap toggle.

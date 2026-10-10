@@ -3,7 +3,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::{ClickHandler, icon, tab_stop};
+use super::{ClickHandler, icon, reveal_when_focused, tab_stop};
 use crate::{Theme, icons};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -26,6 +26,7 @@ pub struct IconButton {
     color: Option<Hsla>,
     active: bool,
     disabled: bool,
+    tab_stop: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -40,6 +41,7 @@ impl IconButton {
             color: None,
             active: false,
             disabled: false,
+            tab_stop: true,
             on_click: None,
         }
     }
@@ -71,6 +73,13 @@ impl IconButton {
         self
     }
 
+    /// Whether Tab stops here (default). Row actions opt out: rows can be
+    /// long, and their actions have list shortcuts instead.
+    pub const fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
+        self
+    }
+
     /// The click does not bubble: an icon button inside a clickable row must
     /// not also select the row.
     pub fn on_click(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
@@ -80,8 +89,11 @@ impl IconButton {
 }
 
 impl RenderOnce for IconButton {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let focus = (self.tab_stop && !self.disabled && self.on_click.is_some())
+            .then(|| tab_stop(self.id.clone(), window, cx));
         let theme = Theme::of(cx);
+        let ring = theme.accent;
         let rest = if self.disabled {
             theme.text_faint.opacity(0.5)
         } else {
@@ -103,6 +115,13 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded(px(Theme::CONTROL_RADIUS))
+            .when_some(focus, |d, focus| {
+                reveal_when_focused(d, &focus, window)
+                    .track_focus(&focus)
+                    .border_1()
+                    .border_color(gpui::transparent_black())
+                    .focus_visible(move |s| s.border_color(ring))
+            })
             .when(self.active, |d| d.bg(theme.element_hover))
             .when(!self.disabled, |d| {
                 d.cursor_pointer()
@@ -209,6 +228,7 @@ impl RenderOnce for Button {
         div()
             .id(self.id)
             .track_focus(&focus)
+            .map(|d| reveal_when_focused(d, &focus, window))
             .focus_visible(move |s| s.border_color(ring))
             .h(px(30.0))
             .px(px(12.0))

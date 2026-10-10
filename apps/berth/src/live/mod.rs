@@ -14,7 +14,7 @@ mod terminal;
 use std::sync::Arc;
 
 use berth_docker::Engine;
-use gpui::{AnyView, AppContext as _, Context, Entity, Window};
+use gpui::{AnyView, App, AppContext as _, Context, Entity, Window};
 
 pub use logs::LogsView;
 pub use stats::StatsView;
@@ -90,6 +90,17 @@ impl Live {
             )),
         };
         self.current = Some((key, view));
+    }
+
+    /// Focus the open terminal, if that is the view shown. Returns whether
+    /// it was.
+    pub fn focus_terminal(&self, window: &mut Window, cx: &mut App) -> bool {
+        let Some((_, Some(View::Terminal(view)))) = &self.current else {
+            return false;
+        };
+        let focus = view.read(cx).terminal_focus(cx);
+        window.focus(&focus, cx);
+        true
     }
 
     pub fn view(&self) -> Option<AnyView> {

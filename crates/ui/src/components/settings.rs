@@ -9,7 +9,7 @@ use gpui::{
     SharedString, Window, div, prelude::*, px,
 };
 
-use super::{ClickHandler, icon, tab_stop};
+use super::{ClickHandler, icon, reveal_when_focused, tab_stop};
 
 /// A click handler more than one element can hold.
 type SharedClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -194,6 +194,7 @@ impl RenderOnce for Switch {
         div()
             .id(self.id)
             .track_focus(&focus)
+            .map(|d| reveal_when_focused(d, &focus, window))
             .focus_visible(move |s| s.border_color(ring))
             .flex_none()
             .w(px(WIDTH))
@@ -303,6 +304,7 @@ impl RenderOnce for OptionCard {
                 div()
                     .id("frame")
                     .track_focus(&focus)
+                    .map(|d| reveal_when_focused(d, &focus, window))
                     .h(px(OPTION_PREVIEW_HEIGHT))
                     .rounded(px(Theme::PANEL_RADIUS))
                     .border(px(if self.selected { 1.5 } else { 1.0 }))
@@ -387,9 +389,11 @@ impl RenderOnce for ColorSwatch {
         let theme = Theme::of(cx);
         let hover_ring = theme.border_strong;
         let focus_ring = theme.text_muted;
+        let selected_ring = theme.accent;
         div()
             .id(self.id)
             .track_focus(&focus)
+            .map(|d| reveal_when_focused(d, &focus, window))
             .flex_none()
             .size(px(30.0))
             .p(px(3.0))
@@ -399,6 +403,7 @@ impl RenderOnce for ColorSwatch {
             .map(|d| {
                 if self.selected {
                     d.border_color(theme.text)
+                        .focus_visible(move |s| s.border_color(selected_ring))
                 } else {
                     d.border_color(gpui::transparent_black())
                         .hover(move |s| s.border_color(hover_ring))

@@ -8,7 +8,7 @@ use std::cell::Cell;
 
 use berth_ui::Theme;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-use berth_ui::{icon, icons};
+use berth_ui::{TabStop, icon, icons};
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, Div, HitboxBehavior, MouseButton, Pixels,
     Point, ResizeEdge, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px,
@@ -286,11 +286,14 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
         } else {
             theme.element_hover
         };
-        Some(
+        Some(TabStop::new(
+            id,
             div()
                 .id(id)
                 .group(CAPTION_GROUP)
                 .size(px(24.0))
+                .border_1()
+                .border_color(transparent_black())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -309,7 +312,7 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
                         Close => window.remove_window(),
                     }
                 }),
-        )
+        ))
     });
 
     Some(

@@ -13,7 +13,9 @@ use gpui::{
     SharedString, Task, Window, div, list, prelude::*, px,
 };
 
-use super::{Chrome, ShowContainer, detail_pane, list_column, scroll_page, used_by};
+use super::{
+    Chrome, ListOp, ListScreen, ShowContainer, detail_pane, list_column, scroll_page, used_by,
+};
 use crate::dialogs::ConfirmRequest;
 use crate::format;
 use crate::selection::MultiSelect;
@@ -147,18 +149,6 @@ impl ImagesScreen {
         }));
     }
 
-    /// Select every listed row (`ctrl+a`).
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selection.select_all(&self.order);
-        cx.notify();
-    }
-
-    /// Drop the selection (`Esc`).
-    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selection.clear();
-        cx.notify();
-    }
-
     pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
         if self.chrome != chrome {
             self.chrome = chrome;
@@ -236,6 +226,23 @@ impl ImagesScreen {
         });
     }
 
+    /// Delete the selected images that aren't in use (Delete key).
+    fn delete_selected(&self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let images: Vec<(String, String)> = store
+            .images()
+            .iter()
+            .filter(|i| self.selection.contains(&i.id) && !store.image_in_use(i))
+            .map(|i| (i.id.clone(), i.display_name()))
+            .collect();
+        let title = match images.as_slice() {
+            [] => return,
+            [(_, name)] => format!("Delete {name}?"),
+            _ => format!("Delete {} images?", images.len()),
+        };
+        self.confirm_remove(images, title, cx);
+    }
+
     fn render_row(&self, ix: usize, now: i64, cx: &Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
         let row = match self.rows.get(ix) {
@@ -289,10 +296,12 @@ impl ImagesScreen {
             ))
             .busy(store.pending(&id).map(|_| "Deleting…"))
             .selected(self.selection.contains(&id))
+            .keyboard_cursor(self.selection.is_cursor(&id))
             .action(
                 IconButton::new(SharedString::from(format!("delete-{id}")), icons::TRASH)
                     .tone(ButtonTone::Danger)
                     .disabled(in_use)
+                    .tab_stop(false)
                     .on_click(delete),
             )
             .on_click(click)
@@ -388,6 +397,21 @@ impl ImagesScreen {
                 )
             })
             .into_any_element()
+    }
+}
+
+impl ListScreen for ImagesScreen {
+    fn list_op(&mut self, op: ListOp, cx: &mut Context<Self>) {
+        if op == ListOp::Delete {
+            self.delete_selected(cx);
+        } else if let Some(key) = op.apply(&mut self.selection, &self.order)
+            && let Some(ix) = self
+                .rows
+                .position(|row| matches!(row, Row::Image(k) if *k == key))
+        {
+            self.rows.scroll_into_view(ix);
+        }
+        cx.notify();
     }
 }
 

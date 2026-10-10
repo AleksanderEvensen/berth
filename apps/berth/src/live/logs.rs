@@ -9,12 +9,13 @@
 //! creates it when the tab becomes visible and drops it when it isn't
 //! (NFR-P5). Arriving lines are applied in batches, at most once a frame.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use berth_docker::{Engine, LogLine, LogOptions, LogStream};
 use berth_ui::ansi::ansi_color;
-use berth_ui::{IconButton, SearchField, Theme, icon, icons};
+use berth_ui::{IconButton, ScrollStep, SearchField, TabStop, Theme, active_pane, icon, icons};
 use gpui::{
     AnyElement, ClipboardItem, Context, Entity, FollowMode, FontStyle, FontWeight, HighlightStyle,
     IntoElement, ListAlignment, ListOffset, ListState, Render, ScrollStrategy, ScrollWheelEvent,
@@ -246,6 +247,38 @@ impl LogsView {
         });
     }
 
+    /// The keys scrolled the log (the clipped view's handle is already
+    /// moved; the wrapped list is scrolled here): going up stops following
+    /// new lines; reaching the end, or End, follows again.
+    fn keyboard_scrolled(&mut self, step: ScrollStep, cx: &mut Context<Self>) {
+        if step == ScrollStep::Bottom {
+            return self.jump_to_latest(cx);
+        }
+        if self.wrap {
+            let page = f32::from(self.lines.viewport_bounds().size.height) - ROW_HEIGHT;
+            match step {
+                ScrollStep::Top => self.lines.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.0),
+                }),
+                ScrollStep::LineUp => self.lines.scroll_by(px(-ROW_HEIGHT * 3.0)),
+                ScrollStep::LineDown => self.lines.scroll_by(px(ROW_HEIGHT * 3.0)),
+                ScrollStep::PageUp => self.lines.scroll_by(px(-page)),
+                ScrollStep::PageDown => self.lines.scroll_by(px(page)),
+                ScrollStep::Bottom => {}
+            }
+        }
+        match step {
+            ScrollStep::Top | ScrollStep::LineUp | ScrollStep::PageUp => self.follow = false,
+            // The wrapped list resumes following after layout (`watch_tail`).
+            ScrollStep::LineDown | ScrollStep::PageDown if !self.wrap => {
+                self.follow = self.scroll.is_scrolled_to_end().unwrap_or(true);
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
     fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         self.follow = true;
         self.scroll_to_end();
@@ -391,6 +424,7 @@ impl Render for LogsView {
         if self.wrap && !self.follow {
             Self::watch_tail(window, cx);
         }
+        let view = cx.weak_entity();
         let theme = Theme::of(cx);
         let body: AnyElement = if self.buffer.is_empty() {
             let (title, detail) = match (&self.state, self.buffer.needle()) {
@@ -419,7 +453,7 @@ impl Render for LogsView {
             .into_any_element()
         };
         let jump = (!self.follow).then(|| {
-            div()
+            let button = div()
                 .id("logs-jump")
                 .absolute()
                 .bottom(px(Theme::SPACE_LG))
@@ -445,7 +479,8 @@ impl Render for LogsView {
                         .text_color(theme.text_muted),
                 )
                 .child("Jump to latest")
-                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)));
+            TabStop::new("logs-jump", button)
         });
         div()
             .size_full()
@@ -464,6 +499,13 @@ impl Render for LogsView {
                     .text_size(px(Theme::TEXT_SM))
                     .on_scroll_wheel(cx.listener(Self::on_scroll))
                     .child(body)
+                    .child(active_pane(
+                        (!self.wrap).then(|| self.scroll.0.borrow().base_handle.clone()),
+                        Rc::new(move |step, _, cx| {
+                            view.update(cx, |this, cx| this.keyboard_scrolled(step, cx))
+                                .ok();
+                        }),
+                    ))
                     .children(jump),
             )
     }

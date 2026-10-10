@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use berth_docker::{Container, ContainerState, Engine, StatsSample};
-use berth_ui::{Badge, ListHeader, Theme, empty_state, icon, icons};
+use berth_ui::{Badge, ListHeader, ScrollPane, TabStop, Theme, empty_state, icon, icons};
 use gpui::{
     AnyElement, Context, Entity, FontWeight, IntoElement, Render, SharedString, Task,
     Transformation, Window, div, percentage, prelude::*, px,
@@ -515,13 +515,17 @@ impl ActivityScreen {
                 .when(!self.sort.descending, |svg| {
                     svg.with_transformation(Transformation::rotate(percentage(0.5)))
                 });
-            div()
-                .id(SharedString::from(format!("activity-sort-{column:?}")))
+            let id = SharedString::from(format!("activity-sort-{column:?}"));
+            let header = div()
+                .id(id.clone())
                 .h_full()
                 .flex()
                 .items_center()
                 .gap(px(Theme::SPACE_XS))
                 .px(px(Theme::SPACE_SM))
+                .rounded(px(Theme::CONTROL_RADIUS))
+                .border_1()
+                .border_color(gpui::transparent_black())
                 .cursor_pointer()
                 .hover(|s| s.text_color(theme.text))
                 .text_color(if active { theme.text } else { theme.text_muted })
@@ -543,7 +547,8 @@ impl ActivityScreen {
                             .child(column.label())
                     }
                 })
-                .on_click(cx.listener(move |this, _, _, cx| this.sort_by(column, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.sort_by(column, cx)));
+            TabStop::new(id, header)
         };
         div()
             .h(px(ROW_HEIGHT))
@@ -564,12 +569,16 @@ impl ActivityScreen {
         let indent = f32::from(row.depth) * INDENT;
         let disclosure = row.expanded.map(|open| {
             let key = row.key.clone();
-            div()
-                .id(SharedString::from(format!("activity-toggle-{}", row.key)))
+            let id = SharedString::from(format!("activity-toggle-{}", row.key));
+            let toggle = div()
+                .id(id.clone())
                 .size(px(16.0))
                 .flex()
                 .items_center()
                 .justify_center()
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(gpui::transparent_black())
                 .cursor_pointer()
                 .child(
                     icon(if open {
@@ -580,7 +589,8 @@ impl ActivityScreen {
                     .size(px(12.0))
                     .text_color(theme.text_faint),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_collapsed(&key, cx)))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_collapsed(&key, cx)));
+            TabStop::new(id, toggle)
         });
         let badge = match &row.kind {
             RowKind::Root => Badge::icon(ROOT, icons::BOX),
@@ -748,14 +758,10 @@ impl Render for ActivityScreen {
                         .flex_col()
                         .px(px(Theme::SPACE_LG))
                         .child(self.render_header(cx))
-                        .child(
-                            div()
-                                .id("activity-scroll")
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
-                                .children(rows.into_iter().map(|row| Self::render_row(row, cx))),
-                        ),
+                        .child(div().flex_1().min_h_0().child(ScrollPane::new(
+                            "activity-scroll",
+                            div().children(rows.into_iter().map(|row| Self::render_row(row, cx))),
+                        ))),
                 )
                 .child(self.render_totals(cx))
                 .into_any_element()

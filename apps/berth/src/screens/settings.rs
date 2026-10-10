@@ -1,11 +1,13 @@
 //! Settings (stories H1, H2): appearance and engine endpoint. Every change is
-//! applied immediately and persisted by [`crate::preferences`].
+//! applied immediately and persisted by [`crate::preferences`]. Shortcuts
+//! lists the keyboard map (NFR-U1).
 
 use berth_docker::{DiscoveryEnv, docker_contexts, parse_host};
 use berth_settings::{Accent, AppearanceMode, EngineChoice};
 use berth_ui::{
-    Appearance, Button, ColorSwatch, OPTION_PREVIEW_RADIUS, OptionCard, SegmentedTabs, SettingRow,
-    SettingsGroup, Switch, TextField, Theme, icons, page_title, section_title, status_dot,
+    Appearance, Button, ColorSwatch, OPTION_PREVIEW_RADIUS, OptionCard, ScrollPane, SegmentedTabs,
+    SettingRow, SettingsGroup, Switch, TextField, Theme, icons, page_title, section_title,
+    status_dot,
 };
 use gpui::{
     AnyElement, Context, Div, Entity, FontWeight, Hsla, IntoElement, Render, SharedString,
@@ -16,6 +18,7 @@ use gpui_base::input::{InputEvent, InputState};
 use super::engine_help::{Problem, engine_help};
 use super::{Chrome, engine_summary};
 use crate::chrome;
+use crate::keymap::{self, Group, SHORTCUTS};
 use crate::preferences;
 use crate::store::Store;
 
@@ -23,15 +26,17 @@ use crate::store::Store;
 pub enum Page {
     Appearance,
     Engine,
+    Shortcuts,
 }
 
 impl Page {
-    pub const ALL: [Self; 2] = [Self::Appearance, Self::Engine];
+    pub const ALL: [Self; 3] = [Self::Appearance, Self::Engine, Self::Shortcuts];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Engine => "Engine",
+            Self::Shortcuts => "Shortcuts",
         }
     }
 
@@ -39,6 +44,7 @@ impl Page {
         match self {
             Self::Appearance => icons::TUNING,
             Self::Engine => icons::SERVER,
+            Self::Shortcuts => icons::KEYBOARD,
         }
     }
 }
@@ -479,6 +485,67 @@ impl SettingsScreen {
     }
 }
 
+impl SettingsScreen {
+    // ---- shortcuts ----
+
+    fn render_shortcuts(cx: &Context<Self>) -> Div {
+        let theme = Theme::of(cx);
+        Group::ALL.into_iter().fold(
+            div().child(page_title("Shortcuts", theme)),
+            |page, group| {
+                let rows = SHORTCUTS
+                    .iter()
+                    .filter(|shortcut| shortcut.group == group)
+                    .fold(SettingsGroup::new(), |rows, shortcut| {
+                        rows.row(
+                            SettingRow::new(shortcut.label).control(keys(shortcut.keys, theme)),
+                        )
+                    });
+                page.child(section_title(group.label(), theme)).child(rows)
+            },
+        )
+    }
+}
+
+/// Keycaps for each alternative keystroke, separated by "or".
+fn keys(keystrokes: &[&str], theme: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(Theme::SPACE_SM))
+        .children(keystrokes.iter().enumerate().flat_map(|(ix, keystroke)| {
+            let or = (ix > 0).then(|| {
+                div()
+                    .text_size(px(Theme::TEXT_SM))
+                    .text_color(theme.text_faint)
+                    .child("or")
+                    .into_any_element()
+            });
+            let caps = div()
+                .flex()
+                .gap(px(3.0))
+                .children(keymap::keycaps(keystroke).into_iter().map(|cap| {
+                    div()
+                        .h(px(22.0))
+                        .min_w(px(22.0))
+                        .px(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(Theme::CONTROL_RADIUS))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.row_hover)
+                        .text_size(px(Theme::TEXT_SM))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child(cap)
+                }))
+                .into_any_element();
+            or.into_iter().chain([caps])
+        }))
+}
+
 /// The same syntax check discovery applies, so a saved host never fails
 /// to parse at connect time.
 fn validate_host(host: &str) -> Result<(), String> {
@@ -575,6 +642,7 @@ impl Render for SettingsScreen {
         let content = match self.page {
             Page::Appearance => Self::render_appearance(cx),
             Page::Engine => self.render_engine(cx),
+            Page::Shortcuts => Self::render_shortcuts(cx),
         };
         div()
             .size_full()
@@ -588,21 +656,17 @@ impl Render for SettingsScreen {
                 div().h(px(Theme::HEADER_HEIGHT)).flex_none().w_full(),
             ))
             .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(720.0))
-                            .mx_auto()
-                            .px(px(Theme::SPACE_LG * 2.0))
-                            .pb(px(Theme::SPACE_LG * 3.0))
-                            .children(Self::render_problem(cx))
-                            .child(content),
-                    ),
+                div().flex_1().min_h_0().child(ScrollPane::new(
+                    "settings-scroll",
+                    div()
+                        .w_full()
+                        .max_w(px(720.0))
+                        .mx_auto()
+                        .px(px(Theme::SPACE_LG * 2.0))
+                        .pb(px(Theme::SPACE_LG * 3.0))
+                        .children(Self::render_problem(cx))
+                        .child(content),
+                )),
             )
     }
 }

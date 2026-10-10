@@ -8,13 +8,56 @@ pub mod settings;
 pub mod volumes;
 
 use berth_docker::Container;
-use berth_ui::{ListHeader, Status, Theme, icon, icons, status_dot};
+use berth_ui::{ListHeader, ScrollPane, Status, TabStop, Theme, icon, icons, status_dot};
 use gpui::{
     AnyElement, Context, Div, EventEmitter, IntoElement, SharedString, div, prelude::*, px,
 };
 
 use crate::chrome;
+use std::hash::Hash;
+
+use crate::selection::{MultiSelect, Step};
 use crate::store::Connection;
+
+/// A keyboard operation on a list screen's selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListOp {
+    SelectAll,
+    Clear,
+    /// Move the selection; `true` extends it from the anchor.
+    Step(Step, bool),
+    /// Move only the cursor, keeping the selection.
+    Cursor(Step),
+    /// Add the row under the cursor to the selection or drop it.
+    Toggle,
+    /// Delete the selection, after a confirm.
+    Delete,
+}
+
+impl ListOp {
+    /// Apply a selection op (not [`ListOp::Delete`], which needs the
+    /// screen) to `selection`. Returns the key moved to, to scroll into view.
+    pub fn apply<K: Clone + Eq + Hash>(
+        self,
+        selection: &mut MultiSelect<K>,
+        order: &[K],
+    ) -> Option<K> {
+        match self {
+            Self::SelectAll => selection.select_all(order),
+            Self::Clear => selection.clear(),
+            Self::Toggle => selection.toggle_head(),
+            Self::Step(step, extend) => return selection.step(order, step, extend),
+            Self::Cursor(step) => return selection.move_head(order, step),
+            Self::Delete => {}
+        }
+        None
+    }
+}
+
+/// A screen with a selectable resource list, driven by the list keys.
+pub trait ListScreen: Sized + 'static {
+    fn list_op(&mut self, op: ListOp, cx: &mut Context<Self>);
+}
 
 /// Status, title and detail line describing the engine connection.
 pub fn engine_summary(connection: &Connection) -> (Status, SharedString, SharedString) {
@@ -79,16 +122,19 @@ pub fn used_by<V: EventEmitter<ShowContainer>>(
             } else {
                 d.children(users.iter().enumerate().map(|(ix, c)| {
                     let id = c.id.clone();
-                    div()
-                        .id(SharedString::from(format!("used-by-{id}")))
+                    let key = SharedString::from(format!("used-by-{id}"));
+                    let row = div()
+                        .id(key.clone())
                         .h(px(38.0))
                         .px(px(Theme::SPACE_MD))
                         .flex()
                         .items_center()
                         .gap(px(Theme::SPACE_SM + 2.0))
+                        .rounded(px(Theme::CONTROL_RADIUS))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.row_hover))
-                        .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
                         .child(status_dot(
                             if c.state.is_active() {
                                 Status::Running
@@ -114,7 +160,10 @@ pub fn used_by<V: EventEmitter<ShowContainer>>(
                         )
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(ShowContainer(id.clone()));
-                        }))
+                        }));
+                    div()
+                        .when(ix > 0, |d| d.border_t_1().border_color(theme.border))
+                        .child(TabStop::new(key, row))
                 }))
             }
         })
@@ -189,7 +238,8 @@ pub fn detail_pane(
 
 /// Scrollable, centred reading column for detail content.
 pub fn scroll_page(id: &'static str, content: impl IntoElement) -> impl IntoElement {
-    div().id(id).size_full().overflow_y_scroll().child(
+    ScrollPane::new(
+        id,
         div()
             .w_full()
             .max_w(px(780.0))

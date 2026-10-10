@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use berth_docker::{Engine, StatsSample};
-use berth_ui::{Series, Sparkline, Theme, empty_state};
+use berth_ui::{ScrollPane, Series, Sparkline, Theme, empty_state};
 use gpui::{
     AnyElement, Context, FontWeight, Hsla, IntoElement, Render, SharedString, Task, Window, div,
     prelude::*, px,
@@ -143,34 +143,31 @@ impl Render for StatsView {
                 .gap(px(Theme::SPACE_MD))
                 .children(cards.by_ref().take(2))
         };
-        div()
-            .id("stats-scroll")
-            .size_full()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(880.0))
-                    .mx_auto()
-                    .px(px(Theme::SPACE_LG + 8.0))
-                    .pt(px(Theme::SPACE_SM))
-                    .pb(px(Theme::SPACE_LG * 2.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(Theme::SPACE_MD))
-                    .child(pair())
-                    .child(pair())
-                    .when_some(state, |d, state| {
-                        d.child(
-                            div()
-                                .px(px(Theme::SPACE_XS))
-                                .text_size(px(Theme::TEXT_SM))
-                                .text_color(theme.text_faint)
-                                .child(state),
-                        )
-                    }),
-            )
-            .into_any_element()
+        ScrollPane::new(
+            "stats-scroll",
+            div()
+                .w_full()
+                .max_w(px(880.0))
+                .mx_auto()
+                .px(px(Theme::SPACE_LG + 8.0))
+                .pt(px(Theme::SPACE_SM))
+                .pb(px(Theme::SPACE_LG * 2.0))
+                .flex()
+                .flex_col()
+                .gap(px(Theme::SPACE_MD))
+                .child(pair())
+                .child(pair())
+                .when_some(state, |d, state| {
+                    d.child(
+                        div()
+                            .px(px(Theme::SPACE_XS))
+                            .text_size(px(Theme::TEXT_SM))
+                            .text_color(theme.text_faint)
+                            .child(state),
+                    )
+                }),
+        )
+        .into_any_element()
     }
 }
 

@@ -4,19 +4,28 @@
 use std::time::Duration;
 
 use berth_ui::{
-    Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, Sidebar, SidebarItem, SidebarSection,
-    Theme, Toast, ToastKind, icons, item_list, modal_overlay, sidebar_glyph, status_dot,
+    Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, ScrollStep, Sidebar, SidebarItem,
+    SidebarSection, TabStop, Theme, Toast, ToastKind, icons, item_list, modal_overlay,
+    scroll_active_pane, sidebar_glyph, status_dot,
 };
 use gpui::{
-    AnimationExt as _, AnyElement, Context, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Render, SharedString, SpringAnimation, Window, actions, div, prelude::*, px,
+    AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
+    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, div, prelude::*, px,
 };
 
 use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
+use crate::keymap::{
+    ClearSelection, Collapse, CursorNext, CursorPrev, DeleteSelected, Expand, ExtendFirst,
+    ExtendLast, ExtendNext, ExtendPrev, FocusNext, FocusPrev, FocusSearch, GoActivity, GoCleanup,
+    GoContainers, GoImages, GoNetworks, GoVolumes, OpenPort, OpenSettings, Restart, ScrollBottom,
+    ScrollPageDown, ScrollPageUp, ScrollTop, SelectAll, SelectFirst, SelectLast, SelectNext,
+    SelectPrev, ShowFiles, ShowInfo, ShowLogs, ShowShortcuts, ShowStats, ShowTerminal,
+    ToggleRunning, ToggleSelected, ToggleSidebar,
+};
 use crate::preferences;
 use crate::screens::{
-    Chrome, ShowContainer, ShowEngineHelp, ShowVolume,
+    Chrome, ListOp, ListScreen, ShowContainer, ShowEngineHelp, ShowVolume,
     activity::ActivityScreen,
     cleanup::CleanupScreen,
     containers::ContainersScreen,
@@ -27,29 +36,8 @@ use crate::screens::{
     settings::{Page, SettingsScreen},
     volumes::VolumesScreen,
 };
+use crate::selection::Step;
 use crate::store::{Connector, Store, StoreEvent};
-
-actions!(
-    berth,
-    [
-        #[derive(Eq)]
-        ToggleSidebar,
-        #[derive(Eq)]
-        FocusSearch,
-        #[derive(Eq)]
-        OpenSettings,
-        #[derive(Eq)]
-        FocusNext,
-        #[derive(Eq)]
-        FocusPrev,
-        #[derive(Eq)]
-        SelectAll,
-        #[derive(Eq)]
-        ClearSelection,
-        #[derive(Eq)]
-        Quit
-    ]
-);
 
 /// Space the floating sidebar toggle occupies in the list header when the
 /// sidebar is collapsed.
@@ -117,6 +105,17 @@ impl Shell {
         .detach();
         cx.observe_global::<preferences::Preferences>(Self::report_settings_problem)
             .detach();
+        // A focused control can disappear (a disabled button, a closed
+        // terminal); without focus no shortcut resolves, so take it back.
+        cx.on_focus_lost(window, |this: &mut Self, window, cx| {
+            let target = if this.confirm.is_some() {
+                &this.dialog_focus
+            } else {
+                &this.focus
+            };
+            window.focus(target, cx);
+        })
+        .detach();
         // Report a problem from loading settings once the shell exists.
         cx.spawn(async move |this, cx| {
             this.update(cx, Self::report_settings_problem).ok();
@@ -266,26 +265,192 @@ impl Shell {
             .update(cx, |screen, cx| screen.set_page(Page::Engine, cx));
     }
 
-    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    fn show_shortcuts(&mut self, _: &ShowShortcuts, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Settings, window, cx);
+        self.settings
+            .update(cx, |screen, cx| screen.set_page(Page::Shortcuts, cx));
+    }
+
+    /// Apply a list key to the current screen's list. Screens without one
+    /// scroll instead: the arrows by a line, Home and End to the ends.
+    fn list(&self, op: ListOp, window: &mut Window, cx: &mut Context<Self>) {
+        fn apply<T: ListScreen>(screen: &Entity<T>, op: ListOp, cx: &mut Context<Shell>) {
+            screen.update(cx, |screen, cx| screen.list_op(op, cx));
+        }
         match self.route {
-            Route::Containers => self.containers.update(cx, ContainersScreen::select_all),
-            Route::Volumes => self.volumes.update(cx, VolumesScreen::select_all),
-            Route::Images => self.images.update(cx, ImagesScreen::select_all),
-            Route::Networks => self.networks.update(cx, NetworksScreen::select_all),
-            Route::Activity | Route::Cleanup | Route::Settings => {}
+            Route::Containers => apply(&self.containers, op, cx),
+            Route::Volumes => apply(&self.volumes, op, cx),
+            Route::Images => apply(&self.images, op, cx),
+            Route::Networks => apply(&self.networks, op, cx),
+            Route::Activity | Route::Cleanup | Route::Settings => {
+                let scroll = match op {
+                    ListOp::Step(Step::Prev, _) | ListOp::Cursor(Step::Prev) => ScrollStep::LineUp,
+                    ListOp::Step(Step::Next, _) | ListOp::Cursor(Step::Next) => {
+                        ScrollStep::LineDown
+                    }
+                    ListOp::Step(Step::First, _) | ListOp::Cursor(Step::First) => ScrollStep::Top,
+                    ListOp::Step(Step::Last, _) | ListOp::Cursor(Step::Last) => ScrollStep::Bottom,
+                    ListOp::SelectAll | ListOp::Clear | ListOp::Toggle | ListOp::Delete => return,
+                };
+                scroll_active_pane(scroll, window, cx);
+            }
         }
     }
 
-    fn clear_selection(&mut self, _: &ClearSelection, _: &mut Window, cx: &mut Context<Self>) {
-        match self.route {
-            Route::Containers => self
-                .containers
-                .update(cx, ContainersScreen::clear_selection),
-            Route::Volumes => self.volumes.update(cx, VolumesScreen::clear_selection),
-            Route::Images => self.images.update(cx, ImagesScreen::clear_selection),
-            Route::Networks => self.networks.update(cx, NetworksScreen::clear_selection),
-            Route::Activity | Route::Cleanup | Route::Settings => {}
+    /// Tab and Shift+Tab. While the confirm dialog is open, focus stays in
+    /// it, so nothing behind it can be pressed.
+    fn cycle_focus(&self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Bounds the search for a stop inside the dialog.
+        const MAX_STOPS: usize = 1024;
+        for _ in 0..MAX_STOPS {
+            if forward {
+                window.focus_next(cx);
+            } else {
+                window.focus_prev(cx);
+            }
+            if self.confirm.is_none() || self.dialog_focus.contains_focused(window, cx) {
+                return;
+            }
         }
+        window.focus(&self.dialog_focus, cx);
+    }
+
+    /// `Esc` clears the selection; on Settings it goes back.
+    fn clear_selection(&mut self, _: &ClearSelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.route == Route::Settings {
+            self.navigate(self.back, window, cx);
+        } else {
+            self.list(ListOp::Clear, window, cx);
+        }
+    }
+
+    /// Run a Containers-only key, when that screen is showing.
+    fn on_containers(
+        &self,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut ContainersScreen, &mut Context<ContainersScreen>),
+    ) {
+        if self.route == Route::Containers {
+            self.containers.update(cx, f);
+        }
+    }
+
+    /// Show a container detail tab, from any screen. Focus returns to the
+    /// shell, as it may be in the live view being replaced; picking the tab
+    /// already shown goes back into its terminal instead.
+    fn show_tab(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Containers, window, cx);
+        let focused = tab == self.containers.read(cx).tab()
+            && self
+                .containers
+                .update(cx, |screen, cx| screen.focus_terminal(window, cx));
+        if !focused {
+            window.focus(&self.focus, cx);
+            self.containers
+                .update(cx, |screen, cx| screen.set_tab(tab, cx));
+        }
+    }
+
+    /// Keys that act on the screens. Not registered while the confirm
+    /// dialog is open, so they can't act behind it.
+    fn screen_actions(content: Stateful<Div>, cx: &Context<Self>) -> Stateful<Div> {
+        content
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::show_shortcuts))
+            .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(|this, _: &GoContainers, window, cx| {
+                this.navigate(Route::Containers, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoVolumes, window, cx| {
+                this.navigate(Route::Volumes, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoImages, window, cx| {
+                this.navigate(Route::Images, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoNetworks, window, cx| {
+                this.navigate(Route::Networks, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoActivity, window, cx| {
+                this.navigate(Route::Activity, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoCleanup, window, cx| {
+                this.navigate(Route::Cleanup, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectAll, window, cx| {
+                this.list(ListOp::SelectAll, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, window, cx| {
+                this.list(ListOp::Delete, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSelected, window, cx| {
+                this.list(ListOp::Toggle, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectPrev, window, cx| {
+                this.list(ListOp::Step(Step::Prev, false), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectNext, window, cx| {
+                this.list(ListOp::Step(Step::Next, false), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectFirst, window, cx| {
+                this.list(ListOp::Step(Step::First, false), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SelectLast, window, cx| {
+                this.list(ListOp::Step(Step::Last, false), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExtendPrev, window, cx| {
+                this.list(ListOp::Step(Step::Prev, true), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExtendNext, window, cx| {
+                this.list(ListOp::Step(Step::Next, true), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExtendFirst, window, cx| {
+                this.list(ListOp::Step(Step::First, true), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExtendLast, window, cx| {
+                this.list(ListOp::Step(Step::Last, true), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CursorPrev, window, cx| {
+                this.list(ListOp::Cursor(Step::Prev), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CursorNext, window, cx| {
+                this.list(ListOp::Cursor(Step::Next), window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &ScrollPageUp, window, cx| {
+                scroll_active_pane(ScrollStep::PageUp, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &ScrollPageDown, window, cx| {
+                scroll_active_pane(ScrollStep::PageDown, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &ScrollTop, window, cx| {
+                scroll_active_pane(ScrollStep::Top, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &ScrollBottom, window, cx| {
+                scroll_active_pane(ScrollStep::Bottom, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRunning, _, cx| {
+                this.on_containers(cx, ContainersScreen::toggle_running);
+            }))
+            .on_action(cx.listener(|this, _: &Restart, _, cx| {
+                this.on_containers(cx, ContainersScreen::restart);
+            }))
+            .on_action(cx.listener(|this, _: &OpenPort, window, cx| {
+                this.on_containers(cx, |screen, cx| screen.open_port(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &Collapse, _, cx| {
+                this.on_containers(cx, |screen, cx| screen.set_expanded(false, cx));
+            }))
+            .on_action(cx.listener(|this, _: &Expand, _, cx| {
+                this.on_containers(cx, |screen, cx| screen.set_expanded(true, cx));
+            }))
+            .on_action(cx.listener(|this, _: &ShowInfo, window, cx| this.show_tab(0, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowStats, window, cx| this.show_tab(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowLogs, window, cx| this.show_tab(2, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowTerminal, window, cx| {
+                this.show_tab(3, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowFiles, window, cx| this.show_tab(4, window, cx)))
     }
 
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -297,7 +462,18 @@ impl Shell {
 
     // ---- confirm dialog ----
 
-    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+    /// Enter confirms while the dialog itself has focus. With a button
+    /// focused (Tab), Enter presses that button instead, so Enter on Cancel
+    /// cancels.
+    fn confirm_key(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_focus.is_focused(window) {
+            self.accept(window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(request) = self.confirm.take() {
             (request.on_confirm)(window, cx);
         }
@@ -326,15 +502,13 @@ impl Shell {
                 Button::new("confirm-accept", request.confirm_label.clone())
                     .solid()
                     .tone(ButtonTone::Danger)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.confirm(&Confirm, window, cx)),
-                    ),
+                    .on_click(cx.listener(|this, _, window, cx| this.accept(window, cx))),
             );
         modal_overlay(
             div()
                 .track_focus(&self.dialog_focus)
                 .key_context(CONFIRM_CONTEXT)
-                .on_action(cx.listener(Self::confirm))
+                .on_action(cx.listener(Self::confirm_key))
                 .on_action(cx.listener(Self::cancel))
                 .child(dialog),
             theme,
@@ -402,6 +576,31 @@ impl Shell {
         let (status, name, detail) = engine_summary(connection);
         // With a fix to offer, the text opens the guide on Settings → Engine.
         let fixable = Problem::of(connection).is_some();
+        let summary = div()
+            .id("engine-summary")
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .text_size(px(Theme::TEXT_MD))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .truncate()
+                    .child(name),
+            )
+            .child(
+                div()
+                    .text_size(px(Theme::TEXT_XS))
+                    .text_color(if fixable {
+                        theme.accent
+                    } else {
+                        theme.text_faint
+                    })
+                    .truncate()
+                    .child(detail),
+            );
         div()
             .flex()
             .items_center()
@@ -409,42 +608,29 @@ impl Shell {
             .px(px(Theme::SPACE_SM))
             .h(px(36.0))
             .child(status_dot(status, 8.0, None, theme))
-            .child(
-                div()
-                    .id("engine-summary")
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .when(fixable, |d| {
-                        d.cursor_pointer()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_engine_help(window, cx);
-                            }))
-                    })
-                    .child(
-                        div()
-                            .text_size(px(Theme::TEXT_MD))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(name),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(Theme::TEXT_XS))
-                            .text_color(if fixable {
-                                theme.accent
-                            } else {
-                                theme.text_faint
-                            })
-                            .truncate()
-                            .child(detail),
-                    ),
-            )
+            .child(match (fixable, self.sidebar_collapsed) {
+                (false, _) => summary.into_any_element(),
+                (true, collapsed) => {
+                    let link = summary
+                        .rounded(px(Theme::CONTROL_RADIUS))
+                        .border_1()
+                        .border_color(gpui::transparent_black())
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_engine_help(window, cx);
+                        }));
+                    // Hidden in a collapsed sidebar: no tab stop.
+                    if collapsed {
+                        link.into_any_element()
+                    } else {
+                        TabStop::new("engine-summary", link).into_any_element()
+                    }
+                }
+            })
             .child(
                 IconButton::new("settings", icons::SETTINGS)
                     .size(28.0, 16.0)
+                    .tab_stop(!self.sidebar_collapsed)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_settings(&OpenSettings, window, cx);
                     })),
@@ -554,8 +740,10 @@ impl Shell {
         let theme = Theme::of(cx);
         let color = theme.text_muted;
         let open = if self.sidebar_collapsed { 0.0 } else { 1.0 };
-        div()
+        let toggle = div()
             .id("sidebar-toggle")
+            .border_1()
+            .border_color(gpui::transparent_black())
             .absolute()
             .top(px((Theme::HEADER_HEIGHT - 28.0) / 2.0))
             .left(px(leading))
@@ -581,7 +769,8 @@ impl Shell {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
-            )
+            );
+        TabStop::new("sidebar-toggle", toggle)
     }
 }
 
@@ -648,13 +837,19 @@ impl Render for Shell {
             .id("shell")
             .track_focus(&self.focus)
             .key_context("Shell")
-            .on_action(cx.listener(Self::toggle_sidebar))
-            .on_action(cx.listener(Self::focus_search))
-            .on_action(cx.listener(Self::open_settings))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::clear_selection))
-            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
-            .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
+            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
+                this.cycle_focus(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
+                this.cycle_focus(false, window, cx);
+            }))
+            .map(|content| {
+                if self.confirm.is_none() {
+                    Self::screen_actions(content, cx)
+                } else {
+                    content
+                }
+            })
             .relative()
             .size_full()
             .flex()

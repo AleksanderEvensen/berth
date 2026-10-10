@@ -13,7 +13,7 @@ use gpui::{
     SharedString, Window, div, list, prelude::*, px,
 };
 
-use super::{Chrome, detail_pane, list_column, scroll_page};
+use super::{Chrome, ListOp, ListScreen, detail_pane, list_column, scroll_page};
 use crate::dialogs::ConfirmRequest;
 use crate::selection::MultiSelect;
 use crate::store::{PruneTarget, Store};
@@ -56,18 +56,6 @@ impl NetworksScreen {
             selection: MultiSelect::default(),
             chrome: Chrome::default(),
         }
-    }
-
-    /// Select every listed row (`ctrl+a`).
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.selection.select_all(&self.order);
-        cx.notify();
-    }
-
-    /// Drop the selection (`Esc`).
-    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.selection.clear();
-        cx.notify();
     }
 
     pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
@@ -150,6 +138,28 @@ impl NetworksScreen {
         });
     }
 
+    /// Delete the selected networks that can go (Delete key): not built in
+    /// and not in use.
+    fn delete_selected(&self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let networks: Vec<(String, String)> = store
+            .networks()
+            .iter()
+            .filter(|n| {
+                self.selection.contains(&n.id)
+                    && !store.network_builtin(n)
+                    && !Store::network_in_use(n)
+            })
+            .map(|n| (n.id.clone(), n.name.clone()))
+            .collect();
+        let title = match networks.as_slice() {
+            [] => return,
+            [(_, name)] => format!("Delete network {name}?"),
+            _ => format!("Delete {} networks?", networks.len()),
+        };
+        self.confirm_remove(networks, title, cx);
+    }
+
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
         let row = match self.rows.get(ix) {
@@ -195,10 +205,12 @@ impl NetworksScreen {
         .subtitle(summary(network))
         .busy(store.pending(&id).map(|_| "Deleting…"))
         .selected(self.selection.contains(&id))
+        .keyboard_cursor(self.selection.is_cursor(&id))
         .action(
             IconButton::new(SharedString::from(format!("delete-{id}")), icons::TRASH)
                 .tone(ButtonTone::Danger)
                 .disabled(!removable)
+                .tab_stop(false)
                 .on_click(delete),
         )
         .on_click(click);
@@ -285,6 +297,21 @@ impl NetworksScreen {
                 )
             })
             .into_any_element()
+    }
+}
+
+impl ListScreen for NetworksScreen {
+    fn list_op(&mut self, op: ListOp, cx: &mut Context<Self>) {
+        if op == ListOp::Delete {
+            self.delete_selected(cx);
+        } else if let Some(key) = op.apply(&mut self.selection, &self.order)
+            && let Some(ix) = self
+                .rows
+                .position(|row| matches!(row, Row::Network(k) if *k == key))
+        {
+            self.rows.scroll_into_view(ix);
+        }
+        cx.notify();
     }
 }
 

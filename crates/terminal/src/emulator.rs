@@ -301,6 +301,17 @@ impl Emulator {
         }
     }
 
+    /// Select everything: the scrollback and the screen (the keyboard's way
+    /// to copy output).
+    pub fn select_all(&mut self) {
+        let grid = self.term.grid();
+        let start = Point::new(grid.topmost_line(), Column(0));
+        let end = Point::new(grid.bottommost_line(), grid.last_column());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        self.term.selection = Some(selection);
+    }
+
     pub const fn clear_selection(&mut self) {
         self.term.selection = None;
     }
@@ -447,6 +458,15 @@ mod tests {
     fn dsr_produces_a_response() {
         let mut e = emu(10, 3);
         assert_eq!(e.feed(b"\x1b[6n", &Host::NONE), b"\x1b[1;1R".to_vec());
+    }
+
+    #[test]
+    fn select_all_copies_scrollback_and_screen() {
+        let mut e = emu(10, 2);
+        e.feed(b"1\r\n2\r\n3", &Host::NONE);
+        e.select_all();
+        let text = e.selection_text().unwrap_or_default();
+        assert!(text.contains('1') && text.contains('3'), "{text:?}");
     }
 
     #[test]

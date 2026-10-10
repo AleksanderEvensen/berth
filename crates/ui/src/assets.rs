@@ -78,6 +78,7 @@ icon_assets![
     (MOON, "moon"),
     (TUNING, "tuning"),
     (SERVER, "server"),
+    (KEYBOARD, "keyboard"),
 ];
 
 const FONTS: &[&[u8]] = &[

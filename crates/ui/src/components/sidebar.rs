@@ -3,7 +3,7 @@ use gpui::{
     RenderOnce, SharedString, SpringAnimation, SpringConfig, Window, div, prelude::*, px,
 };
 
-use super::{ClickHandler, icon};
+use super::{ClickHandler, icon, tab_stop};
 use crate::Theme;
 
 /// Critically damped spring for panel widths: no bounce, settles within the
@@ -107,7 +107,12 @@ impl RenderOnce for Sidebar {
                             .flex()
                             .flex_col()
                             .gap(px(Theme::SPACE_MD))
-                            .children(self.sections),
+                            .children(self.sections.into_iter().map(|mut section| {
+                                for item in &mut section.items {
+                                    item.tab_stop = !self.collapsed;
+                                }
+                                section
+                            })),
                     )
                     .when_some(self.footer, |d, footer| {
                         d.child(
@@ -196,6 +201,8 @@ pub struct SidebarItem {
     label: SharedString,
     trailing: Option<SharedString>,
     active: bool,
+    /// Off while the sidebar is collapsed: hidden items take no focus.
+    tab_stop: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -211,6 +218,7 @@ impl SidebarItem {
             label: label.into(),
             trailing: None,
             active: false,
+            tab_stop: true,
             on_click: None,
         }
     }
@@ -232,12 +240,22 @@ impl SidebarItem {
 }
 
 impl RenderOnce for SidebarItem {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Not requesting the handle drops it, so a hidden item that had
+        // focus gives it up.
+        let focus = self.tab_stop.then(|| tab_stop(self.id.clone(), window, cx));
         let theme = Theme::of(cx);
         let row_hover = theme.row_hover;
+        let ring = theme.accent;
         let on_click = self.on_click;
         div()
             .id(self.id)
+            .when_some(focus, |d, focus| {
+                d.track_focus(&focus)
+                    .focus_visible(move |s| s.border_color(ring))
+            })
+            .border_1()
+            .border_color(gpui::transparent_black())
             .h(px(Theme::SIDEBAR_ROW_HEIGHT))
             .flex()
             .items_center()
