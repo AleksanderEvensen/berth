@@ -36,7 +36,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 pub enum Connection {
     Connecting,
     Connected(EngineInfo),
-    Disconnected { error: String },
+    Disconnected { error: EngineError },
 }
 
 /// An operation in flight on a container.
@@ -70,7 +70,7 @@ impl Op {
 
 /// Produces a connected engine. Runs on a background thread at the start of
 /// every session, so a reconnect also re-runs endpoint discovery.
-pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn Engine>, String> + Send + Sync>;
+pub type Connector = Arc<dyn Fn() -> Result<Arc<dyn Engine>, EngineError> + Send + Sync>;
 
 pub enum StoreEvent {
     Error { title: String, detail: String },
@@ -326,7 +326,7 @@ enum SessionEnd {
     /// The store was dropped.
     Dropped,
     /// Couldn't connect / sync.
-    Failed(String),
+    Failed(EngineError),
     /// Connected, then the event stream ended.
     StreamClosed,
 }
@@ -344,11 +344,11 @@ async fn run_session(
     let mut events = engine.events();
     let info = match engine.info().await {
         Ok(info) => info,
-        Err(err) => return SessionEnd::Failed(err.to_string()),
+        Err(err) => return SessionEnd::Failed(err),
     };
     let containers = match engine.list_containers().await {
         Ok(list) => list,
-        Err(err) => return SessionEnd::Failed(err.to_string()),
+        Err(err) => return SessionEnd::Failed(err),
     };
     let synced = this.update(cx, |store, cx| {
         store.connection = Connection::Connected(info);

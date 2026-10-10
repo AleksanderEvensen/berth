@@ -5,8 +5,7 @@ and meets the acceptance criteria of its story in
 [01-user-stories.md](01-user-stories.md). Partially done items stay unticked
 with a note saying what is missing.
 
-**Status (audited 2026-10-09, at `ce159f2`):** M0–M3 done apart from the
-gaps listed under M1. M4 has started: settings screen, light theme, accent
+**Status (audited 2026-10-09, at `ce159f2`):** M0–M3 done. M4 has started: settings screen, light theme, accent
 picker, reduce motion, persistence, the Networks screen and full volume and
 image info (C4, D4) are in. M5 endpoint discovery (macOS context sockets,
 Windows named pipe) is in; the rest of M5 is not.
@@ -17,7 +16,7 @@ Windows named pipe) is in; the rest of M5 is not.
 - [x] Collapsible sidebar component; Containers screen (list + Info tab) on fixture data.
 - [x] Linux CSD titlebar: drag, double-click maximize, caption buttons.
 
-## M1 — Real engine, containers (P0)
+## M1 — Real engine, containers (P0) ✅
 - [x] `Engine` trait + `BollardEngine`; discovery (FR-1); disconnected state.
 - [x] Event-driven store (FR-2), optimistic lifecycle actions (FR-4/5).
 - [x] Container Info on real inspect data; open-port links; confirm dialog; toasts.
@@ -26,10 +25,11 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] A1 — Sidebar with grouped resource areas, active/hover washes, counts.
   - [x] A2 — Collapsible sidebar (`ctrl+b`/`cmd+b`), animated, persisted.
   - [x] A4 — Linux CSD window chrome.
-  - [ ] A5 — Engine status in the sidebar footer. *Missing:* fix-it hint for
-        permission denied / not found (rootless Docker, rootless Podman, then
-        the `docker` group as root-equivalent, with copyable commands); the
-        error only says `permission denied on <endpoint>`.
+  - [x] A5 — Engine status in the sidebar footer. On permission denied or
+        no engine found, the footer links to a fix-it guide (also on the
+        Containers detail pane and Settings → Engine): rootless Docker,
+        rootless Podman, then the `docker` group flagged root-equivalent, with
+        copyable commands.
   - [x] B1 — Running / Stopped sections with counts.
   - [x] B2 — Compose projects as expandable stacks.
   - [x] B3 — Start/stop/restart/delete for containers and stacks, with confirm and pending spinners.

@@ -13,10 +13,11 @@ use gpui::{
 };
 use gpui_base::input::{InputEvent, InputState};
 
+use super::engine_help::{Problem, engine_help};
 use super::{Chrome, engine_summary};
 use crate::chrome;
 use crate::preferences;
-use crate::store::Store;
+use crate::store::{Connection, Store};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -201,7 +202,12 @@ impl SettingsScreen {
 
     fn render_engine(&self, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx);
-        let (status, title, detail) = engine_summary(self.store.read(cx).connection());
+        let connection = self.store.read(cx).connection();
+        let (status, title, detail) = engine_summary(connection);
+        let problem = match connection {
+            Connection::Disconnected { error } => Problem::of(error),
+            _ => None,
+        };
         let connection = SettingsGroup::new().row(
             SettingRow::new(title).description(detail).control(
                 div()
@@ -255,6 +261,7 @@ impl SettingsScreen {
             .child(page_title("Engine", theme))
             .child(section_title("Connection", theme))
             .child(connection)
+            .children(problem.map(|problem| engine_help(&problem, theme)))
             .child(section_title("Endpoint", theme))
             .child(SettingsGroup::new().row(endpoint))
     }

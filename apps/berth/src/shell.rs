@@ -20,13 +20,14 @@ use crate::screens::{
     activity::ActivityScreen,
     cleanup::CleanupScreen,
     containers::ContainersScreen,
+    engine_help::Problem,
     engine_summary,
     images::ImagesScreen,
     networks::NetworksScreen,
     settings::{Page, SettingsScreen},
     volumes::VolumesScreen,
 };
-use crate::store::{Connector, Store, StoreEvent};
+use crate::store::{Connection, Connector, Store, StoreEvent};
 
 actions!(
     berth,
@@ -382,7 +383,13 @@ impl Shell {
 
     fn render_engine_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx);
-        let (status, name, detail) = engine_summary(self.store.read(cx).connection());
+        let connection = self.store.read(cx).connection();
+        let (status, name, detail) = engine_summary(connection);
+        // With a fix to offer, the text opens the guide on Settings → Engine.
+        let fixable = matches!(
+            connection,
+            Connection::Disconnected { error } if Problem::of(error).is_some()
+        );
         div()
             .flex()
             .items_center()
@@ -392,10 +399,19 @@ impl Shell {
             .child(status_dot(status, 8.0, None, theme))
             .child(
                 div()
+                    .id("engine-summary")
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_col()
+                    .when(fixable, |d| {
+                        d.cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings(&OpenSettings, window, cx);
+                                this.settings
+                                    .update(cx, |screen, cx| screen.set_page(Page::Engine, cx));
+                            }))
+                    })
                     .child(
                         div()
                             .text_size(px(Theme::TEXT_MD))
@@ -407,7 +423,11 @@ impl Shell {
                     .child(
                         div()
                             .text_size(px(Theme::TEXT_XS))
-                            .text_color(theme.text_faint)
+                            .text_color(if fixable {
+                                theme.accent
+                            } else {
+                                theme.text_faint
+                            })
                             .truncate()
                             .child(detail),
                     ),

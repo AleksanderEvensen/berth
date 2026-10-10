@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod cleanup;
 pub mod containers;
+pub mod engine_help;
 pub mod images;
 pub mod networks;
 pub mod settings;
@@ -29,7 +30,9 @@ pub fn engine_summary(connection: &Connection) -> (Status, SharedString, SharedS
             info.endpoint.to_string().into(),
         ),
         Connection::Disconnected { error } => {
-            (Status::Error, "Not connected".into(), error.clone().into())
+            let detail = engine_help::Problem::of(error)
+                .map_or_else(|| error.to_string(), |p| p.short().to_string());
+            (Status::Error, "Not connected".into(), detail.into())
         }
     }
 }

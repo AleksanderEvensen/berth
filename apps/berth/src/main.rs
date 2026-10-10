@@ -127,13 +127,13 @@ fn connector(target: EngineTarget) -> Connector {
             }
             EngineChoice::Host { host } => env.docker_host = Some(host),
         }
-        let discovered = discover(&env).map_err(|e| e.to_string())?;
+        let discovered = discover(&env)?;
         log::info!(
             "connecting to {} ({:?})",
             discovered.endpoint,
             discovered.source
         );
-        let engine = BollardEngine::connect(&discovered.endpoint).map_err(|e| e.to_string())?;
+        let engine = BollardEngine::connect(&discovered.endpoint)?;
         Ok(Arc::new(engine))
     })
 }

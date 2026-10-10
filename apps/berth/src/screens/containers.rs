@@ -21,6 +21,7 @@ use gpui::{
 use gpui_base::input::{InputEvent, InputState};
 
 use super::ShowVolume;
+use super::engine_help::{Problem, engine_help};
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
 use crate::live::{Live, LiveKey, LiveTab};
@@ -595,7 +596,7 @@ impl ContainersScreen {
                 .into_any_element(),
             Connection::Disconnected { error } => column
                 .child(title("Can't reach the engine"))
-                .child(detail(error.clone()))
+                .child(detail(error.to_string()))
                 .child(div().pt(px(Theme::SPACE_SM)).child(
                     Button::new("reconnect", "Retry").on_click(cx.listener(|this, _, _, cx| {
                         this.store.update(cx, Store::reconnect);
@@ -819,45 +820,56 @@ impl ContainersScreen {
             }));
 
         let bulk = self.selection.len() > 1;
-        let body: AnyElement = match (self.selection.single(), self.tab) {
-            (None, _) if bulk => self.render_bulk(store, cx),
-            (None, _) => empty_state(
-                "No selection",
-                "Select a container or compose stack to inspect it. \
-                 Shift- or Ctrl-click to select several.",
-                theme,
-            )
-            .into_any_element(),
-            (Some(Selection::Container(id)), 0) => {
-                store.containers().iter().find(|c| &c.id == id).map_or_else(
-                    || empty_state("Gone", "This container was removed.", theme).into_any_element(),
-                    |c| {
-                        scroll_page(container_info(c, self.env_of(c), theme, cx)).into_any_element()
-                    },
-                )
-            }
-            (Some(Selection::Stack(project)), 0) => {
-                let stack = tree
-                    .running
-                    .iter()
-                    .chain(&tree.stopped)
-                    .find_map(|n| match n {
-                        Node::Stack(s) if s.project == project => Some(s),
-                        _ => None,
-                    });
-                stack.map_or_else(
-                    || empty_state("Gone", "This stack was removed.", theme).into_any_element(),
-                    |stack| scroll_page(stack_info(stack, theme)).into_any_element(),
-                )
-            }
-            (Some(selection), tab) => self.live.view().map_or_else(
-                || {
-                    let (title, detail) = live_placeholder(selection, tab, store);
-                    empty_state(title, detail, theme).into_any_element()
-                },
-                gpui::AnyView::into_any_element,
-            ),
+        let problem = match store.connection() {
+            Connection::Disconnected { error } => Problem::of(error),
+            _ => None,
         };
+        let body: AnyElement = problem.as_ref().map_or_else(
+            || match (self.selection.single(), self.tab) {
+                (None, _) if bulk => self.render_bulk(store, cx),
+                (None, _) => empty_state(
+                    "No selection",
+                    "Select a container or compose stack to inspect it. \
+                 Shift- or Ctrl-click to select several.",
+                    theme,
+                )
+                .into_any_element(),
+                (Some(Selection::Container(id)), 0) => {
+                    store.containers().iter().find(|c| &c.id == id).map_or_else(
+                        || {
+                            empty_state("Gone", "This container was removed.", theme)
+                                .into_any_element()
+                        },
+                        |c| {
+                            scroll_page(container_info(c, self.env_of(c), theme, cx))
+                                .into_any_element()
+                        },
+                    )
+                }
+                (Some(Selection::Stack(project)), 0) => {
+                    let stack = tree
+                        .running
+                        .iter()
+                        .chain(&tree.stopped)
+                        .find_map(|n| match n {
+                            Node::Stack(s) if s.project == project => Some(s),
+                            _ => None,
+                        });
+                    stack.map_or_else(
+                        || empty_state("Gone", "This stack was removed.", theme).into_any_element(),
+                        |stack| scroll_page(stack_info(stack, theme)).into_any_element(),
+                    )
+                }
+                (Some(selection), tab) => self.live.view().map_or_else(
+                    || {
+                        let (title, detail) = live_placeholder(selection, tab, store);
+                        empty_state(title, detail, theme).into_any_element()
+                    },
+                    gpui::AnyView::into_any_element,
+                ),
+            },
+            |problem| scroll_page(engine_help(problem, theme)).into_any_element(),
+        );
 
         div()
             .flex_1()
@@ -877,7 +889,7 @@ impl ContainersScreen {
                     .items_center()
                     .justify_center()
                     .px(px(120.0))
-                    .when(!bulk, |d| d.child(tabs)),
+                    .when(!bulk && problem.is_none(), |d| d.child(tabs)),
             ))
             .child(div().flex_1().min_h_0().child(body))
     }

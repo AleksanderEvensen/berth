@@ -730,7 +730,7 @@ impl Render for ActivityScreen {
             )),
             Connection::Connected(_) => None,
             Connection::Connecting => Some(("Connecting…", "Looking for an engine".to_string())),
-            Connection::Disconnected { error } => Some(("Not connected", error.clone())),
+            Connection::Disconnected { error } => Some(("Not connected", error.to_string())),
         };
 
         let body = if let Some((title, detail)) = empty {

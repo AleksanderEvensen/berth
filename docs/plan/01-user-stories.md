@@ -37,7 +37,8 @@ socket isn't reachable.
   the `docker` group, labelled as root-equivalent.
 - Each option has a short explanation and copyable commands; Berth runs
   nothing itself and reconnects once a socket becomes reachable.
-- Not found lists the endpoints that were tried, with the same options.
+- Not found lists the endpoints that were tried, with the same options; the
+  last one becomes starting the system daemon (plus the `docker` group).
 
 ## B. Containers
 
