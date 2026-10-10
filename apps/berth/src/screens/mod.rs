@@ -47,6 +47,10 @@ pub struct ShowContainer(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowVolume(pub String);
 
+/// Asks the shell to open the engine fix-it guide on Settings → Engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShowEngineHelp;
+
 /// A card listing `users`; clicking a row emits [`ShowContainer`].
 pub fn used_by<V: EventEmitter<ShowContainer>>(
     users: &[&Container],

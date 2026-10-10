@@ -26,8 +26,8 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] A2 — Collapsible sidebar (`ctrl+b`/`cmd+b`), animated, persisted.
   - [x] A4 — Linux CSD window chrome.
   - [x] A5 — Engine status in the sidebar footer. On permission denied or
-        no engine found, the footer links to a fix-it guide (also on the
-        Containers detail pane and Settings → Engine): rootless Docker,
+        no engine found, the footer and a "How to fix" button on the
+        Containers list open the fix-it guide on Settings → Engine: rootless Docker,
         rootless Podman, then the `docker` group flagged root-equivalent, with
         copyable commands.
   - [x] B1 — Running / Stopped sections with counts.

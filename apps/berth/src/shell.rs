@@ -16,7 +16,7 @@ use crate::chrome;
 use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
 use crate::preferences;
 use crate::screens::{
-    Chrome, ShowContainer, ShowVolume,
+    Chrome, ShowContainer, ShowEngineHelp, ShowVolume,
     activity::ActivityScreen,
     cleanup::CleanupScreen,
     containers::ContainersScreen,
@@ -147,6 +147,14 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &containers,
+            window,
+            |this, _, _: &ShowEngineHelp, window, cx| {
+                this.show_engine_help(window, cx);
+            },
+        )
+        .detach();
 
         Self {
             focus,
@@ -249,6 +257,13 @@ impl Shell {
 
     fn open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(Route::Settings, window, cx);
+    }
+
+    /// The engine fix-it guide lives on Settings → Engine.
+    fn show_engine_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Route::Settings, window, cx);
+        self.settings
+            .update(cx, |screen, cx| screen.set_page(Page::Engine, cx));
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -404,9 +419,7 @@ impl Shell {
                     .when(fixable, |d| {
                         d.cursor_pointer()
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_settings(&OpenSettings, window, cx);
-                                this.settings
-                                    .update(cx, |screen, cx| screen.set_page(Page::Engine, cx));
+                                this.show_engine_help(window, cx);
                             }))
                     })
                     .child(
