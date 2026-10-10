@@ -511,8 +511,7 @@ impl ContainersScreen {
                             this.open_search(window, cx);
                         }
                     })),
-            )
-            .action(IconButton::new("new-container", icons::PLUS));
+            );
 
         let body: AnyElement = if self.rows.is_empty() {
             self.render_list_placeholder(store, cx)
