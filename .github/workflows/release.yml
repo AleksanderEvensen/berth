@@ -8,6 +8,20 @@ on:
       tag:
         type: string
         required: true
+    # For signing and notarizing the .dmg; the macos job checks they are set.
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
   workflow_dispatch:
 
 permissions:
@@ -60,10 +74,83 @@ jobs:
             target/packager/*.tar.gz
           if-no-files-found: error
 
+  macos:
+    name: Universal .dmg
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --target aarch64-apple-darwin --target x86_64-apple-darwin
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v4
+
+      - name: Install cargo-packager
+        run: cargo install --locked cargo-packager@0.11.8
+
+      # A release must ship signed and notarized; a manual run without the
+      # secrets builds an unsigned .dmg.
+      - name: Check signing secrets
+        if: inputs.tag != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::secret $name is not set"
+              exit 1
+            fi
+          done
+
+      # The Developer ID Application certificate (base64 .p12) goes into a
+      # throwaway keychain that codesign searches.
+      - name: Import signing certificate
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -base64 32)
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -f pkcs12 -t cert -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+      - name: Package
+        run: just package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-packages
+          path: target/packager/*.dmg
+          if-no-files-found: error
+
   upload:
     name: Attach to the GitHub release
     if: inputs.tag != ''
-    needs: packages
+    needs: [packages, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

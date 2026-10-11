@@ -60,8 +60,71 @@ build-ci:
 test-ci:
     cargo +stable test --locked --workspace --profile ci
 
+# Build the release packages into target/packager: deb, AppImage and tar.gz.
+[linux]
 package:
     NO_STRIP=true cargo packager --release -p berth
+
+# Build a universal Berth.app and Berth_<version>_universal.dmg into
+# target/packager. With APPLE_SIGNING_IDENTITY set (a "Developer ID
+# Application" identity in the keychain) both are signed, the app with the
+# hardened runtime; with APPLE_ID, APPLE_PASSWORD (an app-specific password)
+# and APPLE_TEAM_ID too, the .dmg is notarized and its ticket stapled.
+[macos]
+[script("bash")]
+package:
+    set -euo pipefail
+    cargo packager --release -p berth --target universal-apple-darwin --formats app
+
+    app=target/packager/Berth.app
+    version=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$app/Contents/Info.plist")
+    dmg="target/packager/Berth_${version}_universal.dmg"
+    identity=${APPLE_SIGNING_IDENTITY:-}
+
+    if [[ -n $identity ]]; then
+        codesign --force --options runtime --timestamp --sign "$identity" "$app"
+        codesign --verify --strict --verbose=2 "$app"
+    else
+        echo "APPLE_SIGNING_IDENTITY is not set: the app and .dmg are unsigned" >&2
+    fi
+
+    stage=$(mktemp -d)
+    trap 'rm -rf "$stage"' EXIT
+    ditto "$app" "$stage/Berth.app"
+    ln -s /Applications "$stage/Applications"
+    rm -f "$dmg"
+    hdiutil create -volname Berth -srcfolder "$stage" -fs HFS+ -format UDZO "$dmg"
+
+    [[ -n $identity ]] || exit 0
+    codesign --force --timestamp --sign "$identity" "$dmg"
+
+    if [[ -z ${APPLE_ID:-} || -z ${APPLE_PASSWORD:-} || -z ${APPLE_TEAM_ID:-} ]]; then
+        echo "APPLE_ID, APPLE_PASSWORD or APPLE_TEAM_ID is not set: the .dmg is not notarized" >&2
+        exit 0
+    fi
+    # Notarizing the .dmg covers the app inside it; stapling lets Gatekeeper
+    # check it offline.
+    xcrun notarytool submit "$dmg" --wait \
+        --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+    xcrun stapler staple "$dmg"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+
+# Run by cargo-packager first (before-packaging-command): the release binary
+# and, on Linux, the desktop entry.
+[linux]
+before-packaging:
+    cargo build --locked --release -p berth
+    just desktop-entry
+
+# Both architectures, merged into the universal binary where cargo-packager's
+# `--target universal-apple-darwin` looks for it.
+[macos]
+before-packaging:
+    MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --locked --release -p berth --target aarch64-apple-darwin
+    MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --locked --release -p berth --target x86_64-apple-darwin
+    mkdir -p target/universal-apple-darwin/release
+    lipo -create -output target/universal-apple-darwin/release/berth \
+        target/aarch64-apple-darwin/release/berth target/x86_64-apple-darwin/release/berth
 
 # Write the Linux desktop entry from apps/berth/Cargo.toml, so the manifest is
 # the one source for the app ID, name, summary and keywords. cargo-packager

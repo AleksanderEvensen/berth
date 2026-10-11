@@ -103,6 +103,9 @@ pub fn drag_region(id: &'static str, el: Div) -> Stateful<Div> {
         })
         .on_click(|event, window, _| {
             if event.click_count() == 2 {
+                #[cfg(target_os = "macos")]
+                window.titlebar_double_click();
+                #[cfg(not(target_os = "macos"))]
                 window.zoom_window();
             }
         })

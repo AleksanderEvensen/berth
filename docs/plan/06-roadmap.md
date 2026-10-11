@@ -10,12 +10,14 @@ with a note saying what is missing.
 Windows named pipe) is in; the rest of M5 is not.
 
 ## M0 — Visual prototype ✅
+
 - [x] Workspace: `apps/berth`, `crates/ui`, `crates/docker`.
 - [x] Theme tokens ported from zeron (dark), Geist fonts, Solar icons.
 - [x] Collapsible sidebar component; Containers screen (list + Info tab) on fixture data.
 - [x] Linux CSD titlebar: drag, double-click maximize, caption buttons.
 
 ## M1 — Real engine, containers (P0) ✅
+
 - [x] `Engine` trait + `BollardEngine`; discovery (FR-1); disconnected state.
 - [x] Event-driven store (FR-2), optimistic lifecycle actions (FR-4/5).
 - [x] Container Info on real inspect data; open-port links; confirm dialog; toasts.
@@ -40,6 +42,7 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] B10 — Search/filter the container list.
 
 ## M2 — Volumes, images, cleanup (P0) ✅
+
 - [x] Volumes + Images screens, multi-selection model (FR-12), bulk delete.
 - [x] `/system/df` sizes; Clean-up page with prunes (G1).
 - [x] FR-12 keyboard parts: `ctrl+a` selects every listed row, `Esc` clears
@@ -56,6 +59,7 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] G1 — Clean-up page: per-category reclaimable space, pick, prune, report.
 
 ## M3 — Live views (P1) ✅
+
 - [x] Logs (virtualized, ANSI), Stats sparklines, Terminal (exec), Activity monitor.
 - Stories:
   - [x] B6 — Logs: follow, filter, timestamps, copy, clear, ANSI (wrap toggle deferred to M4).
@@ -64,6 +68,7 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] F1 — Activity monitor tree table, sortable, totals and sparklines.
 
 ## M4 — Polish & ship Linux (P1) ✅
+
 - [x] Light theme.
 - [x] Accent picker.
 - [x] Settings persistence (FR-14, `$XDG_CONFIG_HOME/berth/`).
@@ -104,15 +109,24 @@ Windows named pipe) is in; the rest of M5 is not.
         clickable used-by, labels.
 
 ## M5 — macOS / Windows
-- [ ] macOS: traffic-light inset chrome (titlebar already clears the traffic lights).
+
+- [x] macOS: traffic-light inset chrome. The traffic lights sit centred in our
+      header and the titlebar clears them; the app owns titlebar dragging
+      (`app_owns_titlebar_drag`), so AppKit neither drags from its own strip
+      over our buttons nor delays clicks there, and a double-click does what
+      System Settings → Desktop & Dock says.
 - [x] macOS: context-socket discovery (Docker contexts, then Docker Desktop /
       OrbStack / Colima sockets).
-- [ ] macOS: signed, notarized universal `.dmg`.
+- [x] macOS: signed, notarized universal `.dmg`. `just package` builds the
+      universal app and `.dmg`, signing and notarizing when the `APPLE_*`
+      variables are set, and the release workflow attaches it. Missing: the
+      Developer ID secrets in the repository and a release that ships one.
 - [x] Windows: named pipe (`npipe://`, default `//./pipe/docker_engine`).
 - [ ] Windows: caption buttons.
 - [ ] Windows: MSI.
 
 ## Later (P2)
+
 - [ ] B9 — Container Files tab.
 - [ ] C5 — Browse volume files.
 - [ ] B12 — Run-container form.

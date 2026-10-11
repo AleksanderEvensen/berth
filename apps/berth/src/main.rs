@@ -55,6 +55,7 @@ fn main() {
                     // negotiate server decorations; chrome re-resolves per frame.
                     window_decorations: cfg!(any(target_os = "linux", target_os = "freebsd"))
                         .then_some(WindowDecorations::Client),
+                    app_owns_titlebar_drag: true,
                     app_id: Some("no.ahse.berth".into()),
                     ..Default::default()
                 },

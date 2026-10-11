@@ -47,9 +47,15 @@ or the default sockets; it does not ship a runtime or a VM."""
 category = "DeveloperTool"
 license-file = "../../LICENSE"
 icons = ["packaging/linux/icons/*.png"]
+# The Linux formats; `just package` picks `app` on macOS.
 formats = ["deb", "appimage", "pacman"]
-before-packaging-command = "cargo build --locked --release -p berth && just desktop-entry"
+before-packaging-command = "just before-packaging"
 out-dir = "../../target/packager"
+
+# The .dmg is built, signed and notarized by `just package` around the .app.
+[package.metadata.packager.macos]
+# gpui's floor; keep in step with MACOSX_DEPLOYMENT_TARGET in the justfile.
+minimum-system-version = "10.15.7"
 
 # Desktop entry fields with no Cargo or cargo-packager key.
 [package.metadata.desktop]

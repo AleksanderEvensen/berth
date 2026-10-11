@@ -20,6 +20,7 @@ just test -p berth-docker # tests for one crate
 just test-docker          # ignored integration tests; requires Docker
 just verify               # formatting check → check → lint → tests
 just ci                   # reproduce CI, including its build step
+just package              # release packages into target/packager
 ```
 
 ## Run
@@ -38,7 +39,8 @@ lists every shortcut (Settings → Shortcuts).
 GitHub Actions runs on pull requests and pushes to `main`. On `main`,
 [release-plz](https://release-plz.dev) keeps a release PR open that bumps the
 version and updates `CHANGELOG.md` from the conventional commits; merging it tags
-`v<version>`, creates the GitHub release and attaches the Linux packages. Formatting gates the
+`v<version>`, creates the GitHub release and attaches the Linux packages and the
+signed, notarized universal macOS `.dmg`. Formatting gates the
 slower checks; Clippy, building all targets, and tests then run in order on one
 Linux runner, sharing build artifacts and a dependency cache. New commits cancel
 superseded runs.
