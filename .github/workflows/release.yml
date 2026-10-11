@@ -1,0 +1,83 @@
+name: Release
+
+# Called by release-plz.yml with the new tag. A manual run only builds the
+# packages, as artifacts.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  packages:
+    name: deb, AppImage, tar.gz
+    # The oldest supported base: the binary needs this glibc or newer.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            pkg-config libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libssl-dev libvulkan-dev file
+
+      - uses: extractions/setup-just@v4
+
+      - name: Install cargo-packager
+        run: cargo install --locked cargo-packager@0.11.8
+
+      - name: Package
+        run: just package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            target/packager/*.deb
+            target/packager/*.AppImage
+            target/packager/*.tar.gz
+          if-no-files-found: error
+
+  upload:
+    name: Attach to the GitHub release
+    if: inputs.tag != ''
+    needs: packages
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          (cd release && sha256sum * > SHA256SUMS)
+          gh release upload "$TAG" release/* --clobber

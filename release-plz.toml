@@ -1,0 +1,15 @@
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+release = false
+semver_check = false
+release_always = false
+
+[[package]]
+name = "berth"
+release = true
+git_tag_enable = true
+git_release_enable = true
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["berth-ui", "berth-docker", "berth-terminal", "berth-settings"]

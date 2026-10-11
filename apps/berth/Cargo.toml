@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Native desktop app for managing your Docker or Podman engine"
+repository = "https://github.com/AleksanderEvensen/berth"
+homepage = "https://github.com/AleksanderEvensen/berth"
+authors = ["Aleksander Evensen <ahse03@gmail.com>"]
+keywords = ["docker", "podman", "container", "compose", "image", "volume"]
 
 [dependencies]
 berth-ui.workspace = true
@@ -31,3 +36,57 @@ raw-window-handle.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.packager]
+product-name = "Berth"
+identifier = "no.ahse.berth"
+long-description = """\
+Berth is a fast, native desktop app for the container engine you already \
+run. It connects to Docker or Podman through DOCKER_HOST, Docker contexts \
+or the default sockets; it does not ship a runtime or a VM."""
+category = "DeveloperTool"
+license-file = "../../LICENSE"
+icons = ["packaging/linux/icons/*.png"]
+formats = ["deb", "appimage", "pacman"]
+before-packaging-command = "cargo build --locked --release -p berth && just desktop-entry"
+out-dir = "../../target/packager"
+
+# Desktop entry fields with no Cargo or cargo-packager key.
+[package.metadata.desktop]
+generic-name = "Container Manager"
+
+[package.metadata.packager.linux]
+generate-desktop-entry = false
+
+# The binary links xcb and xkbcommon and opens libwayland-client and the
+# Vulkan loader at runtime, so both are listed.
+[package.metadata.packager.deb]
+section = "devel"
+depends = [
+    "libc6 (>= 2.39)",
+    "libgcc-s1",
+    "libxcb1",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libwayland-client0",
+    "libvulkan1",
+    "hicolor-icon-theme",
+]
+
+[package.metadata.packager.deb.files]
+"../../target/packaging/linux/no.ahse.berth.desktop" = "usr/share/applications/no.ahse.berth.desktop"
+"packaging/linux/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
+"../../LICENSE" = "usr/share/doc/berth/copyright"
+
+# The AppImage's desktop entry must be named after the binary.
+[package.metadata.packager.appimage.files]
+"../../target/packaging/linux/no.ahse.berth.desktop" = "usr/share/applications/berth.desktop"
+"packaging/linux/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
+
+# The pacman format is only used for its .tar.gz: the same usr/ tree as the
+# .deb, to unpack under / or ~/.local. The PKGBUILD it also writes is not
+# released, so it has no depends or source.
+[package.metadata.packager.pacman.files]
+"../../target/packaging/linux/no.ahse.berth.desktop" = "usr/share/applications/no.ahse.berth.desktop"
+"packaging/linux/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
+"../../LICENSE" = "usr/share/licenses/berth/LICENSE"

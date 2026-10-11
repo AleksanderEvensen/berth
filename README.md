@@ -35,7 +35,10 @@ lists every shortcut (Settings → Shortcuts).
 
 ## CI
 
-GitHub Actions runs on pull requests and pushes to `main`. Formatting gates the
+GitHub Actions runs on pull requests and pushes to `main`. On `main`,
+[release-plz](https://release-plz.dev) keeps a release PR open that bumps the
+version and updates `CHANGELOG.md` from the conventional commits; merging it tags
+`v<version>`, creates the GitHub release and attaches the Linux packages. Formatting gates the
 slower checks; Clippy, building all targets, and tests then run in order on one
 Linux runner, sharing build artifacts and a dependency cache. New commits cancel
 superseded runs.

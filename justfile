@@ -59,3 +59,51 @@ build-ci:
 # Test using the faster CI profile.
 test-ci:
     cargo +stable test --locked --workspace --profile ci
+
+package:
+    NO_STRIP=true cargo packager --release -p berth
+
+# Write the Linux desktop entry from apps/berth/Cargo.toml, so the manifest is
+# the one source for the app ID, name, summary and keywords. cargo-packager
+# runs this as part of before-packaging-command.
+[positional-arguments]
+[script("python3")]
+desktop-entry out="target/packaging/linux":
+    import json, subprocess, sys
+    from pathlib import Path
+
+    metadata = json.loads(subprocess.run(
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        check=True, capture_output=True, text=True,
+    ).stdout)
+
+    package = next(p for p in metadata["packages"] if p["name"] == "berth")
+    packager = package["metadata"]["packager"]
+
+    # The freedesktop category comes from cargo-packager's category name (fails
+    # on one not listed here) and Exec from the binary target's name.
+    categories = {"DeveloperTool": "Development"}
+
+    if packager["category"] not in categories:
+        sys.exit(f"no freedesktop category for {packager['category']}")
+
+    binary = next(t["name"] for t in package["targets"] if "bin" in t["kind"])
+
+    out = Path(sys.argv[1])
+    out.mkdir(parents=True, exist_ok=True)
+
+    (out / f"{packager['identifier']}.desktop").write_text(f"""\
+    [Desktop Entry]
+    Type=Application
+    Name={packager["product-name"]}
+    GenericName={package["metadata"]["desktop"]["generic-name"]}
+    Comment={package["description"]}
+    Exec={binary}
+    TryExec={binary}
+    Icon={packager["identifier"]}
+    Terminal=false
+    StartupNotify=true
+    StartupWMClass={packager["identifier"]}
+    Categories={categories[packager["category"]]};
+    Keywords={";".join(package["keywords"])};
+    """)

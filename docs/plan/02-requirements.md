@@ -43,9 +43,9 @@
 ### Platform
 | ID | Requirement |
 | --- | --- |
-| NFR-X1 | Linux: Wayland (CSD with own caption buttons, honouring the desktop's button layout) and X11. Ship as AppImage + Flatpak + `.deb`/`.rpm`/AUR. |
+| NFR-X1 | Linux: Wayland (CSD with own caption buttons, honouring the desktop's button layout) and X11. Ship as AppImage, `.deb` and `.tar.gz`. |
 | NFR-X2 | macOS: inset traffic lights, app-owned titlebar drag. Universal binary, notarized `.dmg`. |
-| NFR-X3 | Windows: native caption buttons via `WindowControlArea`, MSI/winget. |
+| NFR-X3 | Windows: native caption buttons via `WindowControlArea`, MSI. |
 
 ### Engineering
 | ID | Requirement |

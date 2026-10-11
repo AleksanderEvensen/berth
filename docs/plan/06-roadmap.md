@@ -5,9 +5,8 @@ and meets the acceptance criteria of its story in
 [01-user-stories.md](01-user-stories.md). Partially done items stay unticked
 with a note saying what is missing.
 
-**Status (audited 2026-10-09, at `ce159f2`):** M0–M3 done. M4 has started: settings screen, light theme, accent
-picker, reduce motion, persistence, the keyboard map, the Networks screen and
-full volume and image info (C4, D4) are in. M5 endpoint discovery (macOS context sockets,
+**Status (audited 2026-10-09, at `ce159f2`):** M0–M4 done; M4 ended with Linux packaging
+(AppImage, .deb, .tar.gz). M5 endpoint discovery (macOS context sockets,
 Windows named pipe) is in; the rest of M5 is not.
 
 ## M0 — Visual prototype ✅
@@ -64,7 +63,7 @@ Windows named pipe) is in; the rest of M5 is not.
   - [x] B8 — Terminal: interactive exec with tty.
   - [x] F1 — Activity monitor tree table, sortable, totals and sparklines.
 
-## M4 — Polish & ship Linux (P1)
+## M4 — Polish & ship Linux (P1) ✅
 - [x] Light theme.
 - [x] Accent picker.
 - [x] Settings persistence (FR-14, `$XDG_CONFIG_HOME/berth/`).
@@ -85,12 +84,13 @@ Windows named pipe) is in; the rest of M5 is not.
 - [x] Networks screen.
 - Deferred from M3:
   - [x] Logs wrap toggle.
-- Packaging:
-  - [ ] AppImage
-  - [ ] Flatpak
-  - [ ] AUR
-  - [ ] .deb
-  - [ ] .rpm
+- Packaging (NFR-X1): one app ID, `no.ahse.berth`, for the
+  desktop entry, icon and the window's `app_id`. Packages ship only as
+  GitHub release assets: merging the release-plz release PR tags `v*` and
+  attaches them to the GitHub release.
+  - [x] AppImage (cargo-packager).
+  - [x] .deb (cargo-packager).
+  - [x] .tar.gz of the installed tree (cargo-packager's pacman format).
 - Stories:
   - [x] E1 — Networks: list (driver, scope, subnet, attached containers), delete, prune unused.
         Swarm networks count as possibly in use (services on other nodes have no
