@@ -1,3 +1,7 @@
+# Windows PowerShell ships with every Windows install, so recipes run without
+# Git Bash or another `sh` on the PATH.
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
+
 # List available actions when invoked without a recipe.
 default:
     @just --list
@@ -111,13 +115,17 @@ package:
 
 # Build the portable Windows executable, target/packager/Berth_<version>_x64.exe.
 [windows]
-[script("bash")]
+[script("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
+[extension(".ps1")]
 package:
-    set -euo pipefail
+    $ErrorActionPreference = 'Stop'
     cargo build --locked --release -p berth
-    id=$(cargo pkgid -p berth)
-    mkdir -p target/packager
-    cp target/release/berth.exe "target/packager/Berth_${id##*[#@]}_x64.exe"
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    $id = cargo pkgid -p berth
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    $version = $id -replace '^.*[#@]', ''
+    New-Item -ItemType Directory -Force target/packager | Out-Null
+    Copy-Item target/release/berth.exe "target/packager/Berth_${version}_x64.exe"
 
 # Render the app icon from its SVG, the one source for every platform: the
 # PNGs (the Linux packages, and the macOS .icns cargo-packager makes from them)
