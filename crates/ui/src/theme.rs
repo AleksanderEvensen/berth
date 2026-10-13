@@ -1,8 +1,6 @@
 //! Theme tokens.
 //!
-//! Token names and roles follow zeron's theme (reference/zeron-source-code,
-//! `crates/ui/src/theme.rs`, MIT) so the two can be compared side by side:
-//! near-black achromatic planes with tiny elevation steps, white ink at low
+//! Near-black achromatic planes with tiny elevation steps, white ink at low
 //! alpha for interaction, hairline borders, one accent hue.
 //!
 //! **Numbers drive layout, colors are paint**: layout constants live here as
@@ -206,7 +204,7 @@ impl Theme {
         }
     }
 
-    /// Light is designed, not inverted (see docs/plan/04-design-system.md):
+    /// Light is designed, not inverted:
     /// content plane white, chrome grey, accents one step darker.
     #[must_use]
     pub fn light() -> Self {
@@ -279,8 +277,8 @@ impl Theme {
     }
 }
 
-/// Authored accent tones (zeron's accent presets): the 400-ish step in dark,
-/// the 600-ish step in light so text and focus rings keep AA contrast.
+/// Authored accent tones: the 400-ish step in dark, the 600-ish step in light
+/// so text and focus rings keep AA contrast.
 fn accent_tone(accent: Accent, appearance: Appearance) -> Hsla {
     let dark = appearance == Appearance::Dark;
     let (lightness, chroma, hue) = match accent {

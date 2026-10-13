@@ -34,29 +34,6 @@ Linux needs the usual gpui system libraries (Wayland/X11, xkbcommon, fontconfig,
 Vulkan driver). `ctrl+b` toggles the sidebar, `ctrl+q` quits, and `ctrl+/`
 lists every shortcut (Settings → Shortcuts).
 
-## CI
-
-GitHub Actions runs on pull requests and pushes to `main`. On `main`,
-[release-plz](https://release-plz.dev) keeps a release PR open that bumps the
-version and updates `CHANGELOG.md` from the conventional commits; merging it tags
-`v<version>`, creates the GitHub release and attaches the Linux packages, the
-signed, notarized universal macOS `.dmg` and the portable Windows `.exe`.
-Formatting gates the slower checks; Clippy, building all targets, and tests
-then run in order on one Linux runner, sharing build artifacts and a dependency
-cache. New commits cancel superseded runs.
-
-To run the same checks locally:
-
-```sh
-cargo +stable fmt --all -- --check
-cargo +stable clippy --locked --workspace --all-targets --profile ci -- -D warnings
-cargo +stable build --locked --workspace --all-targets --profile ci
-cargo +stable test --locked --workspace --profile ci
-```
-
-The `ci` profile disables dependency optimization and debug information to reduce
-compilation time; normal development and release profiles retain their settings.
-`just ci` runs the commands above in order and stops on the first failure..
 
 ## Layout
 
@@ -64,7 +41,7 @@ compilation time; normal development and release profiles retain their settings.
 apps/berth      the app: window chrome, shell, screens
 crates/ui       design system: theme tokens, Geist fonts, Solar icons, components
 crates/docker   engine domain model, container grouping, fixtures
-docs/plan       plan documents
+docs            user stories, requirements, roadmap
 ```
 
 ## Credits

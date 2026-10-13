@@ -5,7 +5,7 @@ projects locally (databases, caches, mail sinks, object storage), switches
 between them through the day, and periodically runs out of disk because of old
 images and volumes.
 
-IDs are referenced from [02-requirements.md](02-requirements.md) and the roadmap.
+IDs are referenced from [requirements](requirements.md) and the [roadmap](roadmap.md).
 Priority: **P0** = MVP, **P1** = v1, **P2** = later.
 
 ---

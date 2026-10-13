@@ -46,7 +46,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = 
     "font-kit",
 ] }
 # Behaviour-only foundations (inputs, focus, virtual lists, popovers). We style
-# everything ourselves — see docs/plan/04-design-system.md.
+# everything ourselves in crates/ui.
 gpui-base = "=0.7.1"
 # Reading the native macOS window buttons' frames; versions match gpui-pre-macos.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [

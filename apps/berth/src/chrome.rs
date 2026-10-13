@@ -1,8 +1,7 @@
 //! Window chrome for client-side decorations: the resizable shadowed frame,
 //! titlebar drag regions and Linux and Windows caption buttons.
 //!
-//! Follows Zed's `window_shadow` example and zeron's titlebar handling
-//! (`shell.rs` `titlebar_drag_region` / `linux_caption_button`).
+//! Follows Zed's `window_shadow` example.
 
 use std::cell::Cell;
 

@@ -3,7 +3,7 @@
 //! Implementations: [`crate::fixtures::FixtureEngine`] (in-memory, for the UI
 //! prototype and tests) and the bollard-backed live client (M1).
 //!
-//! Design rules (docs/plan/03-architecture.md):
+//! Design rules:
 //! - Methods return Berth's own model types, never client-library types.
 //! - Futures and streams are `'static + Send` so the caller can drive them on
 //!   any executor; implementations clone whatever handle they need.

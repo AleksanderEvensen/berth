@@ -1,5 +1,28 @@
 # Requirements
 
+## Product principles
+
+1. **Instant.** Every interaction responds within one frame. Lists are virtualized,
+   engine I/O never blocks the UI thread, state updates come from the engine's
+   event stream instead of polling.
+2. **The common actions are one click.** Start / stop / restart / delete a
+   container or a whole compose stack, delete a volume, prune dangling images —
+   directly on the row, on hover, without opening anything.
+3. **Bulk is first-class.** Multi-select (click, shift-click, ctrl/cmd-click) and
+   act on the selection. "Clean up" is a guided action, not a CLI flag hunt.
+4. **Safe by default.** Destructive actions confirm once, say exactly what will be
+   removed and how much space is reclaimed, and never touch in-use resources
+   unless asked.
+5. **Use the user's engine.** Berth is a client, not a runtime. It connects to
+   `DOCKER_HOST` / Docker contexts / the default socket. No bundled VM on Linux.
+6. **Quiet, dense, beautiful.** Near-black surfaces, hairline borders, Geist
+   typography, a single accent hue, restrained motion.
+
+### Non-goals
+- Shipping a container runtime or VM. On macOS/Windows Berth connects to an
+  existing engine (Docker Desktop, OrbStack, Colima, Podman machine, Rancher).
+- Kubernetes management beyond a read-mostly view.
+
 ## Functional
 
 | ID | Requirement | Stories |
@@ -35,7 +58,7 @@
 | ID | Requirement |
 | --- | --- |
 | NFR-U1 | Every action is reachable by keyboard; focus is always visible. |
-| NFR-U2 | Light and dark themes are both designed (not inverted) — see design system. |
+| NFR-U2 | Light and dark themes are both designed (not inverted). |
 | NFR-U3 | Text contrast ≥ WCAG AA for body copy in both appearances. |
 | NFR-U4 | Motion ≤ 200 ms, ease-out; respects reduce-motion. |
 | NFR-U5 | Empty, loading, disconnected and error states are designed for every screen. |

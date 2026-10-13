@@ -2,7 +2,7 @@
 //!
 //! These are Berth's own types — never bollard's — so the UI can run against
 //! fixtures (tests, screenshots, design work) exactly as it runs against a
-//! live engine. See docs/plan/03-architecture.md.
+//! live engine.
 
 pub mod discovery;
 mod engine;

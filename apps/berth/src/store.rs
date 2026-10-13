@@ -1,7 +1,7 @@
 //! The app's view of the engine: an event-driven, in-memory model that
 //! screens observe.
 //!
-//! Flow (docs/plan/03-architecture.md, "State flow"):
+//! Flow:
 //! 1. Subscribe to engine events, then load `info` + the container list.
 //! 2. Each container event triggers a targeted re-inspect of that container.
 //! 3. User operations mark the container *pending* immediately; when the

@@ -1,6 +1,6 @@
-//! Settings-page building blocks, after zeron's settings widgets: a large page
-//! title, muted section labels over filled groups of hairline-split rows, and
-//! the pickers that sit in those rows.
+//! Settings-page building blocks: a large page title, muted section labels
+//! over filled groups of hairline-split rows, and the pickers that sit in
+//! those rows.
 
 use std::rc::Rc;
 

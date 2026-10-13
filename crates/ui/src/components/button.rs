@@ -147,8 +147,8 @@ impl RenderOnce for IconButton {
     }
 }
 
-/// A text button. `Solid` is the high-contrast primary plate (zeron's
-/// `solid`/`on_solid`), `Ghost` is a bordered secondary.
+/// A text button. `Solid` is the high-contrast primary plate, `Ghost` is a
+/// bordered secondary.
 #[derive(IntoElement)]
 #[must_use]
 pub struct Button {
