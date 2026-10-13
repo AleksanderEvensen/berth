@@ -657,7 +657,7 @@ mod tests {
         let script = entries.iter().find(|e| e.name == "entrypoint.sh").unwrap();
         assert_eq!((script.kind, script.size), (FileKind::File, Some(12)));
         assert_eq!(script.modified, Some(1_700_000_000));
-        assert!(parse_listing(DIR, b"").unwrap().is_empty());
+        assert_eq!(parse_listing(DIR, b"").unwrap(), []);
         assert!(parse_listing(DIR, b"garbage\n").is_err());
     }
 

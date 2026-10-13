@@ -23,9 +23,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+        run: rustup toolchain install
       - id: release-plz
         uses: release-plz/action@v0.5
         with:
@@ -68,9 +66,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+        run: rustup toolchain install
       - uses: release-plz/action@v0.5
         with:
           command: release-pr

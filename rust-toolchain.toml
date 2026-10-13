@@ -1,0 +1,6 @@
+# Pin the Rust release so local machines and CI lint, build, and test alike.
+# Bump deliberately, and fix any new lints in the same change.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

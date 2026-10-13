@@ -273,7 +273,7 @@ fn browse_a_volume(endpoint: &Endpoint, runtime: &Runtime, docker: &Docker, name
     assert!(mount.confined);
     let helper = block_on(engine.inspect_container(&mount.container)).unwrap();
     assert!(helper.is_helper());
-    assert!(list(&engine, &mount, "/").unwrap().is_empty());
+    assert_eq!(list(&engine, &mount, "/").unwrap(), []);
 
     // Dropping the engine first must not strand the helper.
     let helper_id = mount.container.clone();

@@ -28,7 +28,7 @@ fmt:
 
 # Check formatting without changing files.
 fmt-check:
-    cargo +stable fmt --all -- --check
+    cargo fmt --all -- --check
 
 # Lint every workspace target, treating warnings as errors.
 lint:
@@ -50,15 +50,15 @@ ci: fmt-check lint-ci build-ci test-ci
 
 # Lint using the faster CI profile.
 lint-ci:
-    cargo +stable clippy --locked --workspace --all-targets --profile ci -- -D warnings
+    cargo clippy --locked --workspace --all-targets --profile ci -- -D warnings
 
 # Build all targets using the faster CI profile.
 build-ci:
-    cargo +stable build --locked --workspace --all-targets --profile ci
+    cargo build --locked --workspace --all-targets --profile ci
 
 # Test using the faster CI profile.
 test-ci:
-    cargo +stable test --locked --workspace --profile ci
+    cargo test --locked --workspace --profile ci
 
 # Build the release packages into target/packager: deb, AppImage and tar.gz.
 [linux]
