@@ -642,12 +642,10 @@ dependencies = [
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
+ "gpui-window-chrome",
  "log",
  "num-traits",
- "objc2-app-kit 0.3.2",
- "raw-window-handle",
  "tempfile",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -2891,6 +2889,20 @@ name = "gpui-pre-ztracing-macro"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d337c9acf058238e45ce0570d8a5958439242889492f91ae2d8e324211a61ccd"
+
+[[package]]
+name = "gpui-window-chrome"
+version = "0.1.0"
+dependencies = [
+ "gpui-pre",
+ "image",
+ "libloading",
+ "log",
+ "num-traits",
+ "objc2-app-kit 0.3.2",
+ "raw-window-handle",
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "h2"

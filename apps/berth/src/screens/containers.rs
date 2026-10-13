@@ -21,7 +21,7 @@ use gpui::{
 use gpui_base::input::{InputEvent, InputState};
 
 use super::engine_help::Problem;
-use super::{ListOp, ListScreen, ShowEngineHelp, ShowVolume};
+use super::{Chrome, ListOp, ListScreen, ShowEngineHelp, ShowVolume};
 use crate::chrome;
 use crate::dialogs::ConfirmRequest;
 use crate::keymap::{MENU_CONTEXT, MenuCancel, MenuConfirm, MenuNext, MenuPrev};
@@ -105,9 +105,7 @@ pub struct ContainersScreen {
     search: Option<(Entity<InputState>, Subscription)>,
     /// Lower-cased, trimmed search query; empty = no filter.
     query: String,
-    header_inset: f32,
-    left_radius: f32,
-    right_radius: f32,
+    chrome: Chrome,
     rows: VirtualRows<Row>,
     /// Compose project → member container ids, in service order.
     stack_members: HashMap<String, Vec<String>>,
@@ -146,9 +144,7 @@ impl ContainersScreen {
             tab: 0,
             search: None,
             query: String::new(),
-            header_inset: 0.0,
-            left_radius: 0.0,
-            right_radius: 0.0,
+            chrome: Chrome::default(),
             rows: VirtualRows::new(),
             stack_members: HashMap::new(),
             index: HashMap::new(),
@@ -387,11 +383,9 @@ impl ContainersScreen {
 
     /// Layout facts owned by the shell: clearance for the floating sidebar
     /// toggle and the window's outer corner radii.
-    pub fn set_chrome(&mut self, header_inset: f32, left: f32, right: f32, cx: &mut Context<Self>) {
-        if (self.header_inset, self.left_radius, self.right_radius) != (header_inset, left, right) {
-            self.header_inset = header_inset;
-            self.left_radius = left;
-            self.right_radius = right;
+    pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
+        if self.chrome != chrome {
+            self.chrome = chrome;
             cx.notify();
         }
     }
@@ -710,7 +704,7 @@ impl ContainersScreen {
         };
         let header = ListHeader::new("Containers")
             .subtitle(subtitle)
-            .leading_inset(self.header_inset)
+            .leading_inset(self.chrome.header_inset)
             .action(
                 IconButton::new("search", icons::SEARCH)
                     .active(self.search.is_some())
@@ -743,8 +737,8 @@ impl ContainersScreen {
             .flex()
             .flex_col()
             .bg(theme.surface)
-            .rounded_tl(px(self.left_radius))
-            .rounded_bl(px(self.left_radius))
+            .rounded_tl(px(self.chrome.left_radius))
+            .rounded_bl(px(self.chrome.left_radius))
             .border_r_1()
             .border_color(theme.border)
             .child(chrome::drag_region("list-titlebar", div().child(header)))
@@ -1090,8 +1084,8 @@ impl ContainersScreen {
             .flex()
             .flex_col()
             .bg(theme.bg)
-            .rounded_tr(px(self.right_radius))
-            .rounded_br(px(self.right_radius))
+            .rounded_tr(px(self.chrome.right_radius))
+            .rounded_br(px(self.chrome.right_radius))
             .child(chrome::drag_region(
                 "detail-titlebar",
                 div()
@@ -1100,7 +1094,7 @@ impl ContainersScreen {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .px(px(chrome::CAPTION_CLEARANCE))
+                    .px(px(self.chrome.caption_clearance))
                     .when(!bulk, |d| d.child(tabs)),
             ))
             .child(div().flex_1().min_h_0().child(body))

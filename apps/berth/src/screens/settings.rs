@@ -3,7 +3,7 @@
 //! lists the keyboard map (NFR-U1).
 
 use berth_docker::{DiscoveryEnv, docker_contexts, parse_host};
-use berth_settings::{Accent, AppearanceMode, EngineChoice};
+use berth_settings::{Accent, AppearanceMode, EngineChoice, WindowButtons};
 use berth_ui::{
     Appearance, Button, ColorSwatch, OPTION_PREVIEW_RADIUS, OptionCard, ScrollPane, SegmentedTabs,
     SettingRow, SettingsGroup, Switch, TextField, Theme, icons, page_title, section_title,
@@ -459,22 +459,53 @@ impl SettingsScreen {
             }));
 
         let reduce_motion = settings.reduce_motion;
-        let group =
-            SettingsGroup::new()
-                .row(
-                    SettingRow::new("Accent color")
-                        .description(accent.label())
-                        .control(swatches),
-                )
-                .row(
-                    SettingRow::new("Reduce motion")
-                        .description("Open and close panels without animating them.")
-                        .control(Switch::new("reduce-motion", reduce_motion).on_toggle(
-                            cx.listener(move |_, _, _, cx| {
+        let window_buttons = settings.window_buttons;
+        let group = SettingsGroup::new()
+            .row(
+                SettingRow::new("Accent color")
+                    .description(accent.label())
+                    .control(swatches),
+            )
+            .row(
+                SettingRow::new("Reduce motion")
+                    .description("Open and close panels without animating them.")
+                    .control(
+                        Switch::new("reduce-motion", reduce_motion).on_toggle(cx.listener(
+                            move |_, _, _, cx| {
                                 preferences::update(cx, |s| s.reduce_motion = !reduce_motion);
-                            }),
+                            },
                         )),
-                );
+                    ),
+            )
+            // Elsewhere the system draws the window's buttons.
+            .when(
+                cfg!(any(target_os = "linux", target_os = "freebsd")),
+                |group| {
+                    group.row(
+                        SettingRow::new("Window buttons")
+                            .description(window_buttons_description(window_buttons))
+                            .control(
+                                SegmentedTabs::new(
+                                    "window-buttons",
+                                    WindowButtons::ALL.into_iter().map(WindowButtons::label),
+                                )
+                                .selected(
+                                    WindowButtons::ALL
+                                        .iter()
+                                        .position(|b| *b == window_buttons)
+                                        .unwrap_or(0),
+                                )
+                                .on_select(cx.listener(
+                                    |_, ix: &usize, _, cx| {
+                                        if let Some(choice) = WindowButtons::ALL.get(*ix) {
+                                            preferences::update(cx, |s| s.window_buttons = *choice);
+                                        }
+                                    },
+                                )),
+                            ),
+                    )
+                },
+            );
 
         div()
             .child(page_title("Appearance", theme))
@@ -599,6 +630,17 @@ fn mini_window(appearance: Appearance, accent: Accent) -> Div {
                 .child(bar(58.0, ink))
                 .child(bar(66.0, ink)),
         )
+}
+
+const fn window_buttons_description(choice: WindowButtons) -> &'static str {
+    match choice {
+        WindowButtons::Auto => {
+            "Your desktop's buttons. Only close while a tiling window manager tiles the window."
+        }
+        WindowButtons::All => "Your desktop's buttons, also while tiled.",
+        WindowButtons::CloseOnly => "Only the close button.",
+        WindowButtons::Hidden => "No buttons. Close the window with your desktop's shortcut.",
+    }
 }
 
 fn scheme_preview(mode: AppearanceMode, accent: Accent) -> AnyElement {

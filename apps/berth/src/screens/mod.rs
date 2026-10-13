@@ -170,10 +170,13 @@ pub fn used_by<V: EventEmitter<ShowContainer>>(
 }
 
 /// Layout facts the shell hands each screen: clearance for the floating
-/// sidebar toggle and the window's outer corner radii.
+/// sidebar toggle and the caption buttons, and the window's outer corner
+/// radii.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Chrome {
     pub header_inset: f32,
+    /// Horizontal room a centred titlebar strip leaves on each side.
+    pub caption_clearance: f32,
     pub left_radius: f32,
     pub right_radius: f32,
 }
@@ -230,7 +233,7 @@ pub fn detail_pane(
                 .flex()
                 .items_center()
                 .justify_center()
-                .px(px(chrome::CAPTION_CLEARANCE))
+                .px(px(chrome.caption_clearance))
                 .children(top),
         ))
         .child(div().flex_1().min_h_0().child(body))

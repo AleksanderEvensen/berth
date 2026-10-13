@@ -782,21 +782,21 @@ impl Render for Shell {
         let radius = chrome::content_radius(window);
         let theme = Theme::of(cx).clone();
         let collapsed = self.sidebar_collapsed;
-        let leading = chrome::titlebar_leading(window);
+        let leading = chrome::titlebar_leading(window, cx);
         let frame = Chrome {
             header_inset: if collapsed {
                 leading - chrome::TITLEBAR_LEADING + TOGGLE_CLEARANCE
             } else {
                 0.0
             },
+            caption_clearance: chrome::caption_clearance(window, cx),
             left_radius: if collapsed { radius } else { 0.0 },
             right_radius: radius,
         };
         let screen = match self.route {
             Route::Containers => {
-                self.containers.update(cx, |screen, cx| {
-                    screen.set_chrome(frame.header_inset, frame.left_radius, radius, cx);
-                });
+                self.containers
+                    .update(cx, |screen, cx| screen.set_chrome(frame, cx));
                 self.containers.clone().into_any_element()
             }
             Route::Volumes => {

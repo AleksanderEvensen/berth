@@ -15,6 +15,7 @@ berth-ui.workspace = true
 berth-docker.workspace = true
 berth-terminal.workspace = true
 berth-settings.workspace = true
+gpui-window-chrome.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-base.workspace = true
@@ -33,14 +34,6 @@ embed-resource = "3.0.12"
 [dev-dependencies]
 tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit.workspace = true
-raw-window-handle.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-raw-window-handle.workspace = true
-windows.workspace = true
 
 [lints]
 workspace = true

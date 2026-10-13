@@ -24,6 +24,8 @@ pub struct Settings {
     /// Skip decorative animations, including spinners (NFR-U4).
     pub reduce_motion: bool,
     pub sidebar_collapsed: bool,
+    /// Titlebar buttons where Berth draws them (Linux).
+    pub window_buttons: WindowButtons,
     pub engine: EngineChoice,
     /// The OS light/dark scheme last seen. Linux only learns it from the
     /// desktop portal after the first frame, so this avoids starting in the
@@ -110,6 +112,34 @@ impl Accent {
             Self::Cyan => "Cyan",
             Self::Blue => "Blue",
             Self::Pink => "Pink",
+        }
+    }
+}
+
+/// Which titlebar buttons to draw where Berth draws its own (Linux).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowButtons {
+    /// The desktop's buttons; only close while a tiling window manager
+    /// tiles the window.
+    #[default]
+    Auto,
+    /// The desktop's buttons, always.
+    All,
+    CloseOnly,
+    Hidden,
+}
+
+impl WindowButtons {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::All, Self::CloseOnly, Self::Hidden];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Automatic",
+            Self::All => "All",
+            Self::CloseOnly => "Close only",
+            Self::Hidden => "None",
         }
     }
 }
@@ -217,6 +247,12 @@ impl Settings {
             &mut settings.sidebar_collapsed,
             &mut issues,
         );
+        take(
+            &mut map,
+            "windowButtons",
+            &mut settings.window_buttons,
+            &mut issues,
+        );
         take(&mut map, "engine", &mut settings.engine, &mut issues);
         take(
             &mut map,
@@ -257,6 +293,7 @@ mod tests {
             accent: Accent::Green,
             reduce_motion: true,
             sidebar_collapsed: true,
+            window_buttons: WindowButtons::CloseOnly,
             engine: EngineChoice::Host {
                 host: "tcp://build:2376".into(),
             },
@@ -350,6 +387,7 @@ mod tests {
                 "accent": "indigo",
                 "reduceMotion": false,
                 "sidebarCollapsed": false,
+                "windowButtons": "auto",
                 "engine": { "kind": "host", "host": "unix:///run/podman.sock" },
             })
         );

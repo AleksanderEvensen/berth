@@ -6,6 +6,7 @@ members = [
     "crates/docker",
     "crates/terminal",
     "crates/settings",
+    "crates/window-chrome",
 ]
 
 [workspace.package]
@@ -36,6 +37,7 @@ berth-ui = { path = "crates/ui" }
 berth-docker = { path = "crates/docker" }
 berth-terminal = { path = "crates/terminal" }
 berth-settings = { path = "crates/settings" }
+gpui-window-chrome = { path = "crates/window-chrome" }
 
 # gpui — the published `gpui-pre` snapshot of zed, which is what GPUI Kit's
 # `gpui-base` is built against. Keep these three versions in lockstep.
