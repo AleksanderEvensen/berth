@@ -128,9 +128,11 @@ impl Cell {
     }
 
     /// `id` keys the click handlers; it must be unique among siblings.
+    /// `copy_first` puts the copy button before the value instead of after.
     fn render_keyed(
         self,
         id: impl Into<ElementId>,
+        copy_first: bool,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
@@ -151,31 +153,30 @@ impl Cell {
             window,
             cx,
         );
-        div()
+        let button = div()
+            .track_focus(&reveal)
+            .flex_none()
+            .opacity(if focused { 1.0 } else { 0.0 })
+            .group_hover(group.clone(), |s| s.opacity(1.0))
+            .child(
+                IconButton::new("copy", icons::COPY)
+                    .size(20.0, 12.0)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.to_string()));
+                    }),
+            );
+        let row = div()
             .id(id)
-            .group(group.clone())
+            .group(group)
             .min_w_0()
             .flex()
             .items_center()
-            .gap(px(Theme::SPACE_XS))
-            .child(value)
-            .child(
-                div()
-                    .track_focus(&reveal)
-                    .flex_none()
-                    .opacity(if focused { 1.0 } else { 0.0 })
-                    .group_hover(group, |s| s.opacity(1.0))
-                    .child(
-                        IconButton::new("copy", icons::COPY)
-                            .size(20.0, 12.0)
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    copy.to_string(),
-                                ));
-                            }),
-                    ),
-            )
-            .into_any_element()
+            .gap(px(Theme::SPACE_XS));
+        if copy_first {
+            row.child(button).child(value).into_any_element()
+        } else {
+            row.child(value).child(button).into_any_element()
+        }
     }
 
     /// `focus_key` keys a clickable value's tab stop. It is looked up
@@ -244,7 +245,8 @@ impl KeyValueCard {
 
     pub fn row(mut self, label: impl Into<SharedString>, value: Cell) -> Self {
         let label = label.into();
-        let value = CellElement(label.clone(), value).into_any_element();
+        // Values sit flush right, so the copy button goes before the text.
+        let value = CellElement(label.clone(), value, true).into_any_element();
         self.rows.push((label, value));
         self
     }
@@ -259,17 +261,17 @@ impl KeyValueCard {
 impl RenderOnce for Cell {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = SharedString::from(format!("cell-{}", self.text));
-        self.render_keyed(id, window, cx)
+        self.render_keyed(id, false, window, cx)
     }
 }
 
-/// A key-value cell, keyed by its row label.
+/// A cell keyed by `.0`; `.2` puts the copy button before the value.
 #[derive(IntoElement)]
-struct CellElement(SharedString, Cell);
+struct CellElement(SharedString, Cell, bool);
 
 impl RenderOnce for CellElement {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        self.1.render_keyed(self.0, window, cx)
+        self.1.render_keyed(self.0, self.2, window, cx)
     }
 }
 
@@ -393,7 +395,7 @@ impl RenderOnce for DataTable {
                         .children(cells.into_iter().zip(weights.iter()).enumerate().map(
                             |(col, (cell, w))| {
                                 let id = SharedString::from(format!("cell-{row}-{col}"));
-                                column(*w).child(CellElement(id, cell))
+                                column(*w).child(CellElement(id, cell, false))
                             },
                         ))
                 })
