@@ -2,8 +2,10 @@
 //! desktop theme renders: `gtk_buttons DIR [SCALE]`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use gpui_window_chrome::{ButtonState, CaptionButton, NativeButtons, Side};
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = std::path::PathBuf::from(args.get(1).map_or("/tmp/gtk-buttons", String::as_str));
@@ -45,4 +47,9 @@ fn main() {
             }
         }
     }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn main() {
+    eprintln!("GTK caption buttons exist only on Linux and FreeBSD");
 }

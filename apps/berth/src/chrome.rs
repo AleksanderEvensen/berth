@@ -5,9 +5,11 @@
 use berth_settings::WindowButtons;
 use berth_ui::{Appearance, TabStop, Theme};
 use gpui::{
-    AnyElement, App, Div, Hsla, IntoElement, MouseButton, PathBuilder, Pixels, Point, Window,
-    canvas, div, prelude::*, px, transparent_black,
+    AnyElement, App, Div, Hsla, IntoElement, MouseButton, Pixels, Point, Window, div, prelude::*,
+    px, transparent_black,
 };
+#[cfg(not(windows))]
+use gpui::{PathBuilder, canvas};
 use gpui_window_chrome::{
     ButtonPolicy, CaptionButton, CaptionLayout, NativeButtons, NativeRow, ResizeHandles, Side,
     caption_layout, resize, traffic_lights_end,
@@ -108,6 +110,7 @@ fn native_row(side: Side, buttons: &[CaptionButton], cx: &App) -> Option<NativeR
 /// as far from the window's side as from its top.
 struct RowGeometry {
     margin: f32,
+    #[cfg(not(windows))]
     spacing: f32,
     /// The native row's width; ours is computed from the button count.
     width: Option<f32>,
@@ -118,6 +121,7 @@ impl RowGeometry {
         let height = row.map_or(DRAWN_SIZE, |row| f32::from(row.height()));
         Self {
             margin: ((Theme::HEADER_HEIGHT - height) / 2.0).max(0.0),
+            #[cfg(not(windows))]
             spacing: row.map_or(DRAWN_SPACING, |row| f32::from(row.spacing())),
             width: row.map(|row| f32::from(row.width())),
         }
@@ -126,6 +130,13 @@ impl RowGeometry {
 
 /// The caption buttons, absolutely positioned in the window's corners;
 /// placed last in the content so they sit above the titlebar.
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the other desktops draw their buttons with them"
+    )
+)]
 pub fn caption_buttons(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let layout = caption_layout(window, cx, policy(cx));
     if layout.is_empty() {
@@ -139,7 +150,7 @@ pub fn caption_buttons(window: &mut Window, cx: &mut App) -> Option<AnyElement> 
 /// the native caption area for its button, so hovering maximize opens
 /// Snap Layouts.
 #[cfg(windows)]
-fn platform_buttons(layout: CaptionLayout, window: &mut Window, cx: &mut App) -> AnyElement {
+fn platform_buttons(layout: CaptionLayout, window: &Window, cx: &App) -> AnyElement {
     let theme = Theme::of(cx);
     let fg = if window.is_window_active() {
         theme.text
@@ -170,10 +181,9 @@ fn platform_buttons(layout: CaptionLayout, window: &mut Window, cx: &mut App) ->
             .items_center()
             .justify_center()
             .hover(move |s| s.bg(hover))
-            .active(move |s| s.bg(pressed))
             .window_control_area(button.control_area())
             .child(glyph);
-        caption_button(button, face)
+        caption_button(button, face, Some(pressed))
     });
     div()
         .absolute()
@@ -230,7 +240,7 @@ fn button_row(
                             .rounded_full()
                     },
                 );
-            caption_button(button, face)
+            caption_button(button, face, None)
         })
         .collect();
     let row = div()
@@ -246,8 +256,9 @@ fn button_row(
     })
 }
 
-/// Make `face` a focusable, clickable caption button.
-fn caption_button(button: CaptionButton, face: Div) -> AnyElement {
+/// Make `face` a focusable, clickable caption button, with `pressed` as its
+/// background while held down.
+fn caption_button(button: CaptionButton, face: Div, pressed: Option<Hsla>) -> AnyElement {
     let id = match button {
         CaptionButton::Minimize => "caption-min",
         CaptionButton::Maximize | CaptionButton::Restore => "caption-max",
@@ -256,6 +267,7 @@ fn caption_button(button: CaptionButton, face: Div) -> AnyElement {
     TabStop::new(
         id,
         face.id(id)
+            .when_some(pressed, |d, bg| d.active(move |s| s.bg(bg)))
             .group(CAPTION_GROUP)
             .occlude()
             .role(gpui::Role::Button)

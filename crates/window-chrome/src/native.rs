@@ -120,7 +120,7 @@ mod unsupported {
             match self.never {}
         }
 
-        pub fn image(
+        pub const fn image(
             &self,
             _button: CaptionButton,
             _state: ButtonState,
@@ -142,7 +142,7 @@ mod unsupported {
             match self.never {}
         }
 
-        pub fn button(
+        pub const fn button(
             &self,
             _button: CaptionButton,
             _group: impl Into<SharedString>,
