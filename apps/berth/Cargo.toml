@@ -26,6 +26,10 @@ chrono.workspace = true
 aho-corasick.workspace = true
 num-traits.workspace = true
 
+[build-dependencies]
+# The icon resource in the Windows executable; the version matches gpui-pre's.
+embed-resource = "3.0.12"
+
 [dev-dependencies]
 tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
@@ -50,7 +54,7 @@ run. It connects to Docker or Podman through DOCKER_HOST, Docker contexts \
 or the default sockets; it does not ship a runtime or a VM."""
 category = "DeveloperTool"
 license-file = "../../LICENSE"
-icons = ["packaging/linux/icons/*.png"]
+icons = ["packaging/icons/*.png"]
 # The Linux formats; `just package` picks `app` on macOS.
 formats = ["deb", "appimage", "pacman"]
 before-packaging-command = "just before-packaging"
@@ -85,18 +89,18 @@ depends = [
 
 [package.metadata.packager.deb.files]
 "../../target/packaging/linux/no.ahse.berth.desktop" = "usr/share/applications/no.ahse.berth.desktop"
-"packaging/linux/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
+"packaging/icons/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
 "../../LICENSE" = "usr/share/doc/berth/copyright"
 
 # The AppImage's desktop entry must be named after the binary.
 [package.metadata.packager.appimage.files]
 "../../target/packaging/linux/no.ahse.berth.desktop" = "usr/share/applications/berth.desktop"
-"packaging/linux/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
+"packaging/icons/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
 
 # The pacman format is only used for its .tar.gz: the same usr/ tree as the
 # .deb, to unpack under / or ~/.local. The PKGBUILD it also writes is not
 # released, so it has no depends or source.
 [package.metadata.packager.pacman.files]
 "../../target/packaging/linux/no.ahse.berth.desktop" = "usr/share/applications/no.ahse.berth.desktop"
-"packaging/linux/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
+"packaging/icons/no.ahse.berth.svg" = "usr/share/icons/hicolor/scalable/apps/no.ahse.berth.svg"
 "../../LICENSE" = "usr/share/licenses/berth/LICENSE"

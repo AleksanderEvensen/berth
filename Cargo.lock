@@ -636,6 +636,7 @@ dependencies = [
  "berth-terminal",
  "berth-ui",
  "chrono",
+ "embed-resource",
  "env_logger",
  "futures",
  "gpui-base",

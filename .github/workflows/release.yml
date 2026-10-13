@@ -147,10 +147,39 @@ jobs:
           path: target/packager/*.dmg
           if-no-files-found: error
 
+  windows:
+    name: Portable .exe
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v4
+
+      - name: Package
+        run: just package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-packages
+          path: target/packager/*.exe
+          if-no-files-found: error
+
   upload:
     name: Attach to the GitHub release
     if: inputs.tag != ''
-    needs: [packages, macos]
+    needs: [packages, macos, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

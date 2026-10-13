@@ -39,11 +39,11 @@ lists every shortcut (Settings → Shortcuts).
 GitHub Actions runs on pull requests and pushes to `main`. On `main`,
 [release-plz](https://release-plz.dev) keeps a release PR open that bumps the
 version and updates `CHANGELOG.md` from the conventional commits; merging it tags
-`v<version>`, creates the GitHub release and attaches the Linux packages and the
-signed, notarized universal macOS `.dmg`. Formatting gates the
-slower checks; Clippy, building all targets, and tests then run in order on one
-Linux runner, sharing build artifacts and a dependency cache. New commits cancel
-superseded runs.
+`v<version>`, creates the GitHub release and attaches the Linux packages, the
+signed, notarized universal macOS `.dmg` and the portable Windows `.exe`.
+Formatting gates the slower checks; Clippy, building all targets, and tests
+then run in order on one Linux runner, sharing build artifacts and a dependency
+cache. New commits cancel superseded runs.
 
 To run the same checks locally:
 

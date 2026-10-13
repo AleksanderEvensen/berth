@@ -128,7 +128,11 @@ Windows named pipe) is in; the rest of M5 is not.
       opens Snap Layouts. gpui has no window move on Windows, so the titlebar
       drags, double-click zooms and right-click opens the window menu through
       Win32 system commands.
-- [ ] Windows: MSI.
+- [x] Windows: portable x64 `.exe` (no installer). `just package` builds
+      `Berth_<version>_x64.exe` and the release workflow attaches it; release
+      builds open no console window. The app icon is embedded from
+      `berth.ico`, which `just icons` renders, with the Linux and macOS PNGs,
+      from `packaging/icons/no.ahse.berth.svg`.
 
 ## Later (P2)
 

@@ -1,0 +1,4 @@
+# Link the C runtime statically on Windows, so the portable berth.exe runs
+# without the Visual C++ Redistributable (VCRUNTIME140.dll) installed.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,2 @@
+// The executable's icon, which Explorer, the taskbar and shortcuts show.
+1 ICON "berth.ico"

@@ -109,6 +109,32 @@ package:
     xcrun stapler staple "$dmg"
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 
+# Build the portable Windows executable, target/packager/Berth_<version>_x64.exe.
+[windows]
+[script("bash")]
+package:
+    set -euo pipefail
+    cargo build --locked --release -p berth
+    id=$(cargo pkgid -p berth)
+    mkdir -p target/packager
+    cp target/release/berth.exe "target/packager/Berth_${id##*[#@]}_x64.exe"
+
+# Render the app icon from its SVG, the one source for every platform: the
+# PNGs (the Linux packages, and the macOS .icns cargo-packager makes from them)
+# and berth.ico (embedded in the Windows executable by build.rs).
+[script("bash")]
+icons:
+    set -euo pipefail
+    cd apps/berth/packaging/icons
+    for size in 16 24 32 48 64 128 256 512; do
+        rsvg-convert -w "$size" -h "$size" no.ahse.berth.svg -o "$size.tmp.png"
+    done
+    for size in 32 64 128 256 512; do
+        cp "$size.tmp.png" "${size}x${size}.png"
+    done
+    magick 16.tmp.png 24.tmp.png 32.tmp.png 48.tmp.png 64.tmp.png 128.tmp.png 256.tmp.png berth.ico
+    rm ./*.tmp.png
+
 # Run by cargo-packager first (before-packaging-command): the release binary
 # and, on Linux, the desktop entry.
 [linux]
