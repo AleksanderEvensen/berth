@@ -354,10 +354,11 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
         WindowControlArea::Close,
     ]
     .map(|area| {
-        let id = match area {
-            WindowControlArea::Min => "caption-min",
-            WindowControlArea::Max => "caption-max",
-            _ => "caption-close",
+        let (id, label) = match area {
+            WindowControlArea::Min => ("caption-min", "Minimize"),
+            WindowControlArea::Max if maximized => ("caption-max", "Restore"),
+            WindowControlArea::Max => ("caption-max", "Maximize"),
+            _ => ("caption-close", "Close"),
         };
         let close = area == WindowControlArea::Close;
         let (hover, pressed) = if close {
@@ -381,6 +382,8 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
                 .active(move |s| s.bg(pressed))
                 .occlude()
                 .window_control_area(area)
+                .role(gpui::Role::Button)
+                .aria_label(label)
                 .child(caption_glyph(area, maximized, fg, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| {
