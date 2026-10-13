@@ -62,6 +62,7 @@ icon_assets![
     (GLOBE, "global"),
     (MONITOR, "monitor"),
     (FOLDER, "folder"),
+    (FILE, "file"),
     (COPY, "copy"),
     (SORT, "sort"),
     (LIST, "list"),

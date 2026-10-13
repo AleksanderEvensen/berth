@@ -1,4 +1,4 @@
-//! Live container views — Stats, Logs, Terminal — and their lifetimes.
+//! Live container views — Stats, Logs, Terminal, Files — and their lifetimes.
 //!
 //! At most one live view exists, for the visible tab of the selected
 //! container. Each owns its engine stream, so dropping the view cancels the
@@ -13,8 +13,10 @@ mod terminal;
 
 use std::sync::Arc;
 
-use berth_docker::Engine;
-use gpui::{AnyView, App, AppContext as _, Context, Entity, Window};
+use berth_docker::{Engine, FilesTarget, Mount, MountKind};
+use gpui::{AnyView, App, AppContext as _, Context, Entity, SharedString, Window};
+
+use crate::files::FilesTab;
 
 pub use logs::LogsView;
 pub use stats::StatsView;
@@ -26,6 +28,7 @@ pub enum LiveTab {
     Stats,
     Logs,
     Terminal,
+    Files,
 }
 
 /// What a live view was opened for; any change replaces the view.
@@ -38,6 +41,8 @@ pub struct LiveKey {
     /// Also when it restarts faster than its state is observed to change.
     pub starts: u64,
     pub engine: Arc<dyn Engine>,
+    /// Marked in the Files tab at their mount points.
+    pub mounts: Vec<Mount>,
 }
 
 impl PartialEq for LiveKey {
@@ -46,6 +51,7 @@ impl PartialEq for LiveKey {
             && self.container == other.container
             && self.running == other.running
             && self.starts == other.starts
+            && self.mounts == other.mounts
             && Arc::ptr_eq(&self.engine, &other.engine)
     }
 }
@@ -54,6 +60,7 @@ enum View {
     Stats(Entity<StatsView>),
     Logs(Entity<LogsView>),
     Terminal(Entity<ExecView>),
+    Files(Entity<FilesTab>),
 }
 
 /// The currently open live view, if any.
@@ -82,12 +89,17 @@ impl Live {
             LiveTab::Logs => Some(View::Logs(
                 cx.new(|cx| LogsView::new(&engine, &id, window, cx)),
             )),
-            // Stats and exec need a running container; the screen explains.
+            // Stats, exec and file listings need a running container; the
+            // screen explains.
             _ if !key.running => None,
             LiveTab::Stats => Some(View::Stats(cx.new(|cx| StatsView::new(&engine, &id, cx)))),
             LiveTab::Terminal => Some(View::Terminal(
                 cx.new(|cx| ExecView::new(engine, id, window, cx)),
             )),
+            LiveTab::Files => Some(View::Files(cx.new(|cx| {
+                let tags = key.mounts.iter().map(mount_tag).collect();
+                FilesTab::new(engine, FilesTarget::Container(id), tags, cx)
+            }))),
         };
         self.current = Some((key, view));
     }
@@ -109,6 +121,25 @@ impl Live {
             View::Stats(v) => v.clone().into(),
             View::Logs(v) => v.clone().into(),
             View::Terminal(v) => v.clone().into(),
+            View::Files(v) => v.clone().into(),
         })
     }
+}
+
+/// The note on a mount point in the Files tab.
+fn mount_tag(mount: &Mount) -> (String, SharedString) {
+    let kind = match mount.kind {
+        MountKind::Volume => format!("volume {}", mount.source),
+        MountKind::Bind => format!("bind {}", mount.source),
+        MountKind::Tmpfs => "tmpfs".into(),
+    };
+    let tag = if mount.read_only {
+        format!("{kind} · read-only")
+    } else {
+        kind
+    };
+    (
+        berth_docker::escape_name(mount.destination.as_bytes()),
+        tag.into(),
+    )
 }

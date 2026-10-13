@@ -61,7 +61,10 @@ OrbStack are called out explicitly.
 - *Logs*: toolbar (search input, wrap toggle, copy, clear) + monospace log view;
   follow-tail by default, pauses when the user scrolls up.
 - *Terminal*: full-pane terminal; reconnect button when the exec ends.
-- *Files*: path breadcrumb + file list (P2).
+- *Files*: path of the selected entry + reload over a lazily loaded tree table
+  (Name · Date Modified · Size · Kind); mount points tagged with their volume
+  or bind. Read through a helper container, which is asked for once per
+  session. Shared with Volumes → Files.
 
 ## Volumes (`orb-volumes-*`)
 - Header: "Volumes" + total size. Sections *In use*, *Unused*.
@@ -69,7 +72,8 @@ OrbStack are called out explicitly.
   on hover (disabled for in-use with tooltip).
 - Multi-select → detail pane shows "N selected · X MB" and a Delete button
   (OrbStack only shows "6 Selected" — we add the action).
-- Tabs: Info · Files.
+- Tabs: Info · Files. Files shows the same tree as container Files, through
+  a helper that mounts the volume read-only.
 
 ## Images (`orb-image-list-and-inspect.png`)
 - Header: "Images" + total size; header menu: *Remove dangling*, *Remove unused*.

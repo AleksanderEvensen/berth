@@ -245,6 +245,9 @@ impl Shell {
         self.activity.update(cx, |screen, cx| {
             screen.set_visible(route == Route::Activity, cx);
         });
+        self.volumes.update(cx, |screen, cx| {
+            screen.set_visible(route == Route::Volumes, cx);
+        });
         cx.notify();
     }
 

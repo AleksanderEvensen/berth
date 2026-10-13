@@ -12,9 +12,9 @@ use futures::{FutureExt as _, StreamExt as _};
 use crate::{
     ComposeRef, Container, ContainerAction, ContainerState, DiskUsage, Endpoint, Engine,
     EngineError, EngineEvent, EngineInfo, EngineKind, EngineResult, EventAction, ExecOptions,
-    ExecSession, ExposedPort, Image, ImageDetails, ImagePrune, LogLine, LogOptions, Mount,
-    MountKind, Network, NetworkEndpoint, NetworkRole, ObjectKind, PortBinding, Protocol,
-    PruneReport, RemoveOptions, StatsSample, Subnet, Volume,
+    ExecSession, ExposedPort, FileEntry, FileMount, FilesTarget, Image, ImageDetails, ImagePrune,
+    LogLine, LogOptions, Mount, MountKind, Network, NetworkEndpoint, NetworkRole, ObjectKind,
+    PortBinding, Protocol, PruneReport, RemoveOptions, StatsSample, Subnet, Volume,
 };
 
 fn port(host: u16, container: u16) -> PortBinding {
@@ -598,6 +598,8 @@ struct FixtureState {
     networks: Vec<Network>,
     build_cache: Vec<(String, u64, bool)>,
     subscribers: Vec<mpsc::Sender<EngineResult<EngineEvent>>>,
+    /// File-browsing helpers started, for unique IDs.
+    helpers: u32,
 }
 
 impl FixtureState {
@@ -640,6 +642,7 @@ impl FixtureEngine {
                 ],
                 containers,
                 subscribers: Vec::new(),
+                helpers: 0,
             })),
             latency: None,
             list_latency: None,
@@ -1101,8 +1104,25 @@ impl Engine for FixtureEngine {
     ) -> BoxFuture<'static, EngineResult<ExecSession>> {
         self.fixture_exec(id, options)
     }
+
+    fn open_files(&self, target: &FilesTarget) -> BoxFuture<'static, EngineResult<FileMount>> {
+        self.fixture_open_files(target)
+    }
+
+    fn list_files(
+        &self,
+        mount: &FileMount,
+        path: &str,
+    ) -> BoxFuture<'static, EngineResult<Vec<FileEntry>>> {
+        self.fixture_list_files(mount, path)
+    }
+
+    fn read_link(&self, mount: &FileMount, path: &str) -> BoxFuture<'static, EngineResult<String>> {
+        self.fixture_read_link(mount, path)
+    }
 }
 
+mod files;
 mod m3;
 
 #[cfg(test)]

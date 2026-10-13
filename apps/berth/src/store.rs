@@ -308,6 +308,10 @@ impl Store {
     }
 
     fn upsert(&mut self, container: Container) {
+        // Berth's own helpers (volume browsing) aren't the user's containers.
+        if container.is_helper() {
+            return;
+        }
         match self.containers.iter_mut().find(|c| c.id == container.id) {
             Some(slot) => *slot = container,
             None => self.containers.push(container),
@@ -404,7 +408,7 @@ async fn run_session(
     };
     let synced = this.update(cx, |store, cx| {
         store.connection = Connection::Connected(info);
-        store.containers = containers;
+        store.containers = containers.into_iter().filter(|c| !c.is_helper()).collect();
         store.pending.clear();
         store.storage.refresh_queued = false;
         store.refresh_storage(cx);

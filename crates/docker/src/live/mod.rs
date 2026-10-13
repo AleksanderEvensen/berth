@@ -4,6 +4,7 @@
 //! thread. All [`Engine`] futures and streams can then run on any executor.
 //! Dropping a result cancels its task; dropping the engine cancels remaining
 //! work and shuts down the runtime without joining its threads.
+mod files;
 mod m3;
 mod mapping;
 mod tls;
@@ -25,8 +26,9 @@ use tokio_util::task::{AbortOnDrop, AbortOnDropHandle};
 
 use crate::{
     ConnectError, Container, ContainerAction, DiskUsage, Endpoint, Engine, EngineError,
-    EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, Image, ImageDetails,
-    ImagePrune, LogLine, LogOptions, Network, PruneReport, RemoveOptions, StatsSample, Volume,
+    EngineEvent, EngineInfo, EngineResult, ExecOptions, ExecSession, FileEntry, FileMount,
+    FilesTarget, Image, ImageDetails, ImagePrune, LogLine, LogOptions, Network, PruneReport,
+    RemoveOptions, StatsSample, Volume,
 };
 
 /// A live engine whose Tokio work never depends on the caller's executor.
@@ -517,6 +519,22 @@ impl Engine for BollardEngine {
         options: ExecOptions,
     ) -> BoxFuture<'static, EngineResult<ExecSession>> {
         self.live_exec(id, options)
+    }
+
+    fn open_files(&self, target: &FilesTarget) -> BoxFuture<'static, EngineResult<FileMount>> {
+        self.live_open_files(target)
+    }
+
+    fn list_files(
+        &self,
+        mount: &FileMount,
+        path: &str,
+    ) -> BoxFuture<'static, EngineResult<Vec<FileEntry>>> {
+        self.live_list_files(mount, path)
+    }
+
+    fn read_link(&self, mount: &FileMount, path: &str) -> BoxFuture<'static, EngineResult<String>> {
+        self.live_read_link(mount, path)
     }
 }
 

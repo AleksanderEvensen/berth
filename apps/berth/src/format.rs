@@ -57,6 +57,16 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Local date and time, like a file manager: `6 Oct 2026 at 16:20`.
+#[must_use]
+pub fn date_time(unix: i64) -> String {
+    use chrono::TimeZone as _;
+    chrono::Local
+        .timestamp_opt(unix, 0)
+        .single()
+        .map_or_else(String::new, |t| t.format("%-d %b %Y at %H:%M").to_string())
+}
+
 /// "just now", "5 minutes ago", "2 weeks ago", "1 year ago".
 #[must_use]
 pub fn age(created_unix: i64, now_unix: i64) -> String {

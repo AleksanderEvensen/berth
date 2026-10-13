@@ -106,7 +106,8 @@ actions!(
 const SHELL: &str = "Shell";
 /// Where list keys apply: anywhere in the shell except text inputs, the
 /// terminal and the confirm dialog, which own these keys.
-const LIST: &str = "Shell && !Input && !Terminal && !ConfirmDialog";
+/// A focused file tree handles its own arrows, Home, End and Enter.
+const LIST: &str = "Shell && !Input && !Terminal && !ConfirmDialog && !FileTree";
 /// Key context of an open menu (the port menu). Deeper than [`LIST`], so
 /// its keys win over the list's.
 pub const MENU_CONTEXT: &str = "PortMenu";
@@ -340,6 +341,22 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ["shift-pageup", "shift-pagedown"]
     ),
     shortcut!(Containers, "Select all terminal output", ["ctrl-shift-a"]),
+    shortcut!(
+        Containers,
+        "Files: move through the tree",
+        ["up", "down", "home", "end"]
+    ),
+    shortcut!(
+        Containers,
+        "Files: collapse a folder or go to its parent",
+        ["left"]
+    ),
+    shortcut!(
+        Containers,
+        "Files: expand a folder or go into it",
+        ["right"]
+    ),
+    shortcut!(Containers, "Files: expand or collapse a folder", ["enter"]),
     shortcut!(Containers, "Copy the terminal selection", ["ctrl-shift-c"]),
     shortcut!(Containers, "Paste into the terminal", ["ctrl-shift-v"]),
     shortcut!(Containers, "Info tab", ["alt-1"], Some(TABS), ShowInfo),

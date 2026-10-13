@@ -6,6 +6,7 @@
 
 pub mod discovery;
 mod engine;
+mod files;
 pub mod fixtures;
 #[cfg(feature = "live")]
 pub mod live;
@@ -14,6 +15,7 @@ mod tree;
 
 pub use discovery::*;
 pub use engine::*;
+pub use files::*;
 #[cfg(feature = "live")]
 pub use live::BollardEngine;
 pub use model::*;

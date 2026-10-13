@@ -18,7 +18,10 @@ use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
-use crate::{Container, DiskUsage, Image, ImageDetails, ImagePrune, Network, PruneReport, Volume};
+use crate::{
+    Container, DiskUsage, FileEntry, FileMount, FilesTarget, Image, ImageDetails, ImagePrune,
+    Network, PruneReport, Volume,
+};
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
@@ -317,6 +320,10 @@ pub enum EngineError {
     /// Any other engine-reported failure; `message` is the engine's text.
     #[error("engine error {status}: {message}")]
     Engine { status: u16, message: String },
+    /// The object can't do what was asked, e.g. listing files in a
+    /// container that has no shell.
+    #[error("{0}")]
+    Unsupported(String),
     /// Transport failure, stream closed, timeout.
     #[error("{0}")]
     Transport(String),
@@ -392,4 +399,24 @@ pub trait Engine: Send + Sync + 'static {
     /// Start `options.cmd` in a running container with a TTY attached.
     fn exec(&self, id: &str, options: ExecOptions)
     -> BoxFuture<'static, EngineResult<ExecSession>>;
+
+    // Files (B9, C5).
+
+    /// Start a helper container that sees `target`'s files, pulling its
+    /// image if needed. Nothing runs in a browsed container, so any image
+    /// can be browsed, but only while it runs.
+    fn open_files(&self, target: &FilesTarget) -> BoxFuture<'static, EngineResult<FileMount>>;
+
+    /// The entries of the folder at real (link-free, see
+    /// [`crate::resolve_path`]) path `path` of `mount`'s tree. One that
+    /// can't be read is [`EngineError::NotFound`], with the reason.
+    fn list_files(
+        &self,
+        mount: &FileMount,
+        path: &str,
+    ) -> BoxFuture<'static, EngineResult<Vec<FileEntry>>>;
+
+    /// The target (escaped) of the symlink at real path `path` of
+    /// `mount`'s tree.
+    fn read_link(&self, mount: &FileMount, path: &str) -> BoxFuture<'static, EngineResult<String>>;
 }

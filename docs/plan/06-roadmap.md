@@ -132,8 +132,28 @@ Windows named pipe) is in; the rest of M5 is not.
 
 ## Later (P2)
 
-- [ ] B9 — Container Files tab.
-- [ ] C5 — Browse volume files.
+- [ ] B9 — Container Files tab. Browsing is in, for any running container
+      whatever its image (distroless, `scratch`, non-root): nothing runs in
+      it. A `busybox` helper container joins its process namespace and
+      reads its files through `/proc/1/root`, listing them with plain
+      `find`/`stat` (no shell scripts). A lazily loaded tree (name,
+      modified, size, kind) with volume and bind mount points tagged and
+      symlinks resolved against the container's root; arrows, Home/End and
+      Enter move through and fold it. Stopped containers can't be browsed
+      (as in OrbStack), nor ones sharing another's process namespace
+      (`--pid=host`, `--pid=container:…`). Missing: opening and downloading
+      files (below).
+- [x] C5 — Browse volume files: Volumes → Files mounts the volume read-only
+      in the same helper and shows the same tree as B9; symlinks leading out
+      of the volume aren't followed. Helpers are pulled on first use, after
+      the user agrees once per session, labelled `no.ahse.berth.helper`,
+      hidden from the container list, and removed when the tab, selection
+      or screen is left. A helper runs `cat` on a stdin Berth holds open, so
+      it also ends when Berth quits or crashes.
+- [ ] Files: open a file with double-click / Enter in the program the OS
+      picks (copy it out of the container to a temp file first), and
+      download files and folders. `FileTree::on_open` already fires; nothing
+      handles it yet.
 - [ ] B12 — Run-container form.
 - [ ] H3 — Rebind keyboard shortcuts.
 - [ ] A3 — Command palette (`ctrl+k`): run any action, jump to any container/image/volume.

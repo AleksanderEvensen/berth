@@ -488,6 +488,8 @@ fn live_network_list_and_remove_on_a_non_tokio_executor() {
     );
 }
 
+#[path = "live/files.rs"]
+mod files;
 #[path = "live/m3.rs"]
 mod m3;
 #[path = "live/tls.rs"]

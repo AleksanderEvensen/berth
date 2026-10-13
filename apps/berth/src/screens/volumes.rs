@@ -1,12 +1,14 @@
 //! Volumes screen: "In use" / "Unused" sections with sizes, multi-select,
-//! single and bulk delete, and remove-all-unused.
+//! single and bulk delete, and remove-all-unused. The Files tab browses a
+//! volume through a helper container (C5).
 
 use std::rc::Rc;
+use std::sync::Arc;
 
-use berth_docker::Volume;
+use berth_docker::{Engine, FilesTarget, Volume};
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
-    ResourceRow, SectionLabel, Theme, empty_state, icons,
+    ResourceRow, SectionLabel, SegmentedTabs, Theme, empty_state, icons,
 };
 use gpui::{
     AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Modifiers,
@@ -17,10 +19,23 @@ use super::{
     Chrome, ListOp, ListScreen, ShowContainer, detail_pane, list_column, scroll_page, used_by,
 };
 use crate::dialogs::ConfirmRequest;
+use crate::files::FilesTab;
 use crate::format;
 use crate::selection::MultiSelect;
 use crate::store::{PruneTarget, Store};
 use crate::virtual_rows::VirtualRows;
+
+const TABS: [&str; 2] = ["Info", "Files"];
+const FILES_TAB: usize = 1;
+
+/// The Files tab of one volume, on one engine. Its helper container is
+/// removed when this is dropped: on leaving the tab, the volume or the
+/// screen.
+struct VolumeFiles {
+    volume: String,
+    engine: Arc<dyn Engine>,
+    tab: Entity<FilesTab>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Row {
@@ -37,6 +52,10 @@ pub struct VolumesScreen {
     chrome: Chrome,
     /// A volume to scroll into view once the rows are next synced.
     reveal: Option<String>,
+    tab: usize,
+    /// Whether the shell is showing this screen.
+    visible: bool,
+    files: Option<VolumeFiles>,
 }
 
 impl EventEmitter<ConfirmRequest> for VolumesScreen {}
@@ -58,7 +77,78 @@ impl VolumesScreen {
             selection: MultiSelect::default(),
             chrome: Chrome::default(),
             reveal: None,
+            tab: 0,
+            visible: true,
+            files: None,
         }
+    }
+
+    /// The shell shows or hides this screen; a hidden screen keeps no
+    /// helper container running.
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible != visible {
+            self.visible = visible;
+            if !visible {
+                self.files = None;
+            }
+            cx.notify();
+        }
+    }
+
+    fn set_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
+        if tab < TABS.len() && self.tab != tab {
+            self.tab = tab;
+            cx.notify();
+        }
+    }
+
+    /// Make the Files tab match the selected volume: a change drops the old
+    /// helper.
+    fn sync_files(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let want = match (self.selection.single(), store.engine()) {
+            // Only volumes of the current engine: a selection can outlive
+            // an engine switch.
+            (Some(name), Some(engine))
+                if self.tab == FILES_TAB
+                    && self.visible
+                    && store.volumes().iter().any(|v| &v.name == name) =>
+            {
+                Some((name.clone(), engine))
+            }
+            _ => None,
+        };
+        let same = match (&want, &self.files) {
+            (Some((name, engine)), Some(files)) => {
+                *name == files.volume && Arc::ptr_eq(engine, &files.engine)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.files = want.map(|(volume, engine)| VolumeFiles {
+                tab: cx.new(|cx| {
+                    FilesTab::new(
+                        engine.clone(),
+                        FilesTarget::Volume(volume.clone()),
+                        Vec::new(),
+                        cx,
+                    )
+                }),
+                volume,
+                engine,
+            });
+        }
+    }
+
+    fn render_files(&self, cx: &Context<Self>) -> AnyElement {
+        self.files.as_ref().map_or_else(
+            || {
+                empty_state("Not connected", "Waiting for the engine…", Theme::of(cx))
+                    .into_any_element()
+            },
+            |files| files.tab.clone().into_any_element(),
+        )
     }
 
     pub fn set_chrome(&mut self, chrome: Chrome, cx: &mut Context<Self>) {
@@ -213,6 +303,9 @@ impl VolumesScreen {
         if let Some(name) = self.selection.single()
             && let Some(volume) = store.volumes().iter().find(|v| &v.name == name)
         {
+            if self.tab == FILES_TAB {
+                return self.render_files(cx);
+            }
             return scroll_page("volume-detail", volume_info(store, volume, theme, cx))
                 .into_any_element();
         }
@@ -303,6 +396,7 @@ impl ListScreen for VolumesScreen {
 
 impl Render for VolumesScreen {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_files(cx);
         let store_entity = self.store.clone();
         let store = store_entity.read(cx);
         let rows_changed = self.sync_rows(store);
@@ -379,7 +473,12 @@ impl Render for VolumesScreen {
                 theme,
                 self.chrome,
                 "volume-detail-titlebar",
-                None,
+                self.selection.single().is_some().then(|| {
+                    SegmentedTabs::new("volume-tabs", TABS)
+                        .selected(self.tab)
+                        .on_select(cx.listener(|this, ix: &usize, _, cx| this.set_tab(*ix, cx)))
+                        .into_any_element()
+                }),
                 self.render_detail(store, cx),
             ))
     }

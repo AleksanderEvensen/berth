@@ -137,6 +137,14 @@ pub struct Container {
 }
 
 impl Container {
+    /// One of Berth's own helper containers (volume browsing).
+    #[must_use]
+    pub fn is_helper(&self) -> bool {
+        self.labels
+            .iter()
+            .any(|(key, _)| key == crate::HELPER_LABEL)
+    }
+
     #[must_use]
     pub fn short_id(&self) -> &str {
         self.id

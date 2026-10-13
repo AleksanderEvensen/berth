@@ -1,5 +1,6 @@
 mod chrome;
 mod dialogs;
+mod files;
 mod format;
 mod keymap;
 mod live;

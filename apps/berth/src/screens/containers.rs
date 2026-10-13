@@ -113,7 +113,7 @@ pub struct ContainersScreen {
     stack_members: HashMap<String, Vec<String>>,
     /// Container id → index into the store's container list.
     index: HashMap<String, usize>,
-    /// The open Stats/Logs/Terminal view, streaming only while shown.
+    /// The open Stats/Logs/Terminal/Files view, live only while shown.
     live: Live,
     /// Whether the shell is showing this screen.
     visible: bool,
@@ -266,6 +266,7 @@ impl ContainersScreen {
             1 => LiveTab::Stats,
             2 => LiveTab::Logs,
             3 => LiveTab::Terminal,
+            4 => LiveTab::Files,
             _ => return None,
         };
         let Some(Selection::Container(id)) = self.selection.single().filter(|_| self.visible)
@@ -279,6 +280,7 @@ impl ContainersScreen {
             running: container.state == ContainerState::Running,
             starts: store.start_count(id),
             engine: store.engine()?,
+            mounts: container.mounts.clone(),
         })
     }
 
@@ -1386,7 +1388,7 @@ fn menu_step(from: Option<usize>, count: usize, back: bool) -> Option<usize> {
 }
 
 /// Why a live tab shows nothing: stacks have no single stream, stopped
-/// containers have nothing to sample or exec into.
+/// containers have nothing to sample, exec into or list.
 fn live_placeholder(selection: &Selection, tab: usize, store: &Store) -> (&'static str, String) {
     let paused = match selection {
         Selection::Stack(_) => None,
@@ -1397,15 +1399,15 @@ fn live_placeholder(selection: &Selection, tab: usize, store: &Store) -> (&'stat
             .map(|c| c.state == ContainerState::Paused),
     };
     match (tab, paused) {
-        (4, _) => (
-            "Files",
-            "Browsing the container filesystem is planned.".into(),
-        ),
         (_, None) if matches!(selection, Selection::Stack(_)) => (
             TABS.get(tab).copied().unwrap_or_default(),
             "Select a container in the stack to see this.".into(),
         ),
         (_, Some(true)) => ("Paused", "Unpause the container to continue.".into()),
+        (4, Some(false)) => (
+            "Not running",
+            "Start the container to browse its files.".into(),
+        ),
         (_, Some(false)) => (
             "Not running",
             "Start the container to see live usage or open a shell.".into(),
