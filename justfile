@@ -143,9 +143,11 @@ before-packaging:
     just desktop-entry
 
 # Both architectures, merged into the universal binary where cargo-packager's
-# `--target universal-apple-darwin` looks for it.
+# `--target universal-apple-darwin` looks for it. The targets are added to the
+# pinned toolchain first (a no-op once installed).
 [macos]
 before-packaging:
+    rustup target add aarch64-apple-darwin x86_64-apple-darwin
     MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --locked --release -p berth --target aarch64-apple-darwin
     MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --locked --release -p berth --target x86_64-apple-darwin
     mkdir -p target/universal-apple-darwin/release

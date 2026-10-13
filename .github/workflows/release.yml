@@ -88,9 +88,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        run: |
-          rustup toolchain install
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
