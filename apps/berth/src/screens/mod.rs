@@ -230,7 +230,7 @@ pub fn detail_pane(
                 .flex()
                 .items_center()
                 .justify_center()
-                .px(px(120.0))
+                .px(px(chrome::CAPTION_CLEARANCE))
                 .children(top),
         ))
         .child(div().flex_1().min_h_0().child(body))

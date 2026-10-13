@@ -58,6 +58,13 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "objc2-core-foundation",
 ] }
 raw-window-handle = "0.6"
+# Moving and zooming the window from our Windows titlebar; the version
+# matches gpui-pre-windows.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 alacritty_terminal = "0.26"
 anyhow = "1"

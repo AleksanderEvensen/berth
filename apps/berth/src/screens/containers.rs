@@ -1098,7 +1098,7 @@ impl ContainersScreen {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .px(px(120.0))
+                    .px(px(chrome::CAPTION_CLEARANCE))
                     .when(!bulk, |d| d.child(tabs)),
             ))
             .child(div().flex_1().min_h_0().child(body))

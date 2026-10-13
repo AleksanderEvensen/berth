@@ -122,7 +122,12 @@ Windows named pipe) is in; the rest of M5 is not.
       variables are set, and the release workflow attaches it. Missing: the
       Developer ID secrets in the repository and a release that ships one.
 - [x] Windows: named pipe (`npipe://`, default `//./pipe/docker_engine`).
-- [ ] Windows: caption buttons.
+- [x] Windows: caption buttons. Minimize, maximize/restore and close in the
+      Windows 11 style, flush with the top-right corner; each is the native
+      caption area for its button (`WindowControlArea`), so hovering maximize
+      opens Snap Layouts. gpui has no window move on Windows, so the titlebar
+      drags, double-click zooms and right-click opens the window menu through
+      Win32 system commands.
 - [ ] Windows: MSI.
 
 ## Later (P2)

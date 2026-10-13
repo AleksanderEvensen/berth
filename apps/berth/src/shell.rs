@@ -860,15 +860,7 @@ impl Render for Shell {
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
             .child(self.render_sidebar_toggle(leading, cx))
-            .when_some(captions, |d, captions| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top(px((Theme::HEADER_HEIGHT - 24.0) / 2.0))
-                        .right(px(Theme::SPACE_MD))
-                        .child(captions),
-                )
-            })
+            .children(captions)
             .child(self.render_toasts(cx))
             .children(confirm);
 

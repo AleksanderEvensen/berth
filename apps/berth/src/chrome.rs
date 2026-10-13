@@ -1,5 +1,5 @@
 //! Window chrome for client-side decorations: the resizable shadowed frame,
-//! titlebar drag regions and Linux caption buttons.
+//! titlebar drag regions and Linux and Windows caption buttons.
 //!
 //! Follows Zed's `window_shadow` example and zeron's titlebar handling
 //! (`shell.rs` `titlebar_drag_region` / `linux_caption_button`).
@@ -7,7 +7,7 @@
 use std::cell::Cell;
 
 use berth_ui::Theme;
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 use berth_ui::{TabStop, icon, icons};
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, Div, HitboxBehavior, MouseButton, Pixels,
@@ -15,8 +15,18 @@ use gpui::{
     transparent_black,
 };
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
 const CAPTION_GROUP: &str = "caption-button";
+
+/// Width of one Windows caption button, as in Windows 11.
+#[cfg(windows)]
+const CAPTION_WIDTH: f32 = 46.0;
+/// Horizontal room a centred titlebar strip leaves on each side, clear of
+/// the caption buttons.
+#[cfg(windows)]
+pub const CAPTION_CLEARANCE: f32 = 3.0 * CAPTION_WIDTH + Theme::SPACE_SM;
+#[cfg(not(windows))]
+pub const CAPTION_CLEARANCE: f32 = 120.0;
 
 /// Width of the invisible resize band (and shadow) around a CSD window.
 const FRAME_INSET: Pixels = px(10.0);
@@ -91,13 +101,17 @@ fn traffic_lights_end(window: &Window) -> Option<f32> {
 
 /// Make `el` drag the window; double-click toggles maximize.
 pub fn drag_region(id: &'static str, el: Div) -> Stateful<Div> {
-    el.id(id)
+    let el = el
+        .id(id)
         .on_mouse_down(MouseButton::Left, |_, _, _| SHOULD_MOVE.set(true))
         .on_mouse_down_out(|_, _, _| SHOULD_MOVE.set(false))
         .on_mouse_up(MouseButton::Left, |_, _, _| SHOULD_MOVE.set(false))
         .on_mouse_move(|event, window, _| {
             if SHOULD_MOVE.get() && event.pressed_button == Some(MouseButton::Left) {
                 SHOULD_MOVE.set(false);
+                #[cfg(windows)]
+                win32::start_move(window);
+                #[cfg(not(windows))]
                 window.start_window_move();
             }
         })
@@ -105,13 +119,97 @@ pub fn drag_region(id: &'static str, el: Div) -> Stateful<Div> {
             if event.click_count() == 2 {
                 #[cfg(target_os = "macos")]
                 window.titlebar_double_click();
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(windows)]
+                win32::toggle_maximize(window);
+                #[cfg(not(any(target_os = "macos", windows)))]
                 window.zoom_window();
             }
-        })
-        .on_mouse_down(MouseButton::Right, |event, window, _| {
-            window.show_window_menu(event.position);
-        })
+        });
+    // Windows opens the window menu on release, as its own titlebar does.
+    #[cfg(windows)]
+    let el = el.on_mouse_up(MouseButton::Right, |_, window, _| {
+        win32::show_window_menu(window);
+    });
+    #[cfg(not(windows))]
+    let el = el.on_mouse_down(MouseButton::Right, |event, window, _| {
+        window.show_window_menu(event.position);
+    });
+    el
+}
+
+/// Window commands gpui's Windows backend lacks: it has no window move or
+/// window menu, and its zoom only maximizes. Each is posted to the window
+/// procedure, so the modal loop it may start (moving, the menu) runs after
+/// gpui's event dispatch has returned rather than inside it.
+#[cfg(windows)]
+mod win32 {
+    use gpui::Window;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, HTCAPTION, PostMessageW, SC_MAXIMIZE, SC_MOVE, SC_RESTORE, WM_SYSCOMMAND,
+    };
+
+    /// Opens the window menu at the screen point in `lparam`. Undocumented,
+    /// but what `DefWindowProc` itself uses for a right-click on the caption.
+    const WM_POPUPSYSTEMMENU: u32 = 0x0313;
+
+    fn hwnd(window: &Window) -> Option<HWND> {
+        let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+        else {
+            return None;
+        };
+        Some(HWND(std::ptr::with_exposed_provenance_mut(
+            handle.hwnd.get().cast_unsigned(),
+        )))
+    }
+
+    fn post(window: &Window, message: u32, wparam: u32, lparam: isize) {
+        let (Some(hwnd), Ok(wparam)) = (hwnd(window), usize::try_from(wparam)) else {
+            return;
+        };
+        // SAFETY: `hwnd` is the live window `window` wraps; posting only
+        // queues the message for its window procedure.
+        if let Err(error) =
+            unsafe { PostMessageW(Some(hwnd), message, WPARAM(wparam), LPARAM(lparam)) }
+        {
+            log::warn!("posting window message {message:#x} failed: {error}");
+        }
+    }
+
+    /// Hand the drag to the system move loop, which also snaps.
+    pub fn start_move(window: &Window) {
+        // gpui captures the mouse on press; the move loop needs it released.
+        // SAFETY: plain Win32 call on the UI thread.
+        unsafe { ReleaseCapture() }.ok();
+        post(window, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0);
+    }
+
+    pub fn toggle_maximize(window: &Window) {
+        let command = if window.is_maximized() {
+            SC_RESTORE
+        } else {
+            SC_MAXIMIZE
+        };
+        post(window, WM_SYSCOMMAND, command, 0);
+    }
+
+    /// The window menu (restore, move, size, …) at the cursor.
+    pub fn show_window_menu(window: &Window) {
+        let mut cursor = POINT::default();
+        // SAFETY: `cursor` is a valid out-pointer for the call.
+        if unsafe { GetCursorPos(&raw mut cursor) }.is_err() {
+            return;
+        }
+        // MAKELPARAM: x in the low word, y in the high word.
+        let [x0, x1, ..] = cursor.x.to_le_bytes();
+        let [y0, y1, ..] = cursor.y.to_le_bytes();
+        let Ok(lparam) = isize::try_from(u32::from_le_bytes([x0, x1, y0, y1])) else {
+            return;
+        };
+        post(window, WM_POPUPSYSTEMMENU, 0, lparam);
+    }
 }
 
 /// Wrap the app content in a CSD frame: transparent resize band, rounded
@@ -225,10 +323,124 @@ const fn cursor_for(edge: ResizeEdge) -> CursorStyle {
     }
 }
 
-/// Other platforms always draw native window controls.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+/// macOS draws its own traffic lights.
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", windows)))]
 pub const fn caption_buttons(_window: &Window, _cx: &App) -> Option<AnyElement> {
     None
+}
+
+/// Minimize / maximize (restore) / close in the Windows 11 style: flush with
+/// the top-right corner, the header's full height. Each is also the native
+/// caption area for its button, so hovering maximize opens Snap Layouts.
+#[cfg(windows)]
+pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
+    use gpui::WindowControlArea;
+
+    if window.is_fullscreen() {
+        return None;
+    }
+    let theme = Theme::of(cx);
+    let fg = if window.is_window_active() {
+        theme.text
+    } else {
+        theme.text_muted
+    };
+    let maximized = window.is_maximized();
+    let buttons = [
+        WindowControlArea::Min,
+        WindowControlArea::Max,
+        WindowControlArea::Close,
+    ]
+    .map(|area| {
+        let id = match area {
+            WindowControlArea::Min => "caption-min",
+            WindowControlArea::Max => "caption-max",
+            _ => "caption-close",
+        };
+        let close = area == WindowControlArea::Close;
+        let (hover, pressed) = if close {
+            (gpui::rgb(0x00c4_2b1c).into(), gpui::rgb(0x00b2_2a1b).into())
+        } else {
+            (theme.element_hover, theme.element_active)
+        };
+        TabStop::new(
+            id,
+            div()
+                .id(id)
+                .group(CAPTION_GROUP)
+                .w(px(CAPTION_WIDTH))
+                .h(px(Theme::HEADER_HEIGHT))
+                .border_1()
+                .border_color(transparent_black())
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |s| s.bg(hover))
+                .active(move |s| s.bg(pressed))
+                .occlude()
+                .window_control_area(area)
+                .child(caption_glyph(area, maximized, fg))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    match area {
+                        WindowControlArea::Min => window.minimize_window(),
+                        WindowControlArea::Max => win32::toggle_maximize(window),
+                        _ => window.remove_window(),
+                    }
+                }),
+        )
+    });
+
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .flex()
+            .children(buttons)
+            .into_any_element(),
+    )
+}
+
+/// A Windows caption glyph: outlines a pixel wide, like Segoe Fluent
+/// Icons'; maximize shows the overlapping restore squares when maximized.
+#[cfg(windows)]
+fn caption_glyph(area: gpui::WindowControlArea, maximized: bool, fg: gpui::Hsla) -> AnyElement {
+    use gpui::WindowControlArea;
+
+    let square = |size: f32| {
+        div()
+            .size(px(size))
+            .rounded(px(1.5))
+            .border_1()
+            .border_color(fg)
+    };
+    match area {
+        WindowControlArea::Min => div().w(px(10.0)).h(px(1.0)).bg(fg).into_any_element(),
+        WindowControlArea::Max if maximized => div()
+            .relative()
+            .size(px(10.0))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .size(px(8.0))
+                    .rounded_tr(px(1.5))
+                    .border_t_1()
+                    .border_r_1()
+                    .border_color(fg),
+            )
+            .child(square(8.0).absolute().bottom_0().left_0())
+            .into_any_element(),
+        WindowControlArea::Max => square(10.0).into_any_element(),
+        _ => icon(icons::CLOSE)
+            .size(px(16.0))
+            .text_color(fg)
+            .group_hover(CAPTION_GROUP, |s| s.text_color(gpui::white()))
+            .into_any_element(),
+    }
 }
 
 /// Minimize / maximize / close, drawn by us when the compositor leaves
@@ -320,6 +532,9 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
 
     Some(
         div()
+            .absolute()
+            .top(px((Theme::HEADER_HEIGHT - 24.0) / 2.0))
+            .right(px(Theme::SPACE_MD))
             .flex()
             .items_center()
             .gap(px(8.0))
