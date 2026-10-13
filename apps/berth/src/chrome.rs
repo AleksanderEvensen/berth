@@ -6,9 +6,11 @@
 
 use std::cell::Cell;
 
-use berth_ui::Theme;
 #[cfg(any(target_os = "linux", target_os = "freebsd", windows))]
-use berth_ui::{TabStop, icon, icons};
+use berth_ui::TabStop;
+use berth_ui::Theme;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+use berth_ui::{icon, icons};
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, Decorations, Div, HitboxBehavior, MouseButton, Pixels,
     Point, ResizeEdge, Size, Stateful, Tiling, Window, canvas, div, point, prelude::*, px,
@@ -379,7 +381,7 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
                 .active(move |s| s.bg(pressed))
                 .occlude()
                 .window_control_area(area)
-                .child(caption_glyph(area, maximized, fg))
+                .child(caption_glyph(area, maximized, fg, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
@@ -403,44 +405,54 @@ pub fn caption_buttons(window: &Window, cx: &App) -> Option<AnyElement> {
     )
 }
 
-/// A Windows caption glyph: outlines a pixel wide, like Segoe Fluent
-/// Icons'; maximize shows the overlapping restore squares when maximized.
+/// A Windows caption glyph from the system icon font, at the 10px Windows
+/// itself uses; maximize shows the restore glyph when maximized.
 #[cfg(windows)]
-fn caption_glyph(area: gpui::WindowControlArea, maximized: bool, fg: gpui::Hsla) -> AnyElement {
+fn caption_glyph(
+    area: gpui::WindowControlArea,
+    maximized: bool,
+    fg: gpui::Hsla,
+    cx: &App,
+) -> AnyElement {
     use gpui::WindowControlArea;
 
-    let square = |size: f32| {
-        div()
-            .size(px(size))
-            .rounded(px(1.5))
-            .border_1()
-            .border_color(fg)
+    let glyph = match area {
+        WindowControlArea::Min => "\u{E921}",
+        WindowControlArea::Max if maximized => "\u{E923}",
+        WindowControlArea::Max => "\u{E922}",
+        _ => "\u{E8BB}",
     };
-    match area {
-        WindowControlArea::Min => div().w(px(10.0)).h(px(1.0)).bg(fg).into_any_element(),
-        WindowControlArea::Max if maximized => div()
-            .relative()
-            .size(px(10.0))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .size(px(8.0))
-                    .rounded_tr(px(1.5))
-                    .border_t_1()
-                    .border_r_1()
-                    .border_color(fg),
-            )
-            .child(square(8.0).absolute().bottom_0().left_0())
-            .into_any_element(),
-        WindowControlArea::Max => square(10.0).into_any_element(),
-        _ => icon(icons::CLOSE)
-            .size(px(16.0))
-            .text_color(fg)
-            .group_hover(CAPTION_GROUP, |s| s.text_color(gpui::white()))
-            .into_any_element(),
+    div()
+        .font_family(caption_font(cx))
+        .text_size(px(10.0))
+        .line_height(px(10.0))
+        .text_color(fg)
+        .when(area == WindowControlArea::Close, |d| {
+            d.group_hover(CAPTION_GROUP, |s| s.text_color(gpui::white()))
+        })
+        .child(glyph)
+        .into_any_element()
+}
+
+/// The font Windows draws its caption glyphs with: Segoe Fluent Icons on
+/// Windows 11, Segoe MDL2 Assets (same code points) on Windows 10.
+#[cfg(windows)]
+fn caption_font(cx: &App) -> gpui::SharedString {
+    const FLUENT: &str = "Segoe Fluent Icons";
+    thread_local! {
+        static FONT: std::cell::OnceCell<gpui::SharedString> = const { std::cell::OnceCell::new() };
     }
+    FONT.with(|font| {
+        font.get_or_init(|| {
+            let fluent = cx
+                .text_system()
+                .all_font_names()
+                .iter()
+                .any(|name| name == FLUENT);
+            if fluent { FLUENT } else { "Segoe MDL2 Assets" }.into()
+        })
+        .clone()
+    })
 }
 
 /// Minimize / maximize / close, drawn by us when the compositor leaves
