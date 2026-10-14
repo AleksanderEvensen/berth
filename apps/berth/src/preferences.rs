@@ -56,8 +56,8 @@ impl Writer {
 pub struct Preferences {
     current: Settings,
     revision: u64,
-    /// `None` when the platform has no config directory: settings then
-    /// live for the session only.
+    /// `None` when the platform has no config directory, or the file there
+    /// couldn't be read or backed up: settings then live for the session only.
     path: Option<PathBuf>,
     writer: Arc<Writer>,
     /// What loading had to reset; stays for the session.
@@ -80,11 +80,19 @@ pub fn init(cx: &mut App) {
     if let Some(path) = &path {
         log::info!("settings: {}", path.display());
     }
+    let saving_blocked = problem
+        .as_ref()
+        .is_some_and(|problem| problem.saving_blocked);
+    let path = path.filter(|_| !saving_blocked);
     let problem = problem.map(|problem| match problem.backup {
         Some(backup) => format!(
             "{} The original is in {}.",
             problem.message,
             backup.display()
+        ),
+        None if problem.saving_blocked => format!(
+            "{} Changes won't be saved this session, so the original isn't overwritten.",
+            problem.message
         ),
         None => problem.message,
     });

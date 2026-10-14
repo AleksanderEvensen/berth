@@ -6,8 +6,10 @@
 //! this version doesn't understand falls back to its default), keys this
 //! version doesn't know are kept and written back, and a file that can't be
 //! used as-is is backed up to `settings.json.bak` before anything replaces it.
+//! If it can't be read or backed up, [`LoadProblem::saving_blocked`] is set
+//! and callers must not save over it.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
@@ -51,6 +53,8 @@ pub struct LoadProblem {
     pub message: String,
     /// Where the original file was copied, if it was.
     pub backup: Option<PathBuf>,
+    /// The original couldn't be read or backed up: saving would destroy it.
+    pub saving_blocked: bool,
 }
 
 /// Light/dark preference: follow the OS, or pin one.
@@ -174,8 +178,7 @@ impl Settings {
                 return (Self::default(), None);
             }
             Err(error) => {
-                // Unreadable but present: don't back up or overwrite blindly,
-                // the next save will surface its own error if it fails too.
+                // Unreadable but present: nothing to back up, so never overwrite.
                 let message = format!("Couldn't read {}: {error}", path.display());
                 log::warn!("{message}");
                 return (
@@ -183,6 +186,7 @@ impl Settings {
                     Some(LoadProblem {
                         message,
                         backup: None,
+                        saving_blocked: true,
                     }),
                 );
             }
@@ -195,17 +199,28 @@ impl Settings {
             return (settings, None);
         }
         let backup = path.with_extension("json.bak");
-        let backup = std::fs::write(&backup, &bytes)
-            .inspect_err(|error| log::warn!("couldn't back up {}: {error}", path.display()))
-            .ok()
-            .map(|()| backup);
+        let (backup, backup_error) = match std::fs::write(&backup, &bytes) {
+            Ok(()) => (Some(backup), String::new()),
+            Err(error) => (
+                None,
+                format!(" Couldn't back it up to {}: {error}.", backup.display()),
+            ),
+        };
         let message = format!(
-            "Some settings in {} couldn't be read and were reset: {}.",
+            "Some settings in {} couldn't be read and were reset: {}.{backup_error}",
             path.display(),
             issues.join("; ")
         );
         log::warn!("{message}");
-        (settings, Some(LoadProblem { message, backup }))
+        let saving_blocked = backup.is_none();
+        (
+            settings,
+            Some(LoadProblem {
+                message,
+                backup,
+                saving_blocked,
+            }),
+        )
     }
 
     /// Read each field on its own; returns what had to be reset.
@@ -264,19 +279,20 @@ impl Settings {
         (settings, issues)
     }
 
-    /// Write `path` atomically (temp file + rename), creating its directory.
-    /// Not safe to call concurrently for the same path: callers serialize.
+    /// Write `path` atomically (unique temp file + rename), creating its
+    /// directory. Concurrent saves, even from other processes, each land
+    /// whole; the last rename wins.
     ///
     /// # Errors
     /// Returns the I/O error if the directory, temp file or rename fails.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        let dir = path.parent().unwrap_or_else(|| Path::new(""));
+        std::fs::create_dir_all(dir)?;
         let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, path)
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.write_all(&json)?;
+        tmp.persist(path).map_err(|error| error.error)?;
+        Ok(())
     }
 }
 
@@ -302,7 +318,71 @@ mod tests {
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), (settings, None));
-        assert!(!path.with_extension("json.tmp").exists());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unsynchronized_saves_dont_collide() {
+        // Separate app instances share no lock; each save must still land.
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("settings.json"));
+        let threads: Vec<_> = Accent::ALL
+            .into_iter()
+            .map(|accent| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let settings = Settings {
+                        accent,
+                        ..Settings::default()
+                    };
+                    for _ in 0..50 {
+                        settings.save(&path).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(Settings::load(&path).1, None);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_backup_blocks_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::create_dir(path.with_extension("json.bak")).unwrap();
+        std::fs::write(&path, r#"{"accent":"futureHue","appearance":"light"}"#).unwrap();
+        let (settings, problem) = Settings::load(&path);
+        assert_eq!(settings.appearance, AppearanceMode::Light);
+        let problem = problem.unwrap();
+        assert_eq!(problem.backup, None);
+        assert!(problem.saving_blocked);
+        assert!(
+            problem.message.contains("back it up"),
+            "{}",
+            problem.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_blocks_saving() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            return; // root ignores permissions
+        }
+        let (settings, problem) = Settings::load(&path);
+        assert_eq!(settings, Settings::default());
+        assert!(problem.unwrap().saving_blocked);
     }
 
     #[test]
@@ -321,7 +401,9 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         let (settings, problem) = Settings::load(&path);
         assert_eq!(settings, Settings::default());
-        let backup = problem.unwrap().backup.unwrap();
+        let problem = problem.unwrap();
+        assert!(!problem.saving_blocked);
+        let backup = problem.backup.unwrap();
         assert_eq!(std::fs::read_to_string(backup).unwrap(), "{ not json");
     }
 
