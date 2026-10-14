@@ -172,10 +172,10 @@ impl CleanupScreen {
             .gap(px(Theme::SPACE_MD + 2.0))
             .cursor_pointer()
             .hover(move |s| s.bg(row_hover))
-            .child(
-                Checkbox::new(SharedString::from(format!("check-{target:?}")), checked)
-                    .on_toggle(cx.listener(move |this, _, _, cx| this.toggle(target, cx))),
-            )
+            .child(Checkbox::new(
+                SharedString::from(format!("check-{target:?}")),
+                checked,
+            ))
             .child(
                 div()
                     .flex_1()
