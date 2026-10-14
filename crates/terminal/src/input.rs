@@ -17,6 +17,9 @@ pub fn keystroke_bytes(
     if mods.platform || (mods.control && mods.shift) {
         return None;
     }
+    if let Some(bytes) = modified_navigation(key, mods) {
+        return Some(bytes);
+    }
     if mods.alt {
         let inner = keystroke_bytes(key, key_char, Modifiers { alt: false, ..mods }, app_cursor)?;
         let mut out = vec![0x1b];
@@ -68,6 +71,32 @@ pub fn keystroke_bytes(
     Some(fixed.to_vec())
 }
 
+/// xterm's `CSI 1;<mod>X` / `CSI <n>;<mod>~` for navigation keys held with
+/// shift, alt or ctrl (e.g. ctrl+left → `ESC[1;5D`, word left in readline).
+fn modified_navigation(key: &str, mods: Modifiers) -> Option<Vec<u8>> {
+    let modifier = [(mods.shift, 1), (mods.alt, 2), (mods.control, 4)]
+        .into_iter()
+        .filter_map(|(held, bit)| held.then_some(bit))
+        .fold(1_u8, u8::saturating_add);
+    if modifier == 1 {
+        return None;
+    }
+    let (number, last) = match key {
+        "up" => (1, 'A'),
+        "down" => (1, 'B'),
+        "right" => (1, 'C'),
+        "left" => (1, 'D'),
+        "home" => (1, 'H'),
+        "end" => (1, 'F'),
+        "insert" => (2, '~'),
+        "delete" => (3, '~'),
+        "pageup" => (5, '~'),
+        "pagedown" => (6, '~'),
+        _ => return None,
+    };
+    Some(format!("\x1b[{number};{modifier}{last}").into_bytes())
+}
+
 /// Ctrl-key caret notation.
 fn control_bytes(key: &str) -> Option<Vec<u8>> {
     let byte = match key {
@@ -92,23 +121,18 @@ fn control_bytes(key: &str) -> Option<Vec<u8>> {
     Some(vec![byte])
 }
 
-/// Pasted text for the TTY, bracketed when the program asked for it. The
-/// one sequence that could break out of a bracketed paste is stripped.
+/// Pasted text for the TTY, bracketed when the program asked for it. ESC and
+/// Ctrl+C are dropped inside brackets so the text can't end the paste early
+/// or interrupt it (as Alacritty does).
 #[must_use]
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    // Repeat until stable: removing one terminator can splice a new one
-    // together (`\x1b[20\x1b[201~1~`).
-    let mut sanitized = text.to_owned();
-    while sanitized.contains("\x1b[201~") {
-        sanitized = sanitized.replace("\x1b[201~", "");
-    }
     if bracketed {
         let mut out = b"\x1b[200~".to_vec();
-        out.extend_from_slice(sanitized.as_bytes());
+        out.extend_from_slice(text.replace(['\x1b', '\x03'], "").as_bytes());
         out.extend_from_slice(b"\x1b[201~");
         out
     } else {
-        sanitized.into_bytes()
+        text.as_bytes().to_vec()
     }
 }
 
@@ -175,6 +199,44 @@ mod tests {
             ..none()
         };
         assert_eq!(keystroke_bytes("c", Some("C"), ctrl_shift, false), None);
+        assert_eq!(keystroke_bytes("left", None, ctrl_shift, false), None);
+    }
+
+    #[test]
+    fn modified_navigation_keys() {
+        let ctrl = Modifiers {
+            control: true,
+            ..none()
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..none()
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..none()
+        };
+        // Modified keys use CSI even in application cursor mode, as xterm.
+        assert_eq!(
+            keystroke_bytes("left", None, ctrl, true),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            keystroke_bytes("right", None, alt, false),
+            Some(b"\x1b[1;3C".to_vec())
+        );
+        assert_eq!(
+            keystroke_bytes("end", None, shift, false),
+            Some(b"\x1b[1;2F".to_vec())
+        );
+        assert_eq!(
+            keystroke_bytes("delete", None, ctrl, false),
+            Some(b"\x1b[3;5~".to_vec())
+        );
+        assert_eq!(
+            keystroke_bytes("tab", None, shift, false),
+            Some(b"\x1b[Z".to_vec())
+        );
     }
 
     #[test]
@@ -182,11 +244,16 @@ mod tests {
         assert_eq!(paste_bytes("hi", false), b"hi".to_vec());
         assert_eq!(
             paste_bytes("a\x1b[201~b", true),
-            b"\x1b[200~ab\x1b[201~".to_vec()
+            b"\x1b[200~a[201~b\x1b[201~".to_vec()
+        );
+        // Ctrl+C makes readline abandon the paste and run what follows.
+        assert_eq!(
+            paste_bytes("ignored\x03\recho injected\r", true),
+            b"\x1b[200~ignored\recho injected\r\x1b[201~".to_vec()
         );
         assert_eq!(
-            paste_bytes("\x1b[20\x1b[201~1~\necho injected\n", true),
-            b"\x1b[200~\necho injected\n\x1b[201~".to_vec()
+            paste_bytes("\x1b[20\x1b[201~1~\n", true),
+            b"\x1b[200~[20[201~1~\n\x1b[201~".to_vec()
         );
     }
 }

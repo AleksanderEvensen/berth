@@ -13,6 +13,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor};
 use berth_ui::ansi::AnsiColor;
@@ -60,7 +61,18 @@ pub enum CellColor {
     Ansi(AnsiColor),
 }
 
-fn map_color(color: Color) -> CellColor {
+/// Palette entries a program set (OSC 4/10/11) win over the theme.
+fn map_color(color: Color, colors: &Colors) -> CellColor {
+    let set = match color {
+        Color::Spec(_) => None,
+        Color::Indexed(ix) => colors[usize::from(ix)],
+        Color::Named(named) => {
+            named_index(named).map_or(colors[named], |ix| colors[usize::from(ix)])
+        }
+    };
+    if let Some(Rgb { r, g, b }) = set {
+        return CellColor::Ansi(AnsiColor::Rgb(r, g, b));
+    }
     match color {
         Color::Named(NamedColor::Background) => CellColor::Background,
         color => sgr_color(color).map_or(CellColor::Foreground, CellColor::Ansi),
@@ -219,10 +231,12 @@ impl Emulator {
                 Event::PtyWrite(text) => text,
                 // OSC 4/10/11/12 colour queries: 0–255 palette, then the
                 // default foreground, background and cursor.
-                Event::ColorRequest(index, format) => match (host.color)(index) {
-                    Some(color) => format(color),
-                    None => continue,
-                },
+                Event::ColorRequest(index, format) => {
+                    match self.term.colors()[index].or_else(|| (host.color)(index)) {
+                        Some(color) => format(color),
+                        None => continue,
+                    }
+                }
                 // CSI 14 t / 18 t: text area size in pixels and cells.
                 Event::TextAreaSizeRequest(format) => format(WindowSize {
                     num_lines: self.size.rows,
@@ -343,7 +357,10 @@ impl Emulator {
             let cell = indexed.cell;
             let flags = cell.flags;
             let inverse = flags.contains(Flags::INVERSE);
-            let (fg, bg) = (map_color(cell.fg), map_color(cell.bg));
+            let (fg, bg) = (
+                map_color(cell.fg, content.colors),
+                map_color(cell.bg, content.colors),
+            );
             let (fg, bg) = if inverse { (bg, fg) } else { (fg, bg) };
             let hidden = flags.contains(Flags::HIDDEN);
             *slot = CellSnapshot {
@@ -442,6 +459,34 @@ mod tests {
         let reply = String::from_utf8(e.feed(b"\x1b[14t", &host)).unwrap();
         assert_eq!(reply, "\x1b[4;54;80t");
         assert_eq!(e.feed(b"\x1b]10;?\x07", &host), b"");
+    }
+
+    #[test]
+    fn palette_overrides_render_and_answer_queries() {
+        let mut e = emu(10, 1);
+        let host = Host {
+            color: &|_| Some(Rgb { r: 9, g: 9, b: 9 }),
+            cell_px: (8, 18),
+        };
+        e.feed(
+            b"\x1b]4;1;rgb:12/34/56\x07\x1b[31mA\x1b[2mB\x1b[0;32mC",
+            &host,
+        );
+        let row = &e.snapshot().rows[0];
+        let set = CellColor::Ansi(AnsiColor::Rgb(0x12, 0x34, 0x56));
+        assert_eq!(row[0].fg, set);
+        assert_eq!(row[1].fg, set, "dim red folds onto the overridden red");
+        assert_eq!(row[2].fg, CellColor::Ansi(AnsiColor::Indexed(2)));
+        let reply = String::from_utf8(e.feed(b"\x1b]4;1;?\x07", &host)).unwrap();
+        assert!(
+            reply.starts_with("\x1b]4;1;rgb:1212/3434/5656"),
+            "{reply:?}"
+        );
+        let reply = String::from_utf8(e.feed(b"\x1b]4;2;?\x07", &host)).unwrap();
+        assert!(
+            reply.starts_with("\x1b]4;2;rgb:0909/0909/0909"),
+            "{reply:?}"
+        );
     }
 
     #[test]
