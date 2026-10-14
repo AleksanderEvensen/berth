@@ -15,8 +15,9 @@ use super::{Connection, Op, Store, StoreEvent};
 
 const REFRESH_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Refresh state shared with storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Refresh {
+pub(super) enum Refresh {
     #[default]
     Idle,
     /// Waiting out the debounce; later changes are still picked up.

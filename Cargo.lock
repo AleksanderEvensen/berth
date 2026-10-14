@@ -630,7 +630,6 @@ name = "berth"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
- "anyhow",
  "berth-docker",
  "berth-settings",
  "berth-terminal",

@@ -3,14 +3,15 @@
 //! Lists are cheap and loaded first; `/system/df` (sizes, usage counts) is
 //! slow and merged in afterwards. Engine events about images/volumes — and
 //! containers appearing or disappearing, which changes usage — trigger a
-//! coalesced refresh rather than per-object inspects.
+//! coalesced refresh rather than per-object inspects. A change while a
+//! refresh is in flight schedules a follow-up, as for networks.
 
 use std::time::Duration;
 
 use berth_docker::{Container, Image, ImagePrune, MountKind, PruneReport, Volume};
 use gpui::Context;
 
-use super::{Op, Store, StoreEvent};
+use super::{Op, Store, StoreEvent, networks::Refresh};
 use crate::format;
 
 /// Coalesces bursts of events (e.g. `compose down`) into one refresh.
@@ -57,8 +58,18 @@ pub struct Storage {
     pub(super) build_cache_reclaimable: Option<u64>,
     /// Sizes and usage counts from `/system/df` have arrived.
     pub(super) usage_known: bool,
-    pub(super) refresh_queued: bool,
+    /// The first lists have arrived.
+    loaded: bool,
+    /// Covers the lists and the disk usage after them.
+    refresh: Refresh,
     pub(super) pruning: bool,
+}
+
+impl Storage {
+    /// Forget an in-flight refresh; its engine is gone.
+    pub(super) const fn cancel_refresh(&mut self) {
+        self.refresh = Refresh::Idle;
+    }
 }
 
 impl Store {
@@ -176,24 +187,47 @@ impl Store {
 
     /// Reload image/volume lists, then disk usage. Coalesces bursts.
     pub fn refresh_storage(&mut self, cx: &mut Context<Self>) {
-        if self.storage.refresh_queued {
-            return;
+        match self.storage.refresh {
+            Refresh::Idle => {}
+            Refresh::Queued => return,
+            Refresh::Listing { .. } => {
+                self.storage.refresh = Refresh::Listing { stale: true };
+                return;
+            }
         }
         let Some(engine) = self.engine.clone() else {
             return;
         };
-        self.storage.refresh_queued = true;
+        self.storage.refresh = Refresh::Queued;
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REFRESH_DEBOUNCE).await;
+            let current = this.update(cx, |store, _| {
+                let current = store.is_current(generation);
+                if current {
+                    store.storage.refresh = Refresh::Listing { stale: false };
+                }
+                current
+            });
+            if !matches!(current, Ok(true)) {
+                return;
+            }
             let (images, volumes) = futures::join!(engine.list_images(), engine.list_volumes());
             let current = this.update(cx, |store, cx| {
                 if !store.is_current(generation) {
                     return false;
                 }
-                store.storage.refresh_queued = false;
+                // An outdated list could resurrect a removed object; keep the
+                // current one until the follow-up arrives.
+                if store.storage_stale() && store.storage.loaded {
+                    store.finish_storage_refresh(cx);
+                    return false;
+                }
                 match (images, volumes) {
-                    (Ok(images), Ok(volumes)) => store.merge_lists(images, volumes),
+                    (Ok(images), Ok(volumes)) => {
+                        store.merge_lists(images, volumes);
+                        store.storage.loaded = true;
+                    }
                     (Err(err), _) | (_, Err(err)) => {
                         log::warn!("storage refresh failed: {err}");
                     }
@@ -204,29 +238,47 @@ impl Store {
             if !matches!(current, Ok(true)) {
                 return;
             }
-            match engine.disk_usage().await {
-                Ok(usage) => {
-                    this.update(cx, |store, cx| {
-                        if !store.is_current(generation) {
-                            return;
-                        }
+            let usage = engine.disk_usage().await;
+            this.update(cx, |store, cx| {
+                if !store.is_current(generation) {
+                    return;
+                }
+                match usage {
+                    Ok(_) if store.storage_stale() => {}
+                    Ok(usage) => {
                         store.storage.images = usage.images;
                         store.storage.volumes = usage.volumes;
                         store.storage.build_cache_reclaimable =
                             Some(usage.build_cache_reclaimable_bytes);
                         store.storage.usage_known = true;
-                        cx.notify();
-                    })
-                    .ok();
+                        store.storage.loaded = true;
+                    }
+                    Err(err) => log::warn!("disk usage failed: {err}"),
                 }
-                Err(err) => log::warn!("disk usage failed: {err}"),
-            }
+                store.finish_storage_refresh(cx);
+            })
+            .ok();
         })
         .detach();
     }
 
+    fn storage_stale(&self) -> bool {
+        self.storage.refresh == Refresh::Listing { stale: true }
+    }
+
+    fn finish_storage_refresh(&mut self, cx: &mut Context<Self>) {
+        let stale = self.storage_stale();
+        self.storage.refresh = Refresh::Idle;
+        if stale {
+            self.refresh_storage(cx);
+        }
+        cx.notify();
+    }
+
     /// Replace lists while keeping the last known sizes/usage until disk
-    /// usage arrives, so rows don't flicker to "unknown".
+    /// usage arrives, so rows don't flicker to "unknown". Volume usage is not
+    /// kept: an old count outlives removed containers, while the fallback
+    /// reads current mounts.
     fn merge_lists(&mut self, mut images: Vec<Image>, mut volumes: Vec<Volume>) {
         for image in &mut images {
             if image.containers.is_none()
@@ -238,7 +290,6 @@ impl Store {
         for volume in &mut volumes {
             if let Some(old) = self.storage.volumes.iter().find(|v| v.name == volume.name) {
                 volume.size = volume.size.or(old.size);
-                volume.ref_count = volume.ref_count.or(old.ref_count);
             }
         }
         self.storage.images = images;

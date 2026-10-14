@@ -1,6 +1,7 @@
 //! Images screen: "In use" / "Unused" / "Dangling" sections with size and
 //! age, multi-select, delete, and remove-dangling.
 
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use berth_docker::{Image, ImageDetails};
@@ -89,9 +90,13 @@ impl EventEmitter<ShowContainer> for ImagesScreen {}
 impl ImagesScreen {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
         cx.observe(&store, |this, store, cx| {
-            let store = store.read(cx);
-            this.selection
-                .retain(|id| store.images().iter().any(|i| &i.id == id));
+            let ids: HashSet<&str> = store
+                .read(cx)
+                .images()
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect();
+            this.selection.retain(|id| ids.contains(id.as_str()));
             cx.notify();
         })
         .detach();

@@ -223,15 +223,18 @@ impl Render for CleanupScreen {
 
         let targets = self.targets();
         // Unused images already include the dangling ones — don't double count.
-        let total: Option<u64> = targets
+        let counted: Vec<_> = targets
             .iter()
             .filter(|t| {
                 !(**t == PruneTarget::DanglingImages
                     && self.selected.contains(&PruneTarget::UnusedImages))
             })
             .map(|t| store.reclaimable(*t))
+            .collect();
+        let total: Option<u64> = counted
+            .iter()
             .try_fold(0u64, |acc, b| b.map(|b| acc.saturating_add(b)));
-        let known_total: u64 = targets.iter().filter_map(|t| store.reclaimable(*t)).sum();
+        let known_total: u64 = counted.iter().flatten().sum();
         let subtitle = if store.usage_known() {
             "Reclaim disk space from things you no longer use"
         } else {

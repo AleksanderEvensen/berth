@@ -658,12 +658,26 @@ impl FixtureEngine {
         self
     }
 
-    /// Delay network listings: the state is read immediately, the reply
-    /// arrives later — so changes made meanwhile are missing from it.
+    /// Delay network listings and disk usage: the state is read immediately,
+    /// the reply arrives later — so changes made meanwhile are missing from it.
     #[must_use]
     pub const fn with_list_latency(mut self, latency: Duration) -> Self {
         self.list_latency = Some(latency);
         self
+    }
+
+    /// Reply with `value`, after the configured list latency if any.
+    fn listed<T: Send + 'static>(&self, value: T) -> BoxFuture<'static, EngineResult<T>> {
+        let Some(latency) = self.list_latency else {
+            return future::ready(Ok(value)).boxed();
+        };
+        let (tx, rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(latency);
+            let _ = tx.send(value);
+        });
+        rx.map(|r| r.map_err(|_| EngineError::Transport("fixture worker gone".into())))
+            .boxed()
     }
 
     /// Apply `f` to the state, after the configured latency if any.
@@ -847,36 +861,37 @@ impl Engine for FixtureEngine {
     }
 
     fn disk_usage(&self) -> BoxFuture<'static, EngineResult<DiskUsage>> {
-        future::ready(Ok(self.with_state(|s| DiskUsage {
-            images: s
-                .images
-                .iter()
-                .cloned()
-                .map(|mut image| {
-                    image.containers = Some(image_references(&s.containers, &image));
-                    image
-                })
-                .collect(),
-            volumes: s
-                .volumes
-                .iter()
-                .cloned()
-                .map(|mut volume| {
-                    volume.ref_count = Some(volume_references(&s.containers, &volume.name));
-                    volume
-                })
-                .collect(),
-            build_cache_bytes: s
-                .build_cache
-                .iter()
-                .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size)),
-            build_cache_reclaimable_bytes: s
-                .build_cache
-                .iter()
-                .filter(|(_, _, in_use)| !in_use)
-                .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size)),
-        })))
-        .boxed()
+        self.listed(self.with_state(|s| {
+            DiskUsage {
+                images: s
+                    .images
+                    .iter()
+                    .cloned()
+                    .map(|mut image| {
+                        image.containers = Some(image_references(&s.containers, &image));
+                        image
+                    })
+                    .collect(),
+                volumes: s
+                    .volumes
+                    .iter()
+                    .cloned()
+                    .map(|mut volume| {
+                        volume.ref_count = Some(volume_references(&s.containers, &volume.name));
+                        volume
+                    })
+                    .collect(),
+                build_cache_bytes: s
+                    .build_cache
+                    .iter()
+                    .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size)),
+                build_cache_reclaimable_bytes: s
+                    .build_cache
+                    .iter()
+                    .filter(|(_, _, in_use)| !in_use)
+                    .fold(0_u64, |sum, (_, size, _)| sum.saturating_add(*size)),
+            }
+        }))
     }
 
     fn remove_image(&self, id: &str, force: bool) -> BoxFuture<'static, EngineResult<()>> {
@@ -929,16 +944,7 @@ impl Engine for FixtureEngine {
                 .map(|network| with_endpoints(&s.containers, network))
                 .collect()
         });
-        let Some(latency) = self.list_latency else {
-            return future::ready(Ok(list)).boxed();
-        };
-        let (tx, rx) = oneshot::channel();
-        std::thread::spawn(move || {
-            std::thread::sleep(latency);
-            let _ = tx.send(list);
-        });
-        rx.map(|r| r.map_err(|_| EngineError::Transport("fixture worker gone".into())))
-            .boxed()
+        self.listed(list)
     }
 
     fn remove_network(&self, id: &str) -> BoxFuture<'static, EngineResult<()>> {

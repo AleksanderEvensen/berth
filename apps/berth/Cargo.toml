@@ -19,7 +19,6 @@ gpui-window-chrome.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-base.workspace = true
-anyhow.workspace = true
 env_logger.workspace = true
 futures.workspace = true
 log.workspace = true

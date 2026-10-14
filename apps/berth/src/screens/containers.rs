@@ -421,11 +421,14 @@ impl ContainersScreen {
     }
 
     fn drop_stale_selection(&mut self, containers: &[Container]) {
+        let ids: HashSet<&str> = containers.iter().map(|c| c.id.as_str()).collect();
+        let projects: HashSet<&str> = containers
+            .iter()
+            .filter_map(|c| c.compose.as_ref().map(|cr| cr.project.as_str()))
+            .collect();
         self.selection.retain(|selection| match selection {
-            Selection::Container(id) => containers.iter().any(|c| &c.id == id),
-            Selection::Stack(project) => containers
-                .iter()
-                .any(|c| c.compose.as_ref().is_some_and(|cr| &cr.project == project)),
+            Selection::Container(id) => ids.contains(id.as_str()),
+            Selection::Stack(project) => projects.contains(project.as_str()),
         });
     }
 

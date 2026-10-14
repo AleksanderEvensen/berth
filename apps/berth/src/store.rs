@@ -410,7 +410,7 @@ async fn run_session(
         store.connection = Connection::Connected(info);
         store.containers = containers.into_iter().filter(|c| !c.is_helper()).collect();
         store.pending.clear();
-        store.storage.refresh_queued = false;
+        store.storage.cancel_refresh();
         store.refresh_storage(cx);
         store.networks.cancel_refresh();
         store.refresh_networks(cx);
@@ -682,5 +682,59 @@ mod tests {
                 "the removal's event was swallowed by the in-flight refresh"
             );
         });
+    }
+
+    /// A disk-usage reply read before a removal must not bring the removed
+    /// volume back; a follow-up refresh replaces it.
+    #[gpui::test]
+    fn storage_changes_during_a_refresh_trigger_a_follow_up(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let latency = Duration::from_millis(100);
+        let engine: Arc<dyn Engine> = Arc::new(FixtureEngine::default().with_list_latency(latency));
+        let connector: Connector = Arc::new(move || Ok(engine.clone()));
+        let store = cx.new(|cx| Store::new(connector, cx));
+        // Past the debounce, then until the delayed reply has landed.
+        let settle = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            std::thread::sleep(latency.saturating_mul(2));
+            cx.run_until_parked();
+        };
+        settle(cx);
+        settle(cx);
+        let volume = store.read_with(cx, |store, _| {
+            assert!(store.usage_known());
+            store
+                .volumes()
+                .iter()
+                .find(|v| !store.volume_in_use(v))
+                .map(|v| v.name.clone())
+                .unwrap()
+        });
+
+        // Lists land at once; disk usage is read now and replies later.
+        store.update(cx, Store::refresh_storage);
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| {
+            store.remove_volumes(vec![volume.clone()], cx);
+        });
+        cx.run_until_parked();
+        // The outdated disk usage arrives; the follow-up is still debouncing.
+        std::thread::sleep(latency.saturating_mul(2));
+        cx.run_until_parked();
+        let shown = |cx: &mut TestAppContext| {
+            store.read_with(cx, |store, _| {
+                store.volumes().iter().any(|v| v.name == volume)
+            })
+        };
+        assert!(
+            !shown(cx),
+            "an outdated disk usage restored the removed volume"
+        );
+        settle(cx);
+        assert!(!shown(cx));
+        assert_eq!(store.read_with(cx, |store, _| store.pending(&volume)), None);
     }
 }
