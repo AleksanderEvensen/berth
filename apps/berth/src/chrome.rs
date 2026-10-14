@@ -177,6 +177,9 @@ fn platform_buttons(layout: CaptionLayout, window: &Window, cx: &App) -> AnyElem
         let face = div()
             .w(px(WINDOWS_CAPTION_WIDTH))
             .h(px(Theme::HEADER_HEIGHT))
+            // The focus ring's border.
+            .border_1()
+            .border_color(transparent_black())
             .flex()
             .items_center()
             .justify_center()

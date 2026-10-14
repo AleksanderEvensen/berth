@@ -103,8 +103,10 @@ impl CaptionLayout {
 ///   supports (Wayland's `wm_capabilities`).
 #[must_use]
 pub fn caption_layout(window: &Window, cx: &App, policy: ButtonPolicy) -> CaptionLayout {
-    let (left, right) = platform_layout(window, cx);
-    if policy == ButtonPolicy::Hidden || (left.is_empty() && right.is_empty()) {
+    let Some((left, right)) = platform_layout(window, cx) else {
+        return CaptionLayout::default();
+    };
+    if policy == ButtonPolicy::Hidden {
         return CaptionLayout::default();
     }
     let close_only = match policy {
@@ -142,33 +144,36 @@ fn fully_tiled(window: &Window) -> bool {
     })
 }
 
+/// The buttons on each side of the titlebar, or `None` where the system
+/// draws its own.
+type PlatformLayout = Option<(Vec<CaptionButton>, Vec<CaptionButton>)>;
+
 #[cfg(target_os = "macos")]
-fn platform_layout(_window: &Window, _cx: &App) -> (Vec<CaptionButton>, Vec<CaptionButton>) {
-    (Vec::new(), Vec::new())
+#[allow(clippy::unnecessary_wraps, reason = "matches the other platforms")]
+fn platform_layout(_window: &Window, _cx: &App) -> PlatformLayout {
+    None
 }
 
 #[cfg(windows)]
-fn platform_layout(window: &Window, _cx: &App) -> (Vec<CaptionButton>, Vec<CaptionButton>) {
+fn platform_layout(window: &Window, _cx: &App) -> PlatformLayout {
     if window.is_fullscreen() {
-        return (Vec::new(), Vec::new());
+        return None;
     }
-    (
+    Some((
         Vec::new(),
         vec![
             CaptionButton::Minimize,
             CaptionButton::Maximize,
             CaptionButton::Close,
         ],
-    )
+    ))
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn platform_layout(window: &Window, cx: &App) -> (Vec<CaptionButton>, Vec<CaptionButton>) {
+fn platform_layout(window: &Window, cx: &App) -> PlatformLayout {
     use gpui::{WindowButton, WindowButtonLayout};
 
-    if crate::resize::client_tiling(window).is_none() {
-        return (Vec::new(), Vec::new());
-    }
+    crate::resize::client_tiling(window)?;
     let layout = cx
         .button_layout()
         .unwrap_or_else(WindowButtonLayout::linux_default);
@@ -184,7 +189,7 @@ fn platform_layout(window: &Window, cx: &App) -> (Vec<CaptionButton>, Vec<Captio
             })
             .collect()
     };
-    (side(&layout.left), side(&layout.right))
+    Some((side(&layout.left), side(&layout.right)))
 }
 
 /// The font Windows draws its caption glyphs with (see
