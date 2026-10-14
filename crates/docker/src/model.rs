@@ -1,4 +1,4 @@
-use crate::EngineKind;
+use crate::{Endpoint, EngineKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerState {
@@ -69,18 +69,32 @@ impl PortBinding {
         )
     }
 
-    /// A browser URL for a published TCP port. Wildcard bindings map to
-    /// `localhost`.
+    /// A browser URL for a published TCP port on `engine`'s host. Wildcard
+    /// bindings map to that host; a remote engine's loopback bindings have no
+    /// URL, being unreachable from this machine without a tunnel.
     #[must_use]
-    pub fn url(&self) -> Option<String> {
+    pub fn url(&self, engine: &Endpoint) -> Option<String> {
         if self.protocol != Protocol::Tcp {
             return None;
         }
         let port = self.host_port?;
-        let host = match self.host_ip.as_deref() {
-            None | Some("" | "0.0.0.0" | "::") => "localhost".to_string(),
-            Some(ip) if ip.contains(':') => format!("[{ip}]"),
-            Some(ip) => ip.to_string(),
+        let remote = engine.remote_host();
+        let host = match (self.host_ip.as_deref(), remote) {
+            (None | Some("" | "0.0.0.0" | "::"), None) => "localhost",
+            (None | Some("" | "0.0.0.0" | "::"), Some(remote)) => remote,
+            (Some(ip), Some(_))
+                if ip
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback()) =>
+            {
+                return None;
+            }
+            (Some(ip), _) => ip,
+        };
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host.to_string()
         };
         let scheme = if matches!(self.container_port, 443 | 8443) {
             "https"
@@ -155,16 +169,14 @@ impl Container {
     /// Published TCP ports that can be opened in a browser, most web-like
     /// first: common HTTP ports lead, the rest keep the engine's order.
     #[must_use]
-    pub fn web_ports(&self) -> Vec<&PortBinding> {
-        let mut ports: Vec<_> = self.ports.iter().filter(|p| p.url().is_some()).collect();
+    pub fn web_ports(&self, engine: &Endpoint) -> Vec<&PortBinding> {
+        let mut ports: Vec<_> = self
+            .ports
+            .iter()
+            .filter(|p| p.url(engine).is_some())
+            .collect();
         ports.sort_by_key(|p| !p.is_web_like());
         ports
-    }
-
-    /// A browser URL for the container's most web-like published TCP port.
-    #[must_use]
-    pub fn web_url(&self) -> Option<String> {
-        self.web_ports().first().and_then(|p| p.url())
     }
 }
 
@@ -450,24 +462,39 @@ mod tests {
             port(Some("127.0.0.1"), Some(9443), 8443, Protocol::Tcp),
             port(Some("::1"), Some(8081), 8080, Protocol::Tcp),
         ];
-        let urls: Vec<_> = container
-            .web_ports()
-            .iter()
-            .filter_map(|p| p.url())
-            .collect();
+        let local = crate::Endpoint::Unix("/var/run/docker.sock".into());
+        let urls = |engine: &crate::Endpoint| -> Vec<_> {
+            container
+                .web_ports(engine)
+                .iter()
+                .filter_map(|p| p.url(engine))
+                .collect()
+        };
         assert_eq!(
-            urls,
+            urls(&local),
             [
                 "https://127.0.0.1:9443",
                 "http://[::1]:8081",
                 "http://localhost:5432",
             ]
         );
+        // A remote engine's wildcard ports live on its host; its loopback
+        // ports aren't reachable from here.
+        let tcp = |url: &str| crate::Endpoint::Tcp {
+            url: url.into(),
+            tls: None,
+        };
         assert_eq!(
-            container.web_url().as_deref(),
-            Some("https://127.0.0.1:9443")
+            urls(&tcp("tcp://build.lan:2376")),
+            ["http://build.lan:5432"]
         );
+        assert_eq!(
+            urls(&tcp("https://[fd00::1]:2376")),
+            ["http://[fd00::1]:5432"]
+        );
+        assert_eq!(urls(&tcp("tcp://127.0.0.1:2375")), urls(&local));
+        assert_eq!(urls(&tcp("http://localhost:2375")), urls(&local));
         container.ports.clear();
-        assert_eq!(container.web_url(), None);
+        assert_eq!(container.web_ports(&local), Vec::<&PortBinding>::new());
     }
 }

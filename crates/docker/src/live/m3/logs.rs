@@ -1,4 +1,4 @@
-use crate::{LogLine, LogStream};
+use crate::{LogLine, LogOptions, LogStream};
 
 // Bollard's generated query narrows Docker's seconds to i32. For a later
 // `since`, ask for the nearest representable lower bound and filter stamped
@@ -6,6 +6,19 @@ use crate::{LogLine, LogStream};
 pub(super) fn since_seconds(since: Option<i64>) -> i32 {
     let since = since.unwrap_or_default();
     i32::try_from(since).unwrap_or(if since > 0 { i32::MAX } else { 0 })
+}
+/// The logs request, smuggled through `export_container`'s unescaped name:
+/// Bollard's `logs` decodes TTY output line by line, buffering an endless
+/// line whole and dropping an unterminated last one; this yields the raw body.
+/// shortcut: relies on Bollard (pinned) not escaping container names; the
+/// mock-daemon test fails if that changes, then switch to a raw-body API.
+pub(super) fn path(id: &str, options: &LogOptions) -> String {
+    let tail = options.tail.map_or_else(|| "all".into(), |n| n.to_string());
+    format!(
+        "{id}/logs?stdout=1&stderr=1&timestamps=1&follow={}&tail={tail}&since={}&_=",
+        u8::from(options.follow),
+        since_seconds(options.since),
+    )
 }
 pub(super) const fn after_since(line: &LogLine, since: Option<i64>) -> bool {
     match (line.timestamp, since) {
@@ -23,13 +36,59 @@ struct Pending {
     bytes: Vec<u8>,
     order: u64,
 }
+/// Header of a multiplexed (non-TTY) log record: stream type, three
+/// padding bytes, then the payload length as a big-endian u32.
+const HEADER: usize = 8;
+
 #[derive(Default)]
 pub(super) struct Assembler {
     stdout: Pending,
     stderr: Pending,
     sequence: u64,
+    tty: bool,
+    /// Multiplexed bytes that don't yet form a whole record.
+    frame: Vec<u8>,
 }
 impl Assembler {
+    pub(super) fn new(tty: bool) -> Self {
+        Self {
+            tty,
+            ..Self::default()
+        }
+    }
+    /// Feed a chunk of Docker's raw logs body. TTY output isn't framed, so it
+    /// is assembled as it arrives; otherwise only whole records are.
+    pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<LogLine> {
+        if self.tty {
+            return self.push(LogStream::Stdout, bytes, false);
+        }
+        let mut frame = std::mem::take(&mut self.frame);
+        frame.extend_from_slice(bytes);
+        let mut lines = Vec::new();
+        let mut rest = frame.as_slice();
+        while let Some((header, body)) = rest.split_first_chunk::<HEADER>() {
+            let [kind, _, _, _, length @ ..] = *header;
+            let Some((payload, next)) = usize::try_from(u32::from_be_bytes(length))
+                .ok()
+                .and_then(|length| body.split_at_checked(length))
+            else {
+                break;
+            };
+            let stream = if kind == 2 {
+                LogStream::Stderr
+            } else {
+                LogStream::Stdout
+            };
+            lines.extend(self.push(stream, payload, true));
+            rest = next;
+        }
+        self.frame = rest.to_vec();
+        lines
+    }
+    /// Whether the body ended inside a multiplexed record.
+    pub(super) const fn truncated(&self) -> bool {
+        !self.frame.is_empty()
+    }
     /// Feed one chunk of output. `record` marks a multiplexed frame, which
     /// Docker writes per log record: when it continues a partial line (Docker
     /// splits long lines into 16 KiB records), its own timestamp is dropped.
@@ -44,11 +103,21 @@ impl Assembler {
             bytes
         };
         let mut lines = Vec::new();
-        for part in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let mut rest = bytes;
+        while !rest.is_empty() {
             if pending.bytes.is_empty() {
                 pending.order = self.sequence;
                 self.sequence = self.sequence.saturating_add(1);
             }
+            // Never append past MAX_LINE, even from one oversized chunk.
+            let room = MAX_LINE.saturating_sub(pending.bytes.len());
+            let end = rest
+                .iter()
+                .take(room)
+                .position(|byte| *byte == b'\n')
+                .map_or(room, |newline| newline.saturating_add(1));
+            let (part, next) = rest.split_at(end.min(rest.len()));
+            rest = next;
             pending.bytes.extend_from_slice(part);
             if pending.bytes.last() == Some(&b'\n') {
                 pending.bytes.pop();
@@ -133,6 +202,39 @@ mod tests {
         assert_eq!(emitted.len(), 2);
         assert!(emitted.iter().all(|l| l.line.len() == MAX_LINE));
         assert_eq!(a.finish()[0].line.len(), 2 * 64 * 1024);
+        // One oversized chunk is split too, not appended whole.
+        let mut a = Assembler::new(true);
+        let lines = a.feed(&vec![b'y'; 2 * 1024 * 1024 + 1]);
+        assert_eq!(lines.len(), 8);
+        assert!(lines.iter().all(|l| l.line.len() == MAX_LINE));
+        assert_eq!(a.finish()[0].line, "y");
+    }
+    #[test]
+    fn multiplexed_records_split_across_chunks() {
+        let mut body = b"\x01\0\0\0\0\0\0\x0bhello\nworld".to_vec();
+        body.extend_from_slice(b"\x02\0\0\0\0\0\0\x05oops\n\x01\0\0\0\0\0\0\x01!");
+        let mut a = Assembler::new(false);
+        let mut lines = Vec::new();
+        // Every split point, including inside headers.
+        for chunk in body.chunks(3) {
+            lines.extend(a.feed(chunk));
+        }
+        assert!(!a.truncated());
+        lines.extend(a.finish());
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| (l.stream, l.line.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (LogStream::Stdout, "hello"),
+                (LogStream::Stderr, "oops"),
+                (LogStream::Stdout, "world!"),
+            ]
+        );
+        a = Assembler::new(false);
+        a.feed(b"\x01\0\0\0\0\0\0\x09cut");
+        assert!(a.truncated());
     }
     #[test]
     fn partial_frames_multiline_crlf_and_independent_streams() {

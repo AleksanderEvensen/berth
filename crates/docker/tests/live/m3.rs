@@ -380,6 +380,6 @@ fn live_logs_join_long_records_and_keep_a_tty_final_fragment() {
     std::thread::sleep(Duration::from_millis(500));
     let stream = engine.logs(&id, options(false, None));
     let items: Vec<_> = timed(&runtime, stream.collect::<Vec<_>>());
-    assert!(items.iter().all(Result::is_ok), "{items:?}");
-    assert_eq!(items[0].as_ref().unwrap().line, "line");
+    let lines: Vec<_> = items.into_iter().map(|item| item.unwrap().line).collect();
+    assert_eq!(lines, ["line", "partial"]);
 }

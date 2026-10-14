@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use berth_docker::{Container, ContainerState, ContainerTree, MountKind, Node, PortBinding, Stack};
+use berth_docker::{
+    Container, ContainerState, ContainerTree, Endpoint, MountKind, Node, PortBinding, Stack,
+};
 use berth_ui::SearchField;
 use berth_ui::{
     Badge, Button, ButtonTone, Cell, DataTable, Heading, IconButton, KeyValueCard, ListHeader,
@@ -516,7 +518,14 @@ impl ContainersScreen {
         else {
             return;
         };
-        let urls: Vec<String> = c.web_ports().iter().filter_map(|p| p.url()).collect();
+        let Some(engine) = endpoint(store) else {
+            return;
+        };
+        let urls: Vec<String> = c
+            .web_ports(engine)
+            .iter()
+            .filter_map(|p| p.url(engine))
+            .collect();
         match urls.as_slice() {
             [] => {}
             [url] => cx.open_url(url),
@@ -620,7 +629,8 @@ impl ContainersScreen {
             .containers()
             .iter()
             .find(|c| c.id == menu.id)
-            .map_or(0, |c| c.web_ports().len());
+            .zip(endpoint(store))
+            .map_or(0, |(c, engine)| c.web_ports(engine).len());
         menu.highlight = menu_step(menu.highlight, count, back);
         cx.notify();
     }
@@ -629,7 +639,8 @@ impl ContainersScreen {
         let store = self.store.read(cx);
         let url = self.port_menu.as_ref().and_then(|menu| {
             let c = store.containers().iter().find(|c| c.id == menu.id)?;
-            c.web_ports().get(menu.highlight?)?.url()
+            let engine = endpoint(store)?;
+            c.web_ports(engine).get(menu.highlight?)?.url(engine)
         });
         if let Some(url) = url {
             cx.open_url(&url);
@@ -985,7 +996,8 @@ impl ContainersScreen {
             .keyboard_cursor(cursor)
             .dimmed(!active);
 
-        let web_ports = c.web_ports();
+        let engine = endpoint(store);
+        let web_ports = engine.map(|e| c.web_ports(e)).unwrap_or_default();
         if active && web_ports.len() > 1 {
             let id = id.clone();
             row = row.action(
@@ -1004,7 +1016,11 @@ impl ContainersScreen {
                         cx.notify();
                     })),
             );
-        } else if let Some(url) = web_ports.first().and_then(|p| p.url()).filter(|_| active) {
+        } else if let Some(url) = engine
+            .zip(web_ports.first())
+            .and_then(|(e, p)| p.url(e))
+            .filter(|_| active)
+        {
             row = row.action(
                 IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
                     .tab_stop(false)
@@ -1053,7 +1069,14 @@ impl ContainersScreen {
                 store.containers().iter().find(|c| &c.id == id).map_or_else(
                     || empty_state("Gone", "This container was removed.", theme).into_any_element(),
                     |c| {
-                        scroll_page(container_info(c, self.env_of(c), theme, cx)).into_any_element()
+                        scroll_page(container_info(
+                            c,
+                            endpoint(store),
+                            self.env_of(c),
+                            theme,
+                            cx,
+                        ))
+                        .into_any_element()
                     },
                 )
             }
@@ -1280,7 +1303,7 @@ impl Render for ContainersScreen {
                 .containers()
                 .iter()
                 .find(|c| c.id == menu.id && c.state.is_active())?;
-            Some(port_menu(c, menu, &self.menu_focus, cx))
+            Some(port_menu(c, endpoint(store)?, menu, &self.menu_focus, cx))
         });
         if menu.is_none() {
             // The container stopped or went away while the menu was open.
@@ -1298,43 +1321,48 @@ impl Render for ContainersScreen {
 /// Every published web port of `c`, opened from the row link (B4).
 fn port_menu(
     c: &Container,
+    engine: &Endpoint,
     menu: &PortMenu,
     focus: &FocusHandle,
     cx: &Context<ContainersScreen>,
 ) -> AnyElement {
     let theme = Theme::of(cx);
-    let items = c.web_ports().into_iter().enumerate().filter_map(|(ix, p)| {
-        let url = p.url()?;
-        Some(
-            div()
-                .id(("port-menu-item", ix))
-                .h(px(30.0))
-                .px(px(Theme::SPACE_SM))
-                .flex()
-                .items_center()
-                .gap(px(Theme::SPACE_LG))
-                .rounded(px(Theme::CONTROL_RADIUS))
-                .cursor_pointer()
-                .when(menu.highlight == Some(ix), |d| d.bg(theme.element_hover))
-                .hover(|s| s.bg(theme.element_hover))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(theme.text)
-                        .child(url.trim_start_matches("http://").to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(px(Theme::TEXT_SM))
-                        .text_color(theme.text_faint)
-                        .child(format!("{}/{}", p.container_port, p.protocol.label())),
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.open_url(&url);
-                    this.close_port_menu(window, cx);
-                })),
-        )
-    });
+    let items = c
+        .web_ports(engine)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ix, p)| {
+            let url = p.url(engine)?;
+            Some(
+                div()
+                    .id(("port-menu-item", ix))
+                    .h(px(30.0))
+                    .px(px(Theme::SPACE_SM))
+                    .flex()
+                    .items_center()
+                    .gap(px(Theme::SPACE_LG))
+                    .rounded(px(Theme::CONTROL_RADIUS))
+                    .cursor_pointer()
+                    .when(menu.highlight == Some(ix), |d| d.bg(theme.element_hover))
+                    .hover(|s| s.bg(theme.element_hover))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(theme.text)
+                            .child(url.trim_start_matches("http://").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(Theme::TEXT_SM))
+                            .text_color(theme.text_faint)
+                            .child(format!("{}/{}", p.container_port, p.protocol.label())),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.open_url(&url);
+                        this.close_port_menu(window, cx);
+                    })),
+            )
+        });
     deferred(
         anchored().position(menu.position).snap_to_window().child(
             div()
@@ -1484,8 +1512,16 @@ fn status_value(c: &Container, theme: &Theme) -> impl IntoElement {
         .child(div().text_color(theme.text).child(c.status.clone()))
 }
 
-fn port_cell(c: &Container, p: &PortBinding) -> Cell {
-    match (p.host_port, p.url()) {
+/// The connected engine, whose host serves published ports.
+const fn endpoint(store: &Store) -> Option<&Endpoint> {
+    match store.connection() {
+        Connection::Connected(info) => Some(&info.endpoint),
+        _ => None,
+    }
+}
+
+fn port_cell(c: &Container, p: &PortBinding, engine: Option<&Endpoint>) -> Cell {
+    match (p.host_port, engine.and_then(|e| p.url(e))) {
         (Some(port), Some(url)) if c.state.is_active() => {
             Cell::link(port.to_string()).on_click(move |_, _, cx| cx.open_url(&url))
         }
@@ -1496,6 +1532,7 @@ fn port_cell(c: &Container, p: &PortBinding) -> Cell {
 
 fn container_info(
     c: &Container,
+    engine: Option<&Endpoint>,
     env: Option<Result<&[String], &str>>,
     theme: &Theme,
     cx: &Context<ContainersScreen>,
@@ -1536,7 +1573,7 @@ fn container_info(
     .empty("No published ports")
     .rows(c.ports.iter().map(|p| {
         vec![
-            port_cell(c, p),
+            port_cell(c, p, engine),
             Cell::plain(p.container_port.to_string()),
             Cell::muted(p.protocol.label()),
         ]

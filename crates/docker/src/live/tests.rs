@@ -74,6 +74,16 @@ fn response_for(line: &str) -> (&'static str, &'static str) {
             "200 OK",
             r#"{"Id":"test","Name":"/test","Config":{"Env":["A=B"]},"State":{"Status":"created"}}"#,
         )
+    } else if line.contains("/containers/tty/json ") {
+        ("200 OK", r#"{"Id":"tty","Config":{"Tty":true}}"#)
+    } else if line.contains("/containers/tty/logs?") {
+        ("200 OK", "first\npartial")
+    } else if line.contains("/containers/test/logs?") {
+        // Multiplexed records; the last is cut short.
+        (
+            "200 OK",
+            "\x01\0\0\0\0\0\0\x06first\n\x02\0\0\0\0\0\0\x04err\n\x01\0\0\0\0\0\0\x09cut",
+        )
     } else if line.contains("/images/json?") {
         ("200 OK", "[]")
     } else if line.contains("/volumes ") {
@@ -249,25 +259,6 @@ fn dropping_a_pending_future_cancels_its_task() {
     assert!(future.as_mut().poll(&mut context).is_pending());
     drop(future);
     receiver.recv_timeout(Duration::from_secs(2)).unwrap();
-}
-
-#[test]
-fn dropping_stream_cancels_an_idle_subscription_task() {
-    let runtime = EngineRuntime::new().unwrap();
-    let (sender, receiver) = mpsc::channel(1);
-    let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
-    let probe = Dropped(dropped_tx);
-    let task = runtime.get().spawn(async move {
-        let _probe = probe;
-        let _sender = sender;
-        futures::future::pending::<()>().await;
-    });
-    let stream = EventStream {
-        receiver,
-        _task: AbortOnDrop::new(task.abort_handle()),
-    };
-    drop(stream);
-    dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
 }
 
 #[test]

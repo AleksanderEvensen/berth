@@ -47,6 +47,30 @@ impl fmt::Display for Endpoint {
     }
 }
 
+impl Endpoint {
+    /// The engine's host when it runs on another machine, where its published
+    /// ports live. Local sockets and loopback TCP give `None`.
+    #[must_use]
+    pub fn remote_host(&self) -> Option<&str> {
+        let Self::Tcp { url, .. } = self else {
+            return None;
+        };
+        let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+        let authority = authority.split(['/', '?']).next()?;
+        let host = match authority.strip_prefix('[') {
+            Some(v6) => v6.split(']').next()?,
+            None => authority
+                .rsplit_once(':')
+                .map_or(authority, |(host, _)| host),
+        };
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        (!host.is_empty() && !loopback).then_some(host)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsConfig {
     /// Directory holding `ca.pem`, `cert.pem`, `key.pem` (`DOCKER_CERT_PATH`).

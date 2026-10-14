@@ -179,3 +179,44 @@ fn resize_skips_duplicates_and_sends_the_latest_size() {
     drop(requests);
     drop(session.stdout);
 }
+
+#[test]
+fn logs_keep_an_unterminated_tty_tail_and_report_a_cut_record() {
+    let server = super::super::tests::TestServer::new();
+    let engine = BollardEngine::connect(&server.endpoint).unwrap();
+    let lines = |id| {
+        futures::executor::block_on(
+            engine
+                .live_logs(id, LogOptions::default())
+                .collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(|item| item.map(|line| (line.stream, line.line)))
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines("tty"),
+        [
+            Ok((crate::LogStream::Stdout, "first".into())),
+            Ok((crate::LogStream::Stdout, "partial".into())),
+        ]
+    );
+    let multiplexed = lines("test");
+    assert_eq!(
+        multiplexed[..2],
+        [
+            Ok((crate::LogStream::Stdout, "first".into())),
+            Ok((crate::LogStream::Stderr, "err".into())),
+        ]
+    );
+    assert!(matches!(multiplexed[2], Err(EngineError::Transport(_))));
+    assert_eq!(multiplexed.len(), 3);
+    // The request reaches the logs endpoint with the expected parameters.
+    let requests = server.requests.lock().unwrap();
+    assert!(
+        requests.iter().any(|r| r.contains(
+            "/containers/tty/logs?stdout=1&stderr=1&timestamps=1&follow=1&tail=1000&since=0&_=/export "
+        )),
+        "{requests:?}"
+    );
+}

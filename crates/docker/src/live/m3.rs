@@ -3,7 +3,6 @@ mod logs;
 mod stats;
 
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use bollard::{
     Docker,
@@ -22,22 +21,12 @@ use tokio::sync::watch;
 
 use tokio_util::task::AbortOnDrop;
 
-use super::{BollardEngine, mapping};
+use super::{BollardEngine, TaskStream, mapping};
 use crate::{
     EngineError, EngineResult, ExecOptions, ExecSession, LogLine, LogOptions, StatsSample,
     TtyResizer, TtySize,
 };
 
-struct TaskStream<T> {
-    receiver: mpsc::Receiver<EngineResult<T>>,
-    _tasks: Vec<AbortOnDrop>,
-}
-impl<T> Stream for TaskStream<T> {
-    type Item = EngineResult<T>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.receiver).poll_next(cx)
-    }
-}
 impl BollardEngine {
     pub(super) fn live_logs(
         &self,
@@ -90,48 +79,34 @@ async fn pump_logs(
     options: LogOptions,
     sender: &mut mpsc::Sender<EngineResult<LogLine>>,
 ) -> EngineResult<()> {
-    let since = logs::since_seconds(options.since);
-    let mut output = docker.logs(
-        id,
-        Some(query::LogsOptions {
-            follow: options.follow,
-            stdout: true,
-            stderr: true,
-            timestamps: true,
-            tail: options.tail.map_or_else(|| "all".into(), |n| n.to_string()),
-            since,
-            ..Default::default()
-        }),
-    );
-    let mut assembler = logs::Assembler::default();
+    let tty = docker
+        .inspect_container(id, None::<query::InspectContainerOptions>)
+        .await
+        .map_err(mapping::error)?
+        .config
+        .and_then(|config| config.tty)
+        .unwrap_or(false);
+    let mut body = docker.export_container(&logs::path(id, &options));
+    let mut assembler = logs::Assembler::new(tty);
     let mut failure = None;
-    while let Some(frame) = output.next().await {
-        let frame = match frame {
-            Ok(frame) => frame,
-            // Bollard's TTY decoder reports an unterminated final line as an
-            // error and drops it; end the stream cleanly instead.
-            Err(bollard::errors::Error::IOError { err })
-                if err.to_string() == "bytes remaining on stream" =>
-            {
-                break;
-            }
+    while let Some(chunk) = body.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
             Err(error) => {
                 failure = Some(mapping::error(error));
                 break;
             }
         };
-        let (stream, record) = match frame {
-            LogOutput::StdErr { .. } => (crate::LogStream::Stderr, true),
-            LogOutput::StdOut { .. } => (crate::LogStream::Stdout, true),
-            LogOutput::Console { .. } | LogOutput::StdIn { .. } => {
-                (crate::LogStream::Stdout, false)
-            }
-        };
-        for line in assembler.push(stream, frame.as_ref(), record) {
+        for line in assembler.feed(&chunk) {
             if logs::after_since(&line, options.since) && sender.send(Ok(line)).await.is_err() {
                 return Ok(());
             }
         }
+    }
+    if failure.is_none() && assembler.truncated() {
+        failure = Some(EngineError::Transport(
+            "log stream ended inside a record".into(),
+        ));
     }
     for line in assembler.finish() {
         if logs::after_since(&line, options.since) && sender.send(Ok(line)).await.is_err() {

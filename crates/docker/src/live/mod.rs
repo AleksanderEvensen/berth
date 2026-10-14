@@ -69,12 +69,13 @@ impl Drop for EngineRuntime {
     }
 }
 
-struct EventStream {
-    receiver: mpsc::Receiver<EngineResult<EngineEvent>>,
-    _task: AbortOnDrop,
+/// A channel-backed stream that aborts its producer tasks when dropped.
+struct TaskStream<T> {
+    receiver: mpsc::Receiver<EngineResult<T>>,
+    _tasks: Vec<AbortOnDrop>,
 }
-impl Stream for EventStream {
-    type Item = EngineResult<EngineEvent>;
+impl<T> Stream for TaskStream<T> {
+    type Item = EngineResult<T>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.receiver).poll_next(cx)
     }
@@ -498,9 +499,9 @@ impl Engine for BollardEngine {
                 }
             }
         });
-        EventStream {
+        TaskStream {
             receiver,
-            _task: AbortOnDrop::new(task.abort_handle()),
+            _tasks: vec![AbortOnDrop::new(task.abort_handle())],
         }
         .boxed()
     }
