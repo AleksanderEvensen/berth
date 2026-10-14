@@ -169,9 +169,11 @@ jobs:
           path: target/packager/*.exe
           if-no-files-found: error
 
+  # Attaches whatever built, so one failed platform doesn't hold back the
+  # others; re-running the failed jobs runs this again to add the rest.
   upload:
     name: Attach to the GitHub release
-    if: inputs.tag != ''
+    if: inputs.tag != '' && !cancelled() && contains(needs.*.result, 'success')
     needs: [packages, macos, windows]
     runs-on: ubuntu-24.04
     permissions:

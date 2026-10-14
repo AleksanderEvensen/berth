@@ -110,7 +110,13 @@ package:
     # check it offline.
     xcrun notarytool submit "$dmg" --wait \
         --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
-    xcrun stapler staple "$dmg"
+    # The ticket lookup can fail for a while after acceptance (the ticket is
+    # still propagating, or the connection drops), so retry before giving up.
+    for attempt in 1 2 3 4 5; do
+        xcrun stapler staple "$dmg" && break
+        (( attempt < 5 )) || exit 1
+        sleep $(( attempt * 15 ))
+    done
     spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
 
 # Build the portable Windows executable, target/packager/Berth_<version>_x64.exe.
