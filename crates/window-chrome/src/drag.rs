@@ -2,15 +2,26 @@
 
 use std::cell::Cell;
 
-use gpui::{Div, MouseButton, Stateful, prelude::*};
+use gpui::{Div, MouseButton, Pixels, Point, Stateful, prelude::*};
 
 use crate::actions;
 
+/// How far the pointer must travel with the button held before the window
+/// moves; gpui's own drag threshold.
+const DRAG_THRESHOLD: f32 = 2.;
+
 thread_local! {
-    /// Armed by a press on a drag region; the first move with the button
-    /// held hands the drag to the system. Lets a double-click arrive
-    /// instead of being swallowed by a move session.
-    static SHOULD_MOVE: Cell<bool> = const { Cell::new(false) };
+    /// Where a press on a drag region landed; the first move past
+    /// [`DRAG_THRESHOLD`] with the button held hands the drag to the
+    /// system. Lets a double-click arrive, jitter and all, instead of
+    /// being swallowed by a move session.
+    static PRESSED_AT: Cell<Option<Point<Pixels>>> = const { Cell::new(None) };
+}
+
+fn past_threshold(press: Point<Pixels>, now: Point<Pixels>) -> bool {
+    let dx = f32::from(now.x) - f32::from(press.x);
+    let dy = f32::from(now.y) - f32::from(press.y);
+    dx.hypot(dy) > DRAG_THRESHOLD
 }
 
 /// Make `el` behave like a titlebar.
@@ -23,12 +34,18 @@ thread_local! {
 pub fn drag_region(id: &'static str, el: Div) -> Stateful<Div> {
     let el = el
         .id(id)
-        .on_mouse_down(MouseButton::Left, |_, _, _| SHOULD_MOVE.set(true))
-        .on_mouse_down_out(|_, _, _| SHOULD_MOVE.set(false))
-        .on_mouse_up(MouseButton::Left, |_, _, _| SHOULD_MOVE.set(false))
+        .on_mouse_down(MouseButton::Left, |event, _, _| {
+            PRESSED_AT.set(Some(event.position));
+        })
+        .on_mouse_down_out(|_, _, _| PRESSED_AT.set(None))
+        .on_mouse_up(MouseButton::Left, |_, _, _| PRESSED_AT.set(None))
         .on_mouse_move(|event, window, _| {
-            if SHOULD_MOVE.get() && event.pressed_button == Some(MouseButton::Left) {
-                SHOULD_MOVE.set(false);
+            if event.pressed_button == Some(MouseButton::Left)
+                && PRESSED_AT
+                    .get()
+                    .is_some_and(|press| past_threshold(press, event.position))
+            {
+                PRESSED_AT.set(None);
                 actions::start_move(window);
             }
         })
@@ -47,4 +64,27 @@ pub fn drag_region(id: &'static str, el: Div) -> Stateful<Div> {
         actions::show_window_menu(window, event.position);
     });
     el
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::point;
+    use gpui::px;
+
+    use super::past_threshold;
+
+    #[test]
+    fn jitter_between_double_click_presses_does_not_drag() {
+        let press = point(px(100.), px(10.));
+        assert!(!past_threshold(press, press));
+        assert!(!past_threshold(press, point(px(101.), px(11.))));
+        assert!(!past_threshold(press, point(px(98.), px(10.))));
+    }
+
+    #[test]
+    fn real_drag_moves() {
+        let press = point(px(100.), px(10.));
+        assert!(past_threshold(press, point(px(103.), px(10.))));
+        assert!(past_threshold(press, point(px(98.), px(8.))));
+    }
 }

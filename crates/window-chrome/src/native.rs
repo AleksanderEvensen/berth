@@ -167,7 +167,7 @@ mod linux {
 
     use super::{ButtonState, NativeButtons, NativeImage, NativePixels, NativeRow, Side};
     use crate::CaptionButton;
-    use crate::linux::gtk::{self, Bitmap, ButtonSize, Gtk, Kind, Metrics, State, ThemeKey};
+    use crate::linux::gtk::{self, Bitmap, ButtonSize, Gtk, Metrics, ThemeKey};
 
     /// What a [`NativeRow`] holds on Linux.
     #[derive(Clone)]
@@ -177,23 +177,6 @@ mod linux {
         layout: gtk::Row,
         buttons: Vec<CaptionButton>,
         metrics: Metrics,
-    }
-
-    const fn kind(button: CaptionButton) -> Kind {
-        match button {
-            CaptionButton::Minimize => Kind::Minimize,
-            CaptionButton::Maximize => Kind::Maximize,
-            CaptionButton::Restore => Kind::Restore,
-            CaptionButton::Close => Kind::Close,
-        }
-    }
-
-    const fn state(state: ButtonState) -> State {
-        match state {
-            ButtonState::Normal => State::Normal,
-            ButtonState::Hover => State::Hover,
-            ButtonState::Pressed => State::Pressed,
-        }
     }
 
     #[allow(clippy::missing_const_for_fn, reason = "gpui's `size` isn't const")]
@@ -225,11 +208,7 @@ mod linux {
                 return None;
             }
             let theme = self.gtk.theme();
-            let side = match side {
-                Side::Left => gtk::Side::Left,
-                Side::Right => gtk::Side::Right,
-            };
-            let row = gtk::Row::new(side, buttons.iter().map(|button| kind(*button)));
+            let row = gtk::Row::new(side, buttons.iter().copied());
             let metrics = self.gtk.metrics(&theme, &row)?;
             Some(NativeRow {
                 inner: Row {
@@ -248,7 +227,7 @@ mod linux {
         /// not. `None` if it isn't in the row.
         #[must_use]
         pub fn size(&self, button: CaptionButton) -> Option<Size<Pixels>> {
-            self.inner.metrics.size(kind(button)).map(logical)
+            self.inner.metrics.size(button).map(logical)
         }
 
         /// The gap the theme leaves between neighbouring buttons.
@@ -264,7 +243,7 @@ mod linux {
             let buttons = &self.inner.buttons;
             let widths: f32 = buttons
                 .iter()
-                .filter_map(|button| self.inner.metrics.size(kind(*button)))
+                .filter_map(|button| self.inner.metrics.size(*button))
                 .map(|size| size.width)
                 .sum();
             let gaps = buttons.len().saturating_sub(1);
@@ -279,7 +258,7 @@ mod linux {
                 .inner
                 .buttons
                 .iter()
-                .filter_map(|button| self.inner.metrics.size(kind(*button)))
+                .filter_map(|button| self.inner.metrics.size(*button))
                 .map(|size| size.height)
                 .fold(0.0, f32::max))
         }
@@ -316,13 +295,7 @@ mod linux {
         ) -> Option<NativePixels> {
             self.inner
                 .gtk
-                .draw(
-                    &self.inner.layout,
-                    kind(button),
-                    self::state(state),
-                    focused,
-                    scale,
-                )
+                .draw(&self.inner.layout, button, state, focused, scale)
                 .map(straight)
         }
 
@@ -431,8 +404,8 @@ mod linux {
                 .gtk
                 .draw(
                     &key.row,
-                    kind(key.button),
-                    state(key.state),
+                    key.button,
+                    key.state,
                     key.focused,
                     f32::from_bits(key.scale),
                 )

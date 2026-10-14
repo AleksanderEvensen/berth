@@ -23,6 +23,9 @@ use std::thread::{self, ThreadId};
 use image::{ImageBuffer, Rgba, imageops};
 use libloading::Library;
 
+use crate::CaptionButton;
+use crate::native::{ButtonState, Side};
+
 type Ptr = *mut c_void;
 /// A `draw` signal handler; `GCallback` is any function pointer.
 type DrawHandler = unsafe extern "C" fn(Ptr, Ptr, Ptr) -> c_int;
@@ -64,50 +67,35 @@ struct Allocation {
     height: c_int,
 }
 
-/// One title button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Kind {
-    Minimize,
-    Maximize,
-    /// Maximize while the window is maximized: GTK's restore button.
-    Restore,
-    Close,
-}
-
-impl Kind {
-    const fn class(self) -> &'static CStr {
-        match self {
-            Self::Minimize => c"minimize",
-            Self::Maximize | Self::Restore => c"maximize",
-            Self::Close => c"close",
-        }
-    }
-
-    const fn icon(self) -> &'static CStr {
-        match self {
-            Self::Minimize => c"window-minimize-symbolic",
-            Self::Maximize => c"window-maximize-symbolic",
-            Self::Restore => c"window-restore-symbolic",
-            Self::Close => c"window-close-symbolic",
-        }
+const fn class(button: CaptionButton) -> &'static CStr {
+    match button {
+        CaptionButton::Minimize => c"minimize",
+        CaptionButton::Maximize | CaptionButton::Restore => c"maximize",
+        CaptionButton::Close => c"close",
     }
 }
 
-/// The pointer state a button is drawn in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum State {
-    Normal,
-    Hover,
-    Pressed,
+const fn icon(button: CaptionButton) -> &'static CStr {
+    match button {
+        CaptionButton::Minimize => c"window-minimize-symbolic",
+        CaptionButton::Maximize => c"window-maximize-symbolic",
+        CaptionButton::Restore => c"window-restore-symbolic",
+        CaptionButton::Close => c"window-close-symbolic",
+    }
 }
 
-impl State {
-    const fn flags(self) -> c_uint {
-        match self {
-            Self::Normal => 0,
-            Self::Hover => GTK_STATE_FLAG_PRELIGHT,
-            Self::Pressed => GTK_STATE_FLAG_PRELIGHT | GTK_STATE_FLAG_ACTIVE,
-        }
+const fn flags(state: ButtonState) -> c_uint {
+    match state {
+        ButtonState::Normal => 0,
+        ButtonState::Hover => GTK_STATE_FLAG_PRELIGHT,
+        ButtonState::Pressed => GTK_STATE_FLAG_PRELIGHT | GTK_STATE_FLAG_ACTIVE,
+    }
+}
+
+const fn side_class(side: Side) -> &'static CStr {
+    match side {
+        Side::Left => c"left",
+        Side::Right => c"right",
     }
 }
 
@@ -131,39 +119,23 @@ pub struct Bitmap {
     pub size: ButtonSize,
 }
 
-/// Which end of the titlebar a row of buttons sits at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Side {
-    Left,
-    Right,
-}
-
-impl Side {
-    const fn class(self) -> &'static CStr {
-        match self {
-            Self::Left => c"left",
-            Self::Right => c"right",
-        }
-    }
-}
-
 /// A row of buttons as the desktop lays it out: themes may style the
 /// buttons by side, order or neighbours, so GTK draws them in this row.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Row {
     side: Side,
     /// Maximize stands for restore too.
-    buttons: Vec<Kind>,
+    buttons: Vec<CaptionButton>,
 }
 
 impl Row {
     #[must_use]
-    pub fn new(side: Side, buttons: impl IntoIterator<Item = Kind>) -> Self {
+    pub fn new(side: Side, buttons: impl IntoIterator<Item = CaptionButton>) -> Self {
         let buttons = buttons
             .into_iter()
             .map(|kind| {
-                if kind == Kind::Restore {
-                    Kind::Maximize
+                if kind == CaptionButton::Restore {
+                    CaptionButton::Maximize
                 } else {
                     kind
                 }
@@ -187,7 +159,7 @@ pub struct ButtonSize {
 /// hovered or pressed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metrics {
-    sizes: Vec<(Kind, ButtonSize)>,
+    sizes: Vec<(CaptionButton, ButtonSize)>,
     /// Gap GTK leaves between neighbouring title buttons.
     pub spacing: f32,
 }
@@ -195,7 +167,7 @@ pub struct Metrics {
 impl Metrics {
     /// The size of `kind`, if it is in the row measured.
     #[must_use]
-    pub fn size(&self, kind: Kind) -> Option<ButtonSize> {
+    pub fn size(&self, kind: CaptionButton) -> Option<ButtonSize> {
         self.sizes
             .iter()
             .find_map(|(measured, size)| (*measured == kind).then_some(*size))
@@ -430,20 +402,23 @@ impl Gtk {
             let row = (api.box_new)(GTK_ORIENTATION_HORIZONTAL, spacing);
             (api.widget_set_valign)(row, GTK_ALIGN_CENTER);
             (api.style_context_add_class)((api.widget_get_style_context)(row), c"right".as_ptr());
-            let [minimize, maximize, close] =
-                [Kind::Minimize, Kind::Maximize, Kind::Close].map(|kind| {
-                    let widget = (api.button_new)();
-                    (api.widget_set_valign)(widget, GTK_ALIGN_CENTER);
-                    (api.widget_set_can_focus)(widget, 0);
-                    let style = (api.widget_get_style_context)(widget);
-                    (api.style_context_add_class)(style, c"titlebutton".as_ptr());
-                    (api.style_context_add_class)(style, kind.class().as_ptr());
-                    let image =
-                        (api.image_new_from_icon_name)(kind.icon().as_ptr(), GTK_ICON_SIZE_MENU);
-                    (api.container_add)(widget, image);
-                    (api.container_add)(row, widget);
-                    Button { widget, image }
-                });
+            let [minimize, maximize, close] = [
+                CaptionButton::Minimize,
+                CaptionButton::Maximize,
+                CaptionButton::Close,
+            ]
+            .map(|kind| {
+                let widget = (api.button_new)();
+                (api.widget_set_valign)(widget, GTK_ALIGN_CENTER);
+                (api.widget_set_can_focus)(widget, 0);
+                let style = (api.widget_get_style_context)(widget);
+                (api.style_context_add_class)(style, c"titlebutton".as_ptr());
+                (api.style_context_add_class)(style, class(kind).as_ptr());
+                let image = (api.image_new_from_icon_name)(icon(kind).as_ptr(), GTK_ICON_SIZE_MENU);
+                (api.container_add)(widget, image);
+                (api.container_add)(row, widget);
+                Button { widget, image }
+            });
             (api.header_bar_pack_end)(bar, row);
             (api.container_add)(window, bar);
             (api.widget_show_all)(window);
@@ -553,11 +528,11 @@ impl Gtk {
         value != 0
     }
 
-    const fn button(&self, kind: Kind) -> Button {
+    const fn button(&self, kind: CaptionButton) -> Button {
         match kind {
-            Kind::Minimize => self.minimize,
-            Kind::Maximize | Kind::Restore => self.maximize,
-            Kind::Close => self.close,
+            CaptionButton::Minimize => self.minimize,
+            CaptionButton::Maximize | CaptionButton::Restore => self.maximize,
+            CaptionButton::Close => self.close,
         }
     }
 
@@ -581,10 +556,14 @@ impl Gtk {
         // SAFETY: our live box and buttons; hidden buttons stay in the box.
         unsafe {
             for side in [Side::Left, Side::Right] {
-                (self.api.style_context_remove_class)(style, side.class().as_ptr());
+                (self.api.style_context_remove_class)(style, side_class(side).as_ptr());
             }
-            (self.api.style_context_add_class)(style, row.side.class().as_ptr());
-            for kind in [Kind::Minimize, Kind::Maximize, Kind::Close] {
+            (self.api.style_context_add_class)(style, side_class(row.side).as_ptr());
+            for kind in [
+                CaptionButton::Minimize,
+                CaptionButton::Maximize,
+                CaptionButton::Close,
+            ] {
                 (self.api.widget_hide)(self.button(kind).widget);
             }
             for (position, kind) in row.buttons.iter().enumerate() {
@@ -627,14 +606,18 @@ impl Gtk {
     fn measure(&self, row: &Row) -> Option<Metrics> {
         self.configure(row);
         let mut kinds = row.buttons.clone();
-        if kinds.contains(&Kind::Maximize) {
-            kinds.push(Kind::Restore);
+        if kinds.contains(&CaptionButton::Maximize) {
+            kinds.push(CaptionButton::Restore);
         }
         let mut sizes = Vec::with_capacity(kinds.len());
         for kind in kinds {
             let mut largest: Option<ButtonSize> = None;
             for active in [true, false] {
-                for state in [State::Normal, State::Hover, State::Pressed] {
+                for state in [
+                    ButtonState::Normal,
+                    ButtonState::Hover,
+                    ButtonState::Pressed,
+                ] {
                     let size = self.in_state(kind, state, active, || {
                         logical_size(self.allocation(self.button(kind).widget))
                     })?;
@@ -668,14 +651,20 @@ impl Gtk {
 
     /// Run `f` with `kind`'s button in `state`, in a focused (`active`) or
     /// unfocused window, laid out; restore with the window maximized.
-    fn in_state<T>(&self, kind: Kind, state: State, active: bool, f: impl FnOnce() -> T) -> T {
+    fn in_state<T>(
+        &self,
+        kind: CaptionButton,
+        state: ButtonState,
+        active: bool,
+        f: impl FnOnce() -> T,
+    ) -> T {
         let button = self.button(kind).widget;
         // SAFETY: our live window and buttons; the window's class and the
         // button's pointer state are reset before returning, so states
         // don't leak into each other.
         unsafe {
             let window_style = (self.api.widget_get_style_context)(self.window);
-            if kind == Kind::Restore {
+            if kind == CaptionButton::Restore {
                 (self.api.style_context_add_class)(window_style, c"maximized".as_ptr());
             }
             // Backdrop is inherited from the window, so the button's own
@@ -685,14 +674,14 @@ impl Gtk {
             } else {
                 (self.api.widget_set_state_flags)(self.window, GTK_STATE_FLAG_BACKDROP, 0);
             }
-            (self.api.widget_set_state_flags)(button, state.flags(), 0);
+            (self.api.widget_set_state_flags)(button, flags(state), 0);
             self.pump();
             let value = f();
             (self.api.widget_unset_state_flags)(
                 button,
                 GTK_STATE_FLAG_PRELIGHT | GTK_STATE_FLAG_ACTIVE,
             );
-            if kind == Kind::Restore {
+            if kind == CaptionButton::Restore {
                 (self.api.style_context_remove_class)(window_style, c"maximized".as_ptr());
             }
             self.pump();
@@ -707,8 +696,8 @@ impl Gtk {
     pub fn draw(
         &self,
         row: &Row,
-        kind: Kind,
-        state: State,
+        kind: CaptionButton,
+        state: ButtonState,
         active: bool,
         scale: f32,
     ) -> Option<Bitmap> {
@@ -716,7 +705,9 @@ impl Gtk {
         let button = self.button(kind);
         self.in_state(kind, state, active, || {
             // SAFETY: `button.image` is our live image.
-            unsafe { self.load_icon(kind, button.image) };
+            if !unsafe { self.load_icon(kind, button.image) } {
+                return None;
+            }
             self.pump();
             self.render(button.widget)
         })
@@ -725,11 +716,12 @@ impl Gtk {
 
     /// Give `image` the theme's symbolic icon for `kind` at
     /// [`RENDER_SCALE`], coloured for the image's current state. `GtkImage`
-    /// would load it for the offscreen window's scale, which is 1.
+    /// would load it for the offscreen window's scale, which is 1. `false`
+    /// if the theme has no such icon or it fails to load.
     ///
     /// # Safety
     /// `image` must be one of our live images.
-    unsafe fn load_icon(&self, kind: Kind, image: Ptr) {
+    unsafe fn load_icon(&self, kind: CaptionButton, image: Ptr) -> bool {
         // SAFETY: `image` is live. A failed load leaves no icon rather than
         // the last one drawn, which could be another button's.
         unsafe { (self.api.image_clear)(image) };
@@ -740,13 +732,13 @@ impl Gtk {
             let theme = (self.api.icon_theme_get_default)();
             let info = (self.api.icon_theme_lookup_icon_for_scale)(
                 theme,
-                kind.icon().as_ptr(),
+                icon(kind).as_ptr(),
                 ICON_SIZE,
                 RENDER_SCALE,
                 GTK_ICON_LOOKUP_GENERIC_FALLBACK | GTK_ICON_LOOKUP_FORCE_SIZE,
             );
             if info.is_null() {
-                return;
+                return false;
             }
             let mut error: Ptr = null_mut();
             let pixbuf = (self.api.icon_info_load_symbolic_for_context)(
@@ -760,7 +752,7 @@ impl Gtk {
                 (self.api.g_error_free)(error);
             }
             if pixbuf.is_null() {
-                return;
+                return false;
             }
             let surface =
                 (self.api.gdk_cairo_surface_create_from_pixbuf)(pixbuf, RENDER_SCALE, null_mut());
@@ -768,6 +760,7 @@ impl Gtk {
             (self.api.image_set_from_surface)(image, surface);
             (self.api.cairo_surface_destroy)(surface);
         }
+        true
     }
 
     /// `widget` drawn at [`RENDER_SCALE`].
