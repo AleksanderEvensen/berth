@@ -491,3 +491,108 @@ fn storage_methods_bridge_runtime_and_send_the_required_filters() {
     }
     drop(requests);
 }
+
+/// A stand-in `ssh`: logs its arguments, answers `-G`, and otherwise runs
+/// `script` in bash.
+#[cfg(unix)]
+fn fake_ssh(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("ssh");
+    let log = dir.join("args");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/bash\n\
+             echo \"$@\" >> '{}'\n\
+             for arg; do [ \"$arg\" = -G ] && {{ echo 'user me'; echo 'hostname prod.example.com'; exit 0; }}; done\n\
+             {script}\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
+fn ssh_endpoint() -> Endpoint {
+    Endpoint::Ssh {
+        destination: "prod".into(),
+        port: None,
+        hostname: None,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_carries_the_api_over_the_ssh_process() {
+    let server = TestServer::new();
+    let Endpoint::Tcp { url, .. } = &server.endpoint else {
+        panic!("test server is TCP");
+    };
+    let port = url.rsplit(':').next().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    // What dial-stdio does, with bash's /dev/tcp standing in for the socket.
+    let ssh = fake_ssh(
+        dir.path(),
+        &format!("exec 3<>/dev/tcp/127.0.0.1/{port}\ncat <&3 &\nexec cat >&3"),
+    );
+    let engine = BollardEngine::connect_with(&ssh_endpoint(), Some(&ssh)).unwrap();
+    let info = block_on(engine.info()).unwrap();
+    assert_eq!(
+        info.endpoint,
+        Endpoint::Ssh {
+            destination: "prod".into(),
+            port: None,
+            hostname: Some("prod.example.com".into()),
+        }
+    );
+    assert_eq!(info.endpoint.remote_host(), Some("prod.example.com"));
+    assert_eq!(block_on(engine.list_containers()).unwrap(), []);
+    let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+    assert!(args.contains("-G -- prod"), "{args}");
+    assert!(
+        args.contains("-o BatchMode=yes") && args.contains("-- prod docker system dial-stdio"),
+        "{args}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_failures_report_what_ssh_said() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let ssh = fake_ssh(
+        dir.path(),
+        "echo 'me@prod: Permission denied (publickey).' >&2\nexit 255",
+    );
+    let Err(ConnectError::Ssh(message)) = BollardEngine::connect_with(&ssh_endpoint(), Some(&ssh))
+    else {
+        panic!("expected an SSH failure");
+    };
+    assert!(message.contains("ssh-agent"), "{message}");
+
+    // ssh that exits at once, before the request is even written.
+    let ssh = fake_ssh(
+        dir.path(),
+        "echo 'bash: docker: command not found' >&2\nexit 127",
+    );
+    let Err(ConnectError::Ssh(message)) = BollardEngine::connect_with(&ssh_endpoint(), Some(&ssh))
+    else {
+        panic!("expected an SSH failure");
+    };
+    assert!(message.contains("docker CLI"), "{message}");
+
+    assert_eq!(
+        BollardEngine::connect_with(&ssh_endpoint(), None).err(),
+        Some(ConnectError::Ssh(crate::SSH_CLIENT_MISSING.into()))
+    );
+}
+
+#[test]
+fn ssh_failures_after_connect_keep_their_message() {
+    let error: BollardError = std::io::Error::other(ssh::SshFailure("ssh prod: why".into())).into();
+    assert_eq!(
+        mapping::error(error),
+        EngineError::Transport("ssh prod: why".into())
+    );
+}

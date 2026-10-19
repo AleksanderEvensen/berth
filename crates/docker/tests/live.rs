@@ -492,5 +492,7 @@ fn live_network_list_and_remove_on_a_non_tokio_executor() {
 mod files;
 #[path = "live/m3.rs"]
 mod m3;
+#[path = "live/ssh.rs"]
+mod ssh;
 #[path = "live/tls.rs"]
 mod tls;

@@ -7,9 +7,11 @@
 mod files;
 mod m3;
 mod mapping;
+mod ssh;
 mod tls;
 
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -90,31 +92,73 @@ impl BollardEngine {
     /// Returns an error for invalid endpoint or TLS settings, transport failures,
     /// or a failed or timed-out daemon handshake.
     pub fn connect(endpoint: &Endpoint) -> Result<Self, ConnectError> {
+        Self::connect_with(endpoint, crate::ssh_client())
+    }
+
+    /// [`Self::connect`] with `ssh_client` as the SSH executable.
+    fn connect_with(endpoint: &Endpoint, ssh_client: Option<&Path>) -> Result<Self, ConnectError> {
         let runtime = EngineRuntime::new()?;
         let docker = {
             let _entered = runtime.get().enter();
-            client(endpoint)?
+            client_with(endpoint, ssh_client)?
+        };
+        // An SSH login can take a while, more so through a jump host.
+        let (limit, hostname) = match (endpoint, ssh_client) {
+            (
+                Endpoint::Ssh {
+                    destination, port, ..
+                },
+                Some(program),
+            ) => (
+                Duration::from_secs(30),
+                Some(ssh::hostname(
+                    program.to_owned(),
+                    destination.clone(),
+                    *port,
+                )),
+            ),
+            _ => (Duration::from_secs(10), None),
         };
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         runtime.get().spawn(async move {
-            let result = tokio::time::timeout(Duration::from_secs(10), async {
-                let docker = docker.negotiate_version().await?;
-                docker.ping().await?;
-                Ok::<_, BollardError>(docker)
+            let result = tokio::time::timeout(limit, async {
+                let handshake = async {
+                    let docker = docker.negotiate_version().await?;
+                    docker.ping().await?;
+                    Ok::<_, BollardError>(docker)
+                };
+                let hostname = async {
+                    match hostname {
+                        Some(hostname) => hostname.await,
+                        None => None,
+                    }
+                };
+                let (docker, hostname) = futures::join!(handshake, hostname);
+                docker.map(|docker| (docker, hostname))
             })
             .await;
             let _ = sender.send(result);
         });
-        let docker = receiver
+        let (docker, resolved) = receiver
             .recv()
             .map_err(|e| ConnectError::InvalidConfig(e.to_string()))?
-            .map_err(|_| ConnectError::Refused {
-                endpoint: endpoint.to_string(),
+            .map_err(|_| match endpoint {
+                Endpoint::Ssh { .. } => ConnectError::Ssh(format!(
+                    "{endpoint} didn't answer within {} seconds.",
+                    limit.as_secs()
+                )),
+                _ => ConnectError::Refused {
+                    endpoint: endpoint.to_string(),
+                },
             })?
             .map_err(|e| connect_error(&e, endpoint))?;
+        let mut endpoint = endpoint.clone();
+        if let Endpoint::Ssh { hostname, .. } = &mut endpoint {
+            *hostname = resolved;
+        }
         Ok(Self {
             docker,
-            endpoint: endpoint.clone(),
+            endpoint,
             runtime,
         })
     }
@@ -141,7 +185,18 @@ impl BollardEngine {
 }
 
 fn client(endpoint: &Endpoint) -> Result<Docker, ConnectError> {
+    client_with(endpoint, crate::ssh_client())
+}
+
+fn client_with(endpoint: &Endpoint, ssh_client: Option<&Path>) -> Result<Docker, ConnectError> {
     let result = match endpoint {
+        Endpoint::Ssh {
+            destination, port, ..
+        } => {
+            let program =
+                ssh_client.ok_or_else(|| ConnectError::Ssh(crate::SSH_CLIENT_MISSING.into()))?;
+            return ssh::client(program, destination, *port);
+        }
         #[cfg(unix)]
         Endpoint::Unix(path) => {
             // Unlike Bollard's exists() check this preserves EACCES.
@@ -576,6 +631,9 @@ fn action_result(action: ContainerAction, result: Result<(), BollardError>) -> E
 }
 
 fn connect_io_error(error: &std::io::Error, endpoint: &Endpoint) -> ConnectError {
+    if let Some(ssh::SshFailure(message)) = ssh::SshFailure::find(error) {
+        return ConnectError::Ssh(message.clone());
+    }
     match error.kind() {
         std::io::ErrorKind::PermissionDenied => ConnectError::PermissionDenied {
             endpoint: endpoint.to_string(),

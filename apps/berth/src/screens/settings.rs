@@ -2,7 +2,9 @@
 //! applied immediately and persisted by [`crate::preferences`]. Shortcuts
 //! lists the keyboard map (NFR-U1).
 
-use berth_docker::{DiscoveryEnv, docker_contexts, parse_host};
+use berth_docker::{
+    DiscoveryEnv, Endpoint, SSH_CLIENT_MISSING, docker_contexts, parse_host, ssh_client,
+};
 use berth_settings::{Accent, AppearanceMode, EngineChoice, WindowButtons};
 use berth_ui::{
     Appearance, Button, ColorSwatch, OPTION_PREVIEW_RADIUS, OptionCard, ScrollPane, SegmentedTabs,
@@ -256,7 +258,10 @@ impl SettingsScreen {
                 )
                 .body(self.render_contexts(cx)),
             EngineTab::Custom => endpoint
-                .description("A Docker-compatible API address. Takes precedence over DOCKER_HOST.")
+                .description(
+                    "A Docker-compatible API address, or ssh://host to reach one over SSH \
+                 using your ssh config. Takes precedence over DOCKER_HOST.",
+                )
                 .body(self.render_host(cx)),
         };
 
@@ -583,9 +588,10 @@ fn validate_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("Enter an engine address.".into());
     }
-    parse_host(host)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    match parse_host(host).map_err(|error| error.to_string())? {
+        Endpoint::Ssh { .. } if ssh_client().is_none() => Err(SSH_CLIENT_MISSING.into()),
+        _ => Ok(()),
+    }
 }
 
 /// A miniature window in `appearance`: sidebar of label bars beside a content
@@ -724,7 +730,8 @@ mod tests {
         assert!(validate_host("npipe:////./pipe/docker_engine").is_ok());
         assert!(validate_host("").is_err());
         assert!(validate_host("/var/run/docker.sock").is_err());
-        assert!(validate_host("ssh://box").is_err());
+        assert_eq!(validate_host("ssh://box").is_ok(), ssh_client().is_some());
+        assert!(validate_host("ssh://box/path").is_err());
         assert!(validate_host("tcp://").is_err());
         assert!(validate_host("unix://relative.sock").is_err());
         assert!(validate_host("tcp:///localhost:2375").is_err());

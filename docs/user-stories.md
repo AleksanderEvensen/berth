@@ -140,3 +140,11 @@ socket/URL) and see which one is active.
 **H2 (P1)** — Appearance: System / Light / Dark, accent color.
 
 **H3 (P2)** — Rebind keyboard shortcuts.
+
+**H4 (P1)** — As a user with an engine on another machine, I want to enter
+`ssh://my-host` as a custom endpoint, where `my-host` can be an alias from my
+ssh config, and use Berth as if the engine were local. Accept when:
+`DOCKER_HOST` and Docker contexts with `ssh://` hosts work too; a failed
+login, an untrusted host key or a remote without the docker CLI says what to
+do; published-port links open on the host the alias resolves to; without an
+`ssh` client, settings say so instead of accepting the address.

@@ -35,6 +35,17 @@ pub enum Endpoint {
     /// `tcp://host:port` / `http(s)://…`. `tls` is set for 2376-style setups
     /// or when `DOCKER_TLS_VERIFY` asks for it.
     Tcp { url: String, tls: Option<TlsConfig> },
+    /// `ssh://[user@]host[:port]`: the system `ssh` client runs
+    /// `docker system dial-stdio` there, so `destination` may be an alias
+    /// from the user's ssh config.
+    Ssh {
+        /// `host` or `user@host`, passed to `ssh` as is (IPv6 unbracketed).
+        destination: String,
+        port: Option<u16>,
+        /// The real host name from `ssh -G`, which the live client fills in
+        /// on connect; published ports live there. `None` before connecting.
+        hostname: Option<String>,
+    },
 }
 
 impl fmt::Display for Endpoint {
@@ -43,6 +54,21 @@ impl fmt::Display for Endpoint {
             Self::Unix(path) => write!(f, "unix://{}", path.display()),
             Self::NamedPipe(pipe) => write!(f, "npipe://{pipe}"),
             Self::Tcp { url, .. } => f.write_str(url),
+            Self::Ssh {
+                destination, port, ..
+            } => {
+                let (user, host) = destination
+                    .rsplit_once('@')
+                    .map_or(("", destination.as_str()), |(user, host)| (user, host));
+                let at = if user.is_empty() { "" } else { "@" };
+                let (open, close) = if host.contains(':') {
+                    ("[", "]")
+                } else {
+                    ("", "")
+                };
+                write!(f, "ssh://{user}{at}{open}{host}{close}")?;
+                port.map_or(Ok(()), |port| write!(f, ":{port}"))
+            }
         }
     }
 }
@@ -52,16 +78,27 @@ impl Endpoint {
     /// ports live. Local sockets and loopback TCP give `None`.
     #[must_use]
     pub fn remote_host(&self) -> Option<&str> {
-        let Self::Tcp { url, .. } = self else {
-            return None;
-        };
-        let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
-        let authority = authority.split(['/', '?']).next()?;
-        let host = match authority.strip_prefix('[') {
-            Some(v6) => v6.split(']').next()?,
-            None => authority
-                .rsplit_once(':')
-                .map_or(authority, |(host, _)| host),
+        let host = match self {
+            Self::Tcp { url, .. } => {
+                let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+                let authority = authority.split(['/', '?']).next()?;
+                match authority.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next()?,
+                    None => authority
+                        .rsplit_once(':')
+                        .map_or(authority, |(host, _)| host),
+                }
+            }
+            Self::Ssh {
+                destination,
+                hostname,
+                ..
+            } => hostname.as_deref().unwrap_or_else(|| {
+                destination
+                    .rsplit_once('@')
+                    .map_or(destination.as_str(), |(_, host)| host)
+            }),
+            Self::Unix(_) | Self::NamedPipe(_) => return None,
         };
         let loopback = host.eq_ignore_ascii_case("localhost")
             || host
@@ -328,6 +365,10 @@ pub enum ConnectError {
     Refused { endpoint: String },
     #[error("invalid engine configuration: {0}")]
     InvalidConfig(String),
+    /// `ssh` couldn't reach the remote engine; the message says why and
+    /// what to do, e.g. trust the host key or install the docker CLI there.
+    #[error("{0}")]
+    Ssh(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

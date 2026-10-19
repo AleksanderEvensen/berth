@@ -138,10 +138,50 @@ pub fn parse_host(host: &str) -> Result<Endpoint, ConnectError> {
             url: host.into(),
             tls: None,
         }),
+        "ssh" => parse_ssh(address).ok_or_else(|| invalid(format!("invalid SSH host: {host}"))),
         _ => Err(invalid(format!(
             "unsupported or invalid Docker host: {host}"
         ))),
     }
+}
+
+/// `[user@]host[:port]`, as the docker CLI takes it: no path, and nothing
+/// `ssh` could read as an option.
+fn parse_ssh(address: &str) -> Option<Endpoint> {
+    if address.contains(['/', '?', '#']) {
+        return None;
+    }
+    let (user, rest) = match address.rsplit_once('@') {
+        Some((user, rest)) => (Some(user), rest),
+        None => (None, address),
+    };
+    let (host, port) = match rest.strip_prefix('[') {
+        Some(v6) => {
+            let (host, after) = v6.split_once(']')?;
+            match after {
+                "" => (host, None),
+                _ => (host, Some(after.strip_prefix(':')?)),
+            }
+        }
+        None => match rest.split_once(':') {
+            Some((_, port)) if port.contains(':') => return None,
+            Some((host, port)) => (host, Some(port)),
+            None => (rest, None),
+        },
+    };
+    let port = match port {
+        Some(port) => Some(port.parse::<u16>().ok().filter(|&port| port != 0)?),
+        None => None,
+    };
+    let valid = |part: &str| !part.is_empty() && !part.starts_with('-');
+    if !valid(host) || !user.is_none_or(valid) {
+        return None;
+    }
+    Some(Endpoint::Ssh {
+        destination: user.map_or_else(|| host.to_owned(), |user| format!("{user}@{host}")),
+        port,
+        hostname: None,
+    })
 }
 
 /// Resolve explicit settings first, then probe platform socket fallbacks in order.
@@ -418,7 +458,18 @@ mod tests {
             "unix://relative.sock",
             "tcp:///localhost:2375",
             "tcp://local host:2375",
-            "ssh://box",
+            "ssh://",
+            "ssh://box/path",
+            "ssh://user@",
+            "ssh://@box",
+            "ssh://-oProxyCommand=x",
+            "ssh://-l@box",
+            "ssh://box:",
+            "ssh://box:0",
+            "ssh://box:ssh",
+            "ssh://::1",
+            "ssh://[::1",
+            "ssh://[::1]x",
             "tcp://",
             "/var/run/docker.sock",
         ] {
@@ -489,7 +540,7 @@ mod tests {
         let mut env = env(&dir);
         for host in [
             "localhost:2375",
-            "ssh://remote",
+            "ssh://-remote",
             "unix://relative",
             "tcp://",
             "http:///",
@@ -582,11 +633,43 @@ mod tests {
             Err(ConnectError::InvalidConfig(_))
         ));
         env.docker_context = Some("remote".into());
-        context(&env, "ssh://remote", false);
+        context(&env, "ssh://remote/path", false);
         assert!(matches!(
             discover(&env),
             Err(ConnectError::InvalidConfig(_))
         ));
+    }
+
+    #[test]
+    fn ssh_hosts_keep_the_destination_for_ssh() {
+        let ssh = |destination: &str, port| Endpoint::Ssh {
+            destination: destination.into(),
+            port,
+            hostname: None,
+        };
+        for (host, expected) in [
+            ("ssh://my-entry", ssh("my-entry", None)),
+            ("ssh://me@box", ssh("me@box", None)),
+            ("ssh://me@box:2222", ssh("me@box", Some(2222))),
+            ("ssh://[::1]", ssh("::1", None)),
+            ("ssh://me@[fe80::1]:22", ssh("me@fe80::1", Some(22))),
+        ] {
+            let endpoint = parse_host(host).unwrap();
+            assert_eq!(endpoint, expected, "{host}");
+            assert_eq!(endpoint.to_string(), host);
+        }
+
+        let dir = TempDir::new().unwrap();
+        let mut env = env(&dir);
+        env.docker_context = Some("remote".into());
+        context(&env, "ssh://remote", false);
+        assert_eq!(
+            discover(&env).unwrap(),
+            Discovered {
+                endpoint: ssh("remote", None),
+                source: EndpointSource::Context("remote".into()),
+            }
+        );
     }
 
     #[test]

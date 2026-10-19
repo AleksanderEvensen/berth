@@ -577,7 +577,10 @@ pub(super) fn error(value: bollard::errors::Error) -> EngineError {
             status: status_code,
             message,
         },
-        other => EngineError::Transport(other.to_string()),
+        other => EngineError::Transport(
+            super::ssh::SshFailure::find(&other)
+                .map_or_else(|| other.to_string(), |failure| failure.0.clone()),
+        ),
     }
 }
 

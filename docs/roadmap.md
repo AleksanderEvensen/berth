@@ -36,7 +36,11 @@ with a note saying what is missing.
 - [ ] A3 — Command palette (`ctrl+k`): run any action, jump to any container/image/volume.
 - [ ] Builds.
 - [ ] Kubernetes.
-- [ ] SSH remotes.
+- [x] H4 — SSH remotes. `ssh://` endpoints connect through the system
+      `ssh` with `BatchMode=yes`; checked against a real remote with
+      `BERTH_TEST_SSH_HOST`. Later: password, passphrase and host-key
+      prompts in the app (`SSH_ASKPASS`), an ssh-config host picker, and a
+      pure-Rust (russh) transport so no `ssh` client is needed.
 
 ## Open questions
 

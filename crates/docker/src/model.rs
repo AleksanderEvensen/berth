@@ -494,6 +494,17 @@ mod tests {
         );
         assert_eq!(urls(&tcp("tcp://127.0.0.1:2375")), urls(&local));
         assert_eq!(urls(&tcp("http://localhost:2375")), urls(&local));
+        // Over SSH they live on the host `ssh -G` resolved the alias to.
+        let ssh = |hostname: Option<&str>| crate::Endpoint::Ssh {
+            destination: "me@prod".into(),
+            port: None,
+            hostname: hostname.map(Into::into),
+        };
+        assert_eq!(urls(&ssh(None)), ["http://prod:5432"]);
+        assert_eq!(
+            urls(&ssh(Some("prod.example.com"))),
+            ["http://prod.example.com:5432"]
+        );
         container.ports.clear();
         assert_eq!(container.web_ports(&local), Vec::<&PortBinding>::new());
     }

@@ -27,7 +27,7 @@
 
 | ID | Requirement | Stories |
 | --- | --- | --- |
-| FR-1 | Connect to a Docker-API-compatible engine via unix socket, named pipe, TCP/TLS, or a Docker context. Auto-detect in order: `DOCKER_HOST` → current Docker context → rootful socket → rootless socket → Podman socket. | A5, H1 |
+| FR-1 | Connect to a Docker-API-compatible engine via unix socket, named pipe, TCP/TLS, SSH (the system `ssh` client running `docker system dial-stdio` on the remote), or a Docker context. Auto-detect in order: `DOCKER_HOST` → current Docker context → rootful socket → rootless socket → Podman socket. | A5, H1, H4 |
 | FR-2 | Subscribe to `/events` and keep an in-memory model of containers, images, volumes and networks consistent with the engine without periodic full refreshes (full resync on reconnect only). | B1, C1, D1 |
 | FR-3 | Group containers by `com.docker.compose.project` label; order services by `com.docker.compose.service`. Containers without the label are top-level. | B2 |
 | FR-4 | Lifecycle operations: start, stop, restart, kill, pause/unpause, remove (with `force` and `v` options) for containers; the same fan-out for a compose project. | B3 |
