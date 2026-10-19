@@ -20,9 +20,8 @@ with a note saying what is missing.
 
 ## Open
 
-- [ ] macOS release: the `.dmg` is built, signed and notarized when the
-      `APPLE_*` variables are set. Missing: the Developer ID secrets in the
-      repository and a release that ships one.
+- [x] macOS release: the `.dmg` is built, signed and notarized; v0.1.0
+      ships `Berth_0.1.0_universal.dmg`.
 - [ ] B9 — Container Files tab. Browsing is in for any running container.
       Stopped containers can't be browsed, nor ones sharing another's process
       namespace (`--pid=host`, `--pid=container:…`). Missing: opening and
