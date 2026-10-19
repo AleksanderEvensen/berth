@@ -10,7 +10,8 @@ use berth_ui::{
 };
 use gpui::{
     AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, div, prelude::*, px,
+    IntoElement, Render, SharedString, SpringAnimation, Stateful, Subscription, Window, div,
+    prelude::*, px,
 };
 
 use crate::chrome;
@@ -69,6 +70,7 @@ struct ToastItem {
 struct OpenPalette {
     view: Entity<Palette>,
     previous_focus: Option<FocusHandle>,
+    _keep_focus: Subscription,
 }
 
 pub struct Shell {
@@ -508,9 +510,18 @@ impl Shell {
             },
         )
         .detach();
+        // Something behind may take focus while it is open (a terminal
+        // starting when its container does); take it back.
+        let focus = view.read(cx).focus_handle(cx);
+        let keep_focus = cx.on_focus_out(&focus, window, |this, _, window, cx| {
+            if let Some(focus) = this.focus_trap(cx) {
+                window.focus(&focus, cx);
+            }
+        });
         self.palette = Some(OpenPalette {
             view,
             previous_focus,
+            _keep_focus: keep_focus,
         });
         cx.notify();
     }
@@ -983,6 +994,8 @@ mod tests {
         });
         let connector: Connector = Arc::new(|| Ok(Arc::new(FixtureEngine::default())));
         let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(connector, window, cx));
+        // Focus events need an active window.
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
@@ -991,6 +1004,15 @@ mod tests {
 
     fn route(shell: &Entity<Shell>, cx: &VisualTestContext) -> Route {
         shell.read_with(cx, |shell, _| shell.route)
+    }
+
+    fn in_palette_now(shell: &Entity<Shell>, cx: &VisualTestContext) -> Option<FocusHandle> {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .palette
+                .as_ref()
+                .map(|palette| palette.view.read(cx).focus_handle(cx))
+        })
     }
 
     fn palette_open(shell: &Entity<Shell>, cx: &VisualTestContext) -> bool {
@@ -1067,6 +1089,18 @@ mod tests {
         );
         cx.simulate_keystrokes("down up escape");
         assert!(!palette_open(&shell, cx));
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+
+        // Nothing behind it can take its focus while it is open.
+        cx.simulate_keystrokes("secondary-k");
+        let shell_focus = shell.read_with(cx, |shell, _| shell.focus.clone());
+        cx.update(|window, cx| window.focus(&shell_focus, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            in_palette_now(&shell, cx)
+        );
+        cx.simulate_keystrokes("escape");
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
 
         // ctrl-k toggles it closed too.
