@@ -1,5 +1,5 @@
 //! The window root: sidebar + active screen + chrome, plus shell-owned
-//! overlays (confirm dialog, toasts).
+//! overlays (confirm dialog, command palette, toasts).
 
 use std::time::Duration;
 
@@ -10,7 +10,8 @@ use berth_ui::{
 };
 use gpui::{
     AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, div, prelude::*, px,
+    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, canvas, div, prelude::*,
+    px,
 };
 
 use crate::chrome;
@@ -21,8 +22,9 @@ use crate::keymap::{
     GoContainers, GoImages, GoNetworks, GoVolumes, OpenPort, OpenSettings, Restart, ScrollBottom,
     ScrollPageDown, ScrollPageUp, ScrollTop, SelectAll, SelectFirst, SelectLast, SelectNext,
     SelectPrev, ShowFiles, ShowInfo, ShowLogs, ShowShortcuts, ShowStats, ShowTerminal,
-    ToggleRunning, ToggleSelected, ToggleSidebar,
+    TogglePalette, ToggleRunning, ToggleSelected, ToggleSidebar,
 };
+use crate::palette::{Palette, PaletteEvent, Target};
 use crate::preferences;
 use crate::screens::{
     Chrome, ListOp, ListScreen, ShowContainer, ShowEngineHelp, ShowVolume,
@@ -64,6 +66,12 @@ struct ToastItem {
     detail: SharedString,
 }
 
+/// The open command palette and the focus to give back when it closes.
+struct OpenPalette {
+    view: Entity<Palette>,
+    previous_focus: Option<FocusHandle>,
+}
+
 pub struct Shell {
     focus: FocusHandle,
     dialog_focus: FocusHandle,
@@ -80,6 +88,7 @@ pub struct Shell {
     cleanup: Entity<CleanupScreen>,
     settings: Entity<SettingsScreen>,
     confirm: Option<ConfirmRequest>,
+    palette: Option<OpenPalette>,
     toasts: Vec<ToastItem>,
     next_toast_id: usize,
     /// The settings problem already toasted, so it is reported once.
@@ -108,12 +117,8 @@ impl Shell {
         // A focused control can disappear (a disabled button, a closed
         // terminal); without focus no shortcut resolves, so take it back.
         cx.on_focus_lost(window, |this: &mut Self, window, cx| {
-            let target = if this.confirm.is_some() {
-                &this.dialog_focus
-            } else {
-                &this.focus
-            };
-            window.focus(target, cx);
+            let target = this.focus_trap(cx).unwrap_or_else(|| this.focus.clone());
+            window.focus(&target, cx);
         })
         .detach();
         // Report a problem from loading settings once the shell exists.
@@ -170,6 +175,7 @@ impl Shell {
             cleanup,
             settings,
             confirm: None,
+            palette: None,
             toasts: Vec::new(),
             next_toast_id: 0,
             settings_problem: None,
@@ -300,22 +306,40 @@ impl Shell {
         }
     }
 
-    /// Tab and Shift+Tab. While the confirm dialog is open, focus stays in
-    /// it, so nothing behind it can be pressed.
+    /// Where focus must stay while a modal is open: the confirm dialog or
+    /// the palette.
+    fn focus_trap(&self, cx: &Context<Self>) -> Option<FocusHandle> {
+        if self.confirm.is_some() {
+            Some(self.dialog_focus.clone())
+        } else {
+            self.palette
+                .as_ref()
+                .map(|palette| palette.view.read(cx).focus_handle(cx))
+        }
+    }
+
+    /// Tab and Shift+Tab. While a modal is open, focus stays in it, so
+    /// nothing behind it can be pressed.
     fn cycle_focus(&self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Bounds the search for a stop inside the dialog.
+        // Bounds the search for a stop inside the modal.
         const MAX_STOPS: usize = 1024;
+        let trap = self.focus_trap(cx);
         for _ in 0..MAX_STOPS {
             if forward {
                 window.focus_next(cx);
             } else {
                 window.focus_prev(cx);
             }
-            if self.confirm.is_none() || self.dialog_focus.contains_focused(window, cx) {
+            if trap
+                .as_ref()
+                .is_none_or(|trap| trap.contains_focused(window, cx))
+            {
                 return;
             }
         }
-        window.focus(&self.dialog_focus, cx);
+        if let Some(trap) = trap {
+            window.focus(&trap, cx);
+        }
     }
 
     /// `Esc` clears the selection; on Settings it goes back.
@@ -355,9 +379,11 @@ impl Shell {
     }
 
     /// Keys that act on the screens. Not registered while the confirm
-    /// dialog is open, so they can't act behind it.
+    /// dialog is open, so they can't act behind it. They stay registered
+    /// under the palette, which runs its commands through them.
     fn screen_actions(content: Stateful<Div>, cx: &Context<Self>) -> Stateful<Div> {
         content
+            .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::open_settings))
@@ -461,6 +487,73 @@ impl Shell {
         let collapsed = self.sidebar_collapsed;
         preferences::update(cx, |s| s.sidebar_collapsed = collapsed);
         cx.notify();
+    }
+
+    // ---- command palette ----
+
+    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        let previous_focus = window.focused(cx);
+        let view = cx.new(|cx| Palette::new(self.store.clone(), window, cx));
+        cx.subscribe_in(
+            &view,
+            window,
+            |this, _, event: &PaletteEvent, window, cx| {
+                this.close_palette(window, cx);
+                if let PaletteEvent::Run(target) = event {
+                    this.run_palette_target(target, window, cx);
+                }
+            },
+        )
+        .detach();
+        self.palette = Some(OpenPalette {
+            view,
+            previous_focus,
+        });
+        cx.notify();
+    }
+
+    /// Close the palette, giving focus back to where it was. If that is
+    /// gone (a search field that closed on blur), the shell takes it.
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(palette) = self.palette.take() {
+            window.focus(palette.previous_focus.as_ref().unwrap_or(&self.focus), cx);
+            cx.notify();
+        }
+    }
+
+    /// Run a command as its keys would, or select an item on its screen.
+    fn run_palette_target(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
+        match target {
+            Target::Command(shortcut) => {
+                // Dispatched once this update is done, as the shell's own
+                // listeners handle it; through the shell, which is always
+                // in the rendered frame, unlike a focus that has closed.
+                if let Some(action) = shortcut.command() {
+                    let shell = self.focus.clone();
+                    window.defer(cx, move |window, cx| {
+                        shell.dispatch_action(action.as_ref(), window, cx);
+                    });
+                }
+            }
+            Target::Container(id) => {
+                self.navigate(Route::Containers, window, cx);
+                self.containers
+                    .update(cx, |screen, cx| screen.reveal(id, cx));
+            }
+            Target::Image(id) => {
+                self.navigate(Route::Images, window, cx);
+                self.images.update(cx, |screen, cx| screen.reveal(id, cx));
+            }
+            Target::Volume(name) => {
+                self.navigate(Route::Volumes, window, cx);
+                self.volumes
+                    .update(cx, |screen, cx| screen.reveal(name, cx));
+            }
+        }
     }
 
     // ---- confirm dialog ----
@@ -777,6 +870,24 @@ impl Shell {
     }
 }
 
+/// While a modal is open, give it back focus that something behind it took
+/// (a terminal focuses itself when its container starts). Prepainted after
+/// the screens, which may have just done that, and before the deferred
+/// modal, which then marks itself focused for this frame.
+fn keep_focus(trap: FocusHandle) -> impl IntoElement {
+    canvas(
+        move |_, window, cx| {
+            // Focus may be on a control inside it, or on it before its
+            // first frame, which `contains_focused` doesn't know about yet.
+            if !trap.is_focused(window) && !trap.contains_focused(window, cx) {
+                window.focus(&trap, cx);
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let radius = chrome::content_radius(window);
@@ -862,11 +973,163 @@ impl Render for Shell {
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
+            .children(self.focus_trap(cx).map(keep_focus))
             .child(self.render_sidebar_toggle(leading, cx))
             .children(captions)
             .child(self.render_toasts(cx))
+            .children(self.palette.as_ref().map(|palette| palette.view.clone()))
             .children(confirm);
 
         chrome::window_frame(content.into_any_element(), window, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use berth_docker::fixtures::FixtureEngine;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::keymap;
+
+    fn open_shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            berth_ui::init(cx);
+            preferences::init_in_memory(cx);
+            keymap::bind(cx);
+        });
+        let connector: Connector = Arc::new(|| Ok(Arc::new(FixtureEngine::default())));
+        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(connector, window, cx));
+        // Focus events need an active window.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        (shell, cx)
+    }
+
+    fn route(shell: &Entity<Shell>, cx: &VisualTestContext) -> Route {
+        shell.read_with(cx, |shell, _| shell.route)
+    }
+
+    fn in_palette_now(shell: &Entity<Shell>, cx: &VisualTestContext) -> Option<FocusHandle> {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .palette
+                .as_ref()
+                .map(|palette| palette.view.read(cx).focus_handle(cx))
+        })
+    }
+
+    fn palette_open(shell: &Entity<Shell>, cx: &VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, _| shell.palette.is_some())
+    }
+
+    #[gpui::test]
+    fn palette_runs_commands_and_jumps_to_items(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+
+        cx.simulate_keystrokes("secondary-k");
+        assert!(palette_open(&shell, cx));
+        cx.simulate_input("go to images");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(!palette_open(&shell, cx));
+        assert_eq!(route(&shell, cx), Route::Images);
+
+        let volume = shell.read_with(cx, |shell, cx| {
+            shell
+                .store
+                .read(cx)
+                .volumes()
+                .first()
+                .map(|v| v.name.clone())
+        });
+        let Some(volume) = volume else {
+            panic!("the fixtures have no volumes");
+        };
+        cx.simulate_keystrokes("secondary-k");
+        cx.simulate_input(&volume);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(route(&shell, cx), Route::Volumes);
+        let selected = shell.read_with(cx, |shell, cx| {
+            shell.volumes.read(cx).selected().map(str::to_string)
+        });
+        assert_eq!(selected, Some(volume));
+    }
+
+    #[gpui::test]
+    fn palette_fits_the_smallest_window(cx: &mut TestAppContext) {
+        let (_, cx) = open_shell(cx);
+        // Without the entrance spring, so the card is where it settles.
+        cx.update(|_, cx| preferences::update(cx, |s| s.reduce_motion = true));
+        let window = gpui::size(px(860.0), px(520.0));
+        cx.simulate_resize(window);
+        cx.simulate_keystrokes("secondary-k");
+        cx.run_until_parked();
+        let Some(palette) = cx.debug_bounds("palette") else {
+            panic!("the palette didn't render");
+        };
+        assert!(palette.bottom() <= window.height, "{palette:?}");
+    }
+
+    #[gpui::test]
+    fn closing_the_palette_restores_focus(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        cx.simulate_keystrokes("secondary-f");
+        cx.simulate_input("db");
+        let before = cx.update(|window, cx| window.focused(cx));
+        assert!(before.is_some());
+
+        cx.simulate_keystrokes("secondary-k");
+        assert!(palette_open(&shell, cx));
+        let in_palette = cx.update(|window, cx| window.focused(cx));
+        assert_ne!(in_palette, before);
+        // Keys for the screens don't act behind it, nor take its focus.
+        cx.simulate_keystrokes("alt-3");
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), in_palette);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.containers.read(cx).tab()),
+            0
+        );
+        cx.simulate_keystrokes("down up escape");
+        assert!(!palette_open(&shell, cx));
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+
+        // Nothing behind it can take its focus while it is open.
+        cx.simulate_keystrokes("secondary-k");
+        let shell_focus = shell.read_with(cx, |shell, _| shell.focus.clone());
+        cx.update(|window, cx| window.focus(&shell_focus, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            in_palette_now(&shell, cx)
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+
+        // Nor before its first frame.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.toggle_palette(&TogglePalette, window, cx);
+            });
+            window.focus(&shell_focus, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            in_palette_now(&shell, cx)
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+
+        // ctrl-k toggles it closed too.
+        cx.simulate_keystrokes("secondary-k secondary-k");
+        assert!(!palette_open(&shell, cx));
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
     }
 }

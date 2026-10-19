@@ -544,7 +544,7 @@ impl SettingsScreen {
 }
 
 /// Keycaps for each alternative keystroke, separated by "or".
-fn keys(keystrokes: &[&str], theme: &Theme) -> Div {
+pub fn keys(keystrokes: &[&str], theme: &Theme) -> Div {
     div()
         .flex()
         .items_center()
