@@ -35,6 +35,18 @@ pub enum Target {
 }
 
 impl Target {
+    /// Keys the result's row, so a click pressed on one result can't land
+    /// on another that a refresh moved into its place.
+    fn row_id(&self) -> SharedString {
+        match self {
+            Self::Command(shortcut) => format!("command-{}", shortcut.label),
+            Self::Container(id) => format!("container-{id}"),
+            Self::Image(id) => format!("image-{id}"),
+            Self::Volume(name) => format!("volume-{name}"),
+        }
+        .into()
+    }
+
     fn is(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Command(a), Self::Command(b)) => std::ptr::eq(*a, *b),
@@ -152,10 +164,13 @@ impl Palette {
         range
             .filter_map(|ix| {
                 let entry = self.entries.get(*self.matches.get(ix)?)?;
-                let row = ResourceRow::new(("palette-result", ix), entry.name.clone())
+                let target = entry.target.clone();
+                let row = ResourceRow::new(entry.target.row_id(), entry.name.clone())
                     .subtitle(entry.detail.clone())
                     .selected(ix == self.highlight)
-                    .on_click(cx.listener(move |this, _, _, cx| this.run(ix, cx)));
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(PaletteEvent::Run(target.clone()));
+                    }));
                 let row = match &entry.target {
                     Target::Command(shortcut) => row
                         .leading(Badge::icon(shortcut.group.label(), icons::KEYBOARD))

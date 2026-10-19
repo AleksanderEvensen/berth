@@ -1001,7 +1001,7 @@ mod tests {
     fn palette_runs_commands_and_jumps_to_items(cx: &mut TestAppContext) {
         let (shell, cx) = open_shell(cx);
 
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         assert!(palette_open(&shell, cx));
         cx.simulate_input("go to images");
         cx.simulate_keystrokes("enter");
@@ -1020,7 +1020,7 @@ mod tests {
         let Some(volume) = volume else {
             panic!("the fixtures have no volumes");
         };
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         cx.simulate_input(&volume);
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -1034,12 +1034,12 @@ mod tests {
     #[gpui::test]
     fn closing_the_palette_restores_focus(cx: &mut TestAppContext) {
         let (shell, cx) = open_shell(cx);
-        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.simulate_input("db");
         let before = cx.update(|window, cx| window.focused(cx));
         assert!(before.is_some());
 
-        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_keystrokes("secondary-k");
         assert!(palette_open(&shell, cx));
         let in_palette = cx.update(|window, cx| window.focused(cx));
         assert_ne!(in_palette, before);
@@ -1055,7 +1055,7 @@ mod tests {
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
 
         // ctrl-k toggles it closed too.
-        cx.simulate_keystrokes("ctrl-k ctrl-k");
+        cx.simulate_keystrokes("secondary-k secondary-k");
         assert!(!palette_open(&shell, cx));
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
     }

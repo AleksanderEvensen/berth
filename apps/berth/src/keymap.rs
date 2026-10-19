@@ -701,6 +701,19 @@ mod tests {
         );
     }
 
+    /// The palette keys its rows by label.
+    #[test]
+    fn labels_are_unique() {
+        let mut seen = HashSet::new();
+        for shortcut in SHORTCUTS {
+            assert!(
+                seen.insert(shortcut.label),
+                "{} is listed twice",
+                shortcut.label
+            );
+        }
+    }
+
     #[test]
     fn labels_follow_the_platform() {
         assert_eq!(
