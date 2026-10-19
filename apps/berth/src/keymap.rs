@@ -107,6 +107,9 @@ actions!(
 
 /// Anywhere in the window.
 const SHELL: &str = "Shell";
+/// Anywhere but the command palette, so these keys can't act behind it.
+/// They still run when picked in the palette, which dispatches the action.
+const OUTSIDE_PALETTE: &str = "!CommandPalette";
 /// Where list keys apply: anywhere in the shell except text inputs, the
 /// terminal and the confirm dialog, which own these keys.
 /// A focused file tree handles its own arrows, Home, End and Enter.
@@ -121,7 +124,7 @@ pub const PALETTE_CONTEXT: &str = "CommandPalette";
 const PALETTE: &str = "CommandPalette > Input";
 /// Detail tabs also switch from inside the terminal, so it can be left by
 /// keyboard.
-const TABS: &str = "Shell && !ConfirmDialog";
+const TABS: &str = "Shell && !ConfirmDialog && !CommandPalette";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -203,26 +206,56 @@ pub const SHORTCUTS: &[Shortcut] = &[
         General,
         "Go to Containers",
         ["secondary-1"],
-        None,
+        Some(OUTSIDE_PALETTE),
         GoContainers
     ),
-    shortcut!(General, "Go to Volumes", ["secondary-2"], None, GoVolumes),
-    shortcut!(General, "Go to Images", ["secondary-3"], None, GoImages),
-    shortcut!(General, "Go to Networks", ["secondary-4"], None, GoNetworks),
-    shortcut!(General, "Go to Activity", ["secondary-5"], None, GoActivity),
-    shortcut!(General, "Go to Clean up", ["secondary-6"], None, GoCleanup),
+    shortcut!(
+        General,
+        "Go to Volumes",
+        ["secondary-2"],
+        Some(OUTSIDE_PALETTE),
+        GoVolumes
+    ),
+    shortcut!(
+        General,
+        "Go to Images",
+        ["secondary-3"],
+        Some(OUTSIDE_PALETTE),
+        GoImages
+    ),
+    shortcut!(
+        General,
+        "Go to Networks",
+        ["secondary-4"],
+        Some(OUTSIDE_PALETTE),
+        GoNetworks
+    ),
+    shortcut!(
+        General,
+        "Go to Activity",
+        ["secondary-5"],
+        Some(OUTSIDE_PALETTE),
+        GoActivity
+    ),
+    shortcut!(
+        General,
+        "Go to Clean up",
+        ["secondary-6"],
+        Some(OUTSIDE_PALETTE),
+        GoCleanup
+    ),
     shortcut!(
         General,
         "Search containers",
         ["secondary-f"],
-        None,
+        Some(OUTSIDE_PALETTE),
         FocusSearch
     ),
     shortcut!(
         General,
         "Toggle sidebar",
         ["secondary-b"],
-        None,
+        Some(OUTSIDE_PALETTE),
         ToggleSidebar
     ),
     shortcut!(
@@ -232,12 +265,18 @@ pub const SHORTCUTS: &[Shortcut] = &[
         None,
         TogglePalette
     ),
-    shortcut!(General, "Settings", ["secondary-,"], None, OpenSettings),
+    shortcut!(
+        General,
+        "Settings",
+        ["secondary-,"],
+        Some(OUTSIDE_PALETTE),
+        OpenSettings
+    ),
     shortcut!(
         General,
         "Keyboard shortcuts",
         ["secondary-/"],
-        None,
+        Some(OUTSIDE_PALETTE),
         ShowShortcuts
     ),
     shortcut!(General, "Leave settings", ["escape"]),
@@ -628,7 +667,12 @@ mod tests {
         assert!(runs("down", &palette, &MenuNext));
         assert!(runs("enter", &palette, &MenuConfirm));
         assert!(runs("escape", &palette, &MenuCancel));
-        // Global keys work anywhere.
+        // Nothing else acts behind the open palette.
+        assert!(resolve("secondary-1", &palette).is_none());
+        assert!(resolve("alt-3", &palette).is_none());
+        assert!(resolve("secondary-enter", &palette).is_none());
+        // Global keys work anywhere else.
+        assert!(runs("secondary-1", &shell, &GoContainers));
         assert!(runs("secondary-1", &["Shell", "Input"], &GoContainers));
         assert!(runs("secondary-k", &["Shell", "Terminal"], &TogglePalette));
         assert!(runs("secondary-k", &palette, &TogglePalette));

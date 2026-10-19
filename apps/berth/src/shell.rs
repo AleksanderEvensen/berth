@@ -1041,7 +1041,15 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-k");
         assert!(palette_open(&shell, cx));
-        assert_ne!(cx.update(|window, cx| window.focused(cx)), before);
+        let in_palette = cx.update(|window, cx| window.focused(cx));
+        assert_ne!(in_palette, before);
+        // Keys for the screens don't act behind it, nor take its focus.
+        cx.simulate_keystrokes("alt-3");
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), in_palette);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.containers.read(cx).tab()),
+            0
+        );
         cx.simulate_keystrokes("down up escape");
         assert!(!palette_open(&shell, cx));
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);

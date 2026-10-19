@@ -34,6 +34,18 @@ pub enum Target {
     Volume(String),
 }
 
+impl Target {
+    fn is(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Command(a), Self::Command(b)) => std::ptr::eq(*a, *b),
+            (Self::Container(a), Self::Container(b))
+            | (Self::Image(a), Self::Image(b))
+            | (Self::Volume(a), Self::Volume(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// What the palette asks of the shell, which owns it.
 pub enum PaletteEvent {
     Run(Target),
@@ -70,14 +82,25 @@ impl Palette {
         let subscriptions = [
             cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.highlight = 0;
                     this.refilter(cx);
+                    this.highlight = 0;
+                    this.scroll.scroll_to_item(0, ScrollStrategy::Top);
                 }
             }),
-            // Containers come and go while the palette is open.
+            // Containers come and go while the palette is open. The
+            // highlight stays on its item, and the list where it was
+            // scrolled.
             cx.observe(&store, |this, _, cx| {
+                let highlighted = this.highlighted().map(|e| e.target.clone());
                 this.entries = entries(this.store.read(cx));
                 this.refilter(cx);
+                this.highlight = highlighted
+                    .and_then(|target| {
+                        this.matches.iter().position(|&e| {
+                            this.entries.get(e).is_some_and(|e| e.target.is(&target))
+                        })
+                    })
+                    .unwrap_or_else(|| this.highlight.min(this.matches.len().saturating_sub(1)));
             }),
         ];
         let entries = entries(store.read(cx));
@@ -101,10 +124,11 @@ impl Palette {
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.input.read(cx).value();
         self.matches = rank(&query, self.entries.iter().map(|e| e.name.as_ref()));
-        self.highlight = self.highlight.min(self.matches.len().saturating_sub(1));
-        self.scroll
-            .scroll_to_item(self.highlight, ScrollStrategy::Nearest);
         cx.notify();
+    }
+
+    fn highlighted(&self) -> Option<&Entry> {
+        self.entries.get(*self.matches.get(self.highlight)?)
     }
 
     /// Move the highlight, wrapping around at either end.
