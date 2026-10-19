@@ -25,6 +25,7 @@ rustls-pki-types = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 tower-service = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The integration tests' direct client may need TLS for a tcp:// DOCKER_HOST.
@@ -34,7 +35,7 @@ mockito.workspace = true
 
 [features]
 default = ["live"]
-live = ["dep:bollard", "dep:tokio", "dep:tokio-util", "dep:chrono", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types", "dep:http", "dep:tower-service"]
+live = ["dep:bollard", "dep:tokio", "dep:tokio-util", "dep:chrono", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:rustls-pki-types", "dep:http", "dep:tower-service", "dep:tar"]
 
 [lints]
 workspace = true

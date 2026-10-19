@@ -10,22 +10,31 @@
 //! stateless [`FileTree`]. Paths are the browsed tree's own, from `/`, and
 //! escaped ([`berth_docker::escape_name`]); symlinks are resolved against
 //! that root before a folder is listed ([`resolve_path`]).
+//!
+//! A file is opened (double-click, Enter) by copying it to a temporary
+//! folder and handing that copy to the program the system picks; files and
+//! folders are downloaded to where the user saves them. Copies in progress
+//! and their failures show below the tree.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use berth_docker::{
     Engine, FileEntry, FileKind, FileMount, FilesTarget, Folder, HELPER_IMAGE, Resolution,
-    display_name, join_path, resolve_path,
+    display_name, join_path, resolve_entry, resolve_path,
 };
 use berth_ui::{
     Button, Disclosure, FileTree, FileTreeEntry, FileTreeRow, IconButton, Spinner, Theme,
-    empty_state, icons,
+    empty_state, icon, icons,
 };
 use gpui::{
-    AppContext as _, AsyncApp, Context, Entity, FocusHandle, FontWeight, Global, IntoElement,
-    Render, SharedString, Task, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, FontWeight, Global,
+    IntoElement, Render, SharedString, Task, UniformListScrollHandle, WeakEntity, Window, div,
+    prelude::*, px,
 };
 
 use crate::format;
@@ -180,6 +189,41 @@ enum Listing {
     Failed(String),
 }
 
+/// What an entry is copied out for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// To a temporary file, opened in the program the system picks.
+    Open,
+    /// To where the user saves it.
+    Download,
+}
+
+/// A copy out of the browsed tree, shown below it.
+struct Transfer {
+    id: usize,
+    purpose: Purpose,
+    name: SharedString,
+    /// Bytes of file data written so far.
+    copied: Arc<AtomicU64>,
+    /// A file's size, once known; a folder's isn't.
+    total: Option<u64>,
+    state: TransferState,
+}
+
+enum TransferState {
+    /// Owns the copy; dropping it (cancelling) stops the copy.
+    Running(#[expect(dead_code, reason = "held to keep the copy alive")] Task<()>),
+    /// Downloaded here.
+    Saved(PathBuf),
+    Failed(String),
+}
+
+/// How often running copies redraw their progress.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Opens a copied file in the program the system picks; replaced in tests.
+type Opener = Rc<dyn Fn(&Path, &mut App)>;
+
 pub struct FileBrowser {
     engine: Arc<dyn Engine>,
     /// The helper; dropped with the browser, which removes it.
@@ -196,6 +240,11 @@ pub struct FileBrowser {
     scroll: UniformListScrollHandle,
     /// Listings in flight, by path.
     loads: HashMap<String, Task<()>>,
+    transfers: Vec<Transfer>,
+    next_transfer: usize,
+    /// A redraw is scheduled while copies run.
+    ticking: bool,
+    open_with: Opener,
 }
 
 const ROOT: &str = "/";
@@ -219,6 +268,10 @@ impl FileBrowser {
             focus: cx.focus_handle().tab_stop(true),
             scroll: UniformListScrollHandle::new(),
             loads: HashMap::new(),
+            transfers: Vec::new(),
+            next_transfer: 0,
+            ticking: false,
+            open_with: Rc::new(|path, cx| cx.open_with_system(path)),
         };
         this.load(ROOT.to_owned(), cx);
         this
@@ -257,14 +310,41 @@ impl FileBrowser {
         path: &str,
         cx: &mut AsyncApp,
     ) -> Result<Vec<FileEntry>, String> {
-        let closed = |_| "Closed".to_owned();
+        let dir = Self::resolve(this, path, false, cx).await?;
+        let known = this
+            .read_with(cx, |b, _| b.real.get(&dir).map(|f| f.entries().to_vec()))
+            .map_err(closed)?;
+        match known {
+            Some(entries) => Ok(entries),
+            None => Self::list(this, dir, cx).await,
+        }
+    }
+
+    /// The real path `path` leads to, listing the folders and reading the
+    /// links on the way that aren't known yet. With `any_entry` it may lead
+    /// to a file ([`resolve_entry`]), not only to a folder.
+    #[expect(
+        clippy::future_not_send,
+        reason = "GPUI AsyncApp stays on the foreground executor"
+    )]
+    async fn resolve(
+        this: &WeakEntity<Self>,
+        path: &str,
+        any_entry: bool,
+        cx: &mut AsyncApp,
+    ) -> Result<String, String> {
         loop {
             let step = this
                 .read_with(cx, |b, _| {
-                    resolve_path(path, b.mount.confined, |dir| b.real.get(dir))
+                    let lookup = |dir: &str| b.real.get(dir);
+                    if any_entry {
+                        resolve_entry(path, b.mount.confined, lookup)
+                    } else {
+                        resolve_path(path, b.mount.confined, lookup)
+                    }
                 })
                 .map_err(closed)?;
-            let (dir, done) = match step {
+            match step {
                 Resolution::Failed(why) => return Err(why),
                 Resolution::NeedsLink(link) => {
                     let request = this
@@ -273,29 +353,43 @@ impl FileBrowser {
                     let target = request.await.map_err(|e| e.to_string())?;
                     this.update(cx, |b, _| b.learn_link(&link, target))
                         .map_err(closed)?;
-                    continue;
                 }
-                Resolution::Needs(dir) => (dir, false),
-                Resolution::Real(dir) => (dir, true),
-            };
-            let known = this
-                .read_with(cx, |b, _| b.real.get(&dir).map(|f| f.entries().to_vec()))
-                .map_err(closed)?;
-            let entries = if let Some(entries) = known {
-                entries
-            } else {
-                let request = this
-                    .read_with(cx, |b, _| b.engine.list_files(&b.mount, &dir))
-                    .map_err(closed)?;
-                let entries = request.await.map_err(|e| e.to_string())?;
-                this.update(cx, |b, _| b.real.insert(dir, Folder::new(entries.clone())))
-                    .map_err(closed)?;
-                entries
-            };
-            if done {
-                return Ok(entries);
+                Resolution::Needs(dir) => {
+                    Self::list(this, dir, cx).await?;
+                }
+                Resolution::Real(path) => return Ok(path),
             }
         }
+    }
+
+    /// List the folder at real path `dir`, and keep its listing.
+    #[expect(
+        clippy::future_not_send,
+        reason = "GPUI AsyncApp stays on the foreground executor"
+    )]
+    async fn list(
+        this: &WeakEntity<Self>,
+        dir: String,
+        cx: &mut AsyncApp,
+    ) -> Result<Vec<FileEntry>, String> {
+        let request = this
+            .read_with(cx, |b, _| b.engine.list_files(&b.mount, &dir))
+            .map_err(closed)?;
+        let entries = request.await.map_err(|e| e.to_string())?;
+        this.update(cx, |b, _| b.real.insert(dir, Folder::new(entries.clone())))
+            .map_err(closed)?;
+        Ok(entries)
+    }
+
+    /// The kind and size of the entry at real path `path`, if listed.
+    fn real_entry(&self, path: &str) -> Option<(FileKind, Option<u64>)> {
+        if path == ROOT {
+            return Some((FileKind::Directory, None));
+        }
+        let (parent, name) = path.rsplit_once('/')?;
+        let parent = if parent.is_empty() { ROOT } else { parent };
+        let entry = self.real.get(parent)?.get(name)?;
+        Some((entry.kind, entry.size))
     }
 
     /// Record the target of the symlink at real path `link`.
@@ -346,6 +440,164 @@ impl FileBrowser {
             self.load(path, cx);
         }
         cx.notify();
+    }
+
+    /// Copy the entry at tree path `path` out, for `purpose`.
+    fn transfer(&mut self, path: &str, purpose: Purpose, cx: &mut Context<Self>) {
+        let id = self.next_transfer;
+        // IDs only tell apart the transfers shown at once.
+        self.next_transfer = id.wrapping_add(1);
+        let copied = Arc::new(AtomicU64::new(0));
+        let task = cx.spawn({
+            let (path, copied) = (path.to_owned(), copied.clone());
+            async move |this, cx| {
+                let result = Self::copy_out(&this, id, &path, purpose, copied, cx).await;
+                this.update(cx, |this, cx| this.finish(id, result, cx)).ok();
+            }
+        });
+        let name = path.rsplit('/').next().unwrap_or(path);
+        self.transfers.push(Transfer {
+            id,
+            purpose,
+            name: display_name(name).into(),
+            copied,
+            total: None,
+            state: TransferState::Running(task),
+        });
+        self.tick(cx);
+        cx.notify();
+    }
+
+    /// Where the entry at `path` was copied, or `None` if the user didn't
+    /// choose where to save it.
+    #[expect(
+        clippy::future_not_send,
+        reason = "GPUI AsyncApp stays on the foreground executor"
+    )]
+    async fn copy_out(
+        this: &WeakEntity<Self>,
+        id: usize,
+        path: &str,
+        purpose: Purpose,
+        copied: Arc<AtomicU64>,
+        cx: &mut AsyncApp,
+    ) -> Result<Option<PathBuf>, String> {
+        let real = Self::resolve(this, path, true, cx).await?;
+        let found = this
+            .read_with(cx, |b, _| b.real_entry(&real))
+            .map_err(closed)?;
+        let (kind, size) = found.ok_or_else(|| format!("{} doesn't exist", display_name(path)))?;
+        let name = local_name(path.rsplit('/').next().unwrap_or(path));
+        let dest = match (purpose, kind) {
+            (_, FileKind::Symlink | FileKind::Other) => {
+                return Err("Only files and folders can be copied out.".into());
+            }
+            (Purpose::Open, FileKind::Directory) => {
+                return Err("A folder can't be opened. Download it instead.".into());
+            }
+            // A folder of its own, so the copy keeps its name.
+            (Purpose::Open, FileKind::File) => tempfile::Builder::new()
+                .prefix("berth-")
+                .tempdir()
+                .map_err(|e| format!("Couldn't make a temporary folder: {e}"))?
+                .keep()
+                .join(name),
+            (Purpose::Download, _) => {
+                let folder = dirs::download_dir()
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_default();
+                let chosen = cx.update(|cx| cx.prompt_for_new_path(&folder, Some(&name)));
+                match chosen.await {
+                    Ok(Ok(Some(dest))) => dest,
+                    Ok(Ok(None)) | Err(_) => return Ok(None),
+                    Ok(Err(error)) => return Err(error.to_string()),
+                }
+            }
+        };
+        let request = this
+            .update(cx, |b, _| {
+                if let Some(transfer) = b.transfers.iter_mut().find(|t| t.id == id) {
+                    transfer.total = size.filter(|_| kind == FileKind::File);
+                }
+                b.engine.copy_out(&b.mount, &real, &dest, copied)
+            })
+            .map_err(closed)?;
+        if let Err(error) = request.await {
+            if purpose == Purpose::Open
+                && let Some(folder) = dest.parent()
+            {
+                let _ = std::fs::remove_dir(folder);
+            }
+            return Err(error.to_string());
+        }
+        Ok(Some(dest))
+    }
+
+    fn finish(
+        &mut self,
+        id: usize,
+        result: Result<Option<PathBuf>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.transfers.iter().position(|t| t.id == id) else {
+            return;
+        };
+        match result {
+            Ok(None) => drop(self.transfers.remove(ix)),
+            Ok(Some(dest)) => {
+                let transfer = self.transfers.remove(ix);
+                match transfer.purpose {
+                    Purpose::Open => {
+                        let open = self.open_with.clone();
+                        open(&dest, cx);
+                    }
+                    Purpose::Download => self.transfers.insert(
+                        ix,
+                        Transfer {
+                            state: TransferState::Saved(dest),
+                            ..transfer
+                        },
+                    ),
+                }
+            }
+            Err(error) => {
+                if let Some(transfer) = self.transfers.get_mut(ix) {
+                    transfer.state = TransferState::Failed(error);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a transfer, cancelling it if it still runs.
+    fn dismiss(&mut self, id: usize, cx: &mut Context<Self>) {
+        self.transfers.retain(|t| t.id != id);
+        cx.notify();
+    }
+
+    /// Redraw every [`PROGRESS_INTERVAL`] while copies run.
+    fn tick(&mut self, cx: &Context<Self>) {
+        if self.ticking {
+            return;
+        }
+        self.ticking = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PROGRESS_INTERVAL).await;
+                let running = this.update(cx, |b, cx| {
+                    cx.notify();
+                    b.ticking = b
+                        .transfers
+                        .iter()
+                        .any(|t| matches!(t.state, TransferState::Running(_)));
+                    b.ticking
+                });
+                if !running.unwrap_or(false) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn rebuild(&mut self) {
@@ -455,6 +707,16 @@ impl FileBrowser {
             .as_ref()
             .map_or_else(|| ROOT.into(), |p| display_name(p));
         let busy = !self.loads.is_empty();
+        let selected = self.selected.as_ref().and_then(|key| {
+            self.rows.iter().find_map(|row| match row {
+                FileTreeRow::Entry(entry) if entry.key == *key => Some(entry),
+                _ => None,
+            })
+        });
+        let open = selected
+            .filter(|entry| entry.disclosure.is_none())
+            .map(|entry| entry.key.clone());
+        let download = selected.map(|entry| entry.key.clone());
         div()
             .h(px(36.0))
             .flex_none()
@@ -472,11 +734,150 @@ impl FileBrowser {
                     .child(path),
             )
             .when(busy, |d| d.child(Spinner::new("files-busy").size(12.0)))
+            .children(open.map(|key| {
+                Button::new("files-open-file", "Open")
+                    .icon(icons::FILE)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.transfer(&key, Purpose::Open, cx);
+                    }))
+            }))
+            .children(download.map(|key| {
+                Button::new("files-download", "Download")
+                    .icon(icons::DOWNLOAD)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.transfer(&key, Purpose::Download, cx);
+                    }))
+            }))
             .child(
                 IconButton::new("files-reload", icons::RESTART)
                     .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
             )
     }
+}
+
+/// A copy's progress, outcome or failure.
+fn render_transfer(transfer: &Transfer, cx: &Context<FileBrowser>) -> AnyElement {
+    let theme = Theme::of(cx);
+    let id = transfer.id;
+    let name = &transfer.name;
+    let (lead, title, detail, error) = match (&transfer.state, transfer.purpose) {
+        (TransferState::Running(_), purpose) => {
+            let copied = format::bytes(transfer.copied.load(Ordering::Relaxed));
+            let progress = match transfer.total {
+                Some(total) => format!("{copied} of {}", format::bytes(total)),
+                None => copied,
+            };
+            let verb = match purpose {
+                Purpose::Open => "Opening",
+                Purpose::Download => "Downloading",
+            };
+            (
+                Spinner::new(("transfer-spinner", id))
+                    .size(12.0)
+                    .into_any_element(),
+                format!("{verb} {name}…"),
+                progress,
+                false,
+            )
+        }
+        (TransferState::Saved(dest), _) => (
+            icon(icons::CHECK)
+                .size(px(14.0))
+                .text_color(theme.success)
+                .into_any_element(),
+            format!("Downloaded {name}"),
+            dest.display().to_string(),
+            false,
+        ),
+        (TransferState::Failed(why), purpose) => (
+            icon(icons::DANGER)
+                .size(px(14.0))
+                .text_color(theme.danger)
+                .into_any_element(),
+            match purpose {
+                Purpose::Open => format!("Couldn't open {name}"),
+                Purpose::Download => format!("Couldn't download {name}"),
+            },
+            why.clone(),
+            true,
+        ),
+    };
+    let reveal = match &transfer.state {
+        TransferState::Saved(dest) => Some(dest.clone()),
+        _ => None,
+    };
+    div()
+        .h(px(32.0))
+        .flex()
+        .items_center()
+        .gap(px(Theme::SPACE_SM))
+        .px(px(Theme::SPACE_SM))
+        .rounded(px(Theme::CONTROL_RADIUS))
+        .bg(theme.surface_raised)
+        .text_size(px(Theme::TEXT_SM))
+        .child(
+            div()
+                .w(px(14.0))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(lead),
+        )
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(320.0))
+                .truncate()
+                .text_color(theme.text)
+                .child(title),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(if error {
+                    theme.danger
+                } else {
+                    theme.text_muted
+                })
+                .child(detail),
+        )
+        .children(reveal.map(|dest| {
+            Button::new(("transfer-reveal", id), "Show")
+                .on_click(move |_, _, cx| cx.reveal_path(&dest))
+        }))
+        .child(
+            IconButton::new(("transfer-dismiss", id), icons::CLOSE)
+                .size(22.0, 13.0)
+                .on_click(cx.listener(move |this, _, _, cx| this.dismiss(id, cx))),
+        )
+        .into_any_element()
+}
+
+/// A name for the local copy of the entry named `name` (escaped): as it
+/// shows, with what Windows doesn't allow in names replaced.
+fn local_name(name: &str) -> String {
+    let shown = display_name(name);
+    if cfg!(windows) {
+        shown
+            .chars()
+            .map(|c| {
+                if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect()
+    } else {
+        shown
+    }
+}
+
+/// The error of an update to a browser that has gone.
+fn closed<E>(_: E) -> String {
+    "Closed".to_owned()
 }
 
 impl Render for FileBrowser {
@@ -506,6 +907,7 @@ impl Render for FileBrowser {
             Some(Listing::Loaded(_)) => {
                 let tree = cx.entity().downgrade();
                 let toggle = tree.clone();
+                let open = tree.clone();
                 FileTree::new("file-tree", self.rows.clone(), &self.focus, &self.scroll)
                     .selected(self.selected.clone())
                     .on_select(move |key, _, cx| {
@@ -518,6 +920,10 @@ impl Render for FileBrowser {
                     .on_toggle(move |key, _, cx| {
                         toggle.update(cx, |this, cx| this.toggle(key, cx)).ok();
                     })
+                    .on_open(move |key, _, cx| {
+                        open.update(cx, |this, cx| this.transfer(key, Purpose::Open, cx))
+                            .ok();
+                    })
                     .into_any_element()
             }
         };
@@ -529,6 +935,17 @@ impl Render for FileBrowser {
             .pb(px(Theme::SPACE_SM))
             .child(self.render_toolbar(cx))
             .child(div().flex_1().min_h_0().child(body))
+            .when(!self.transfers.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .gap(px(Theme::SPACE_XS))
+                        .pt(px(Theme::SPACE_SM))
+                        .children(self.transfers.iter().map(|t| render_transfer(t, cx))),
+                )
+            })
     }
 }
 
@@ -692,6 +1109,98 @@ mod tests {
     }
 
     #[gpui::test]
+    fn files_open_from_a_temporary_copy(cx: &mut TestAppContext) {
+        let engine: Arc<dyn Engine> = Arc::new(FixtureEngine::default());
+        let target = FilesTarget::Container(running_id());
+        let browser = browser(cx, &engine, &target, Vec::new());
+        let opened = Rc::new(std::cell::RefCell::new(Vec::new()));
+        browser.update(cx, |b, cx| {
+            let opened = opened.clone();
+            b.open_with = Rc::new(move |path, _| opened.borrow_mut().push(path.to_owned()));
+            b.transfer("/etc/hosts", Purpose::Open, cx);
+            // Links are followed in the browsed tree: `/bin → usr/bin`,
+            // `arch → /usr/bin/busybox`.
+            b.transfer("/bin/arch", Purpose::Open, cx);
+            // `localtime` leads nowhere.
+            b.transfer("/etc/localtime", Purpose::Open, cx);
+            assert_eq!(b.transfers.len(), 3);
+        });
+        cx.run_until_parked();
+        let mut opened = opened.take();
+        opened.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        let read = |path: &PathBuf| {
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            (name, std::fs::read_to_string(path).unwrap())
+        };
+        assert_eq!(
+            opened.iter().map(read).collect::<Vec<_>>(),
+            [
+                ("arch".to_owned(), "/usr/bin/busybox\n".to_owned()),
+                ("hosts".to_owned(), "/etc/hosts\n".to_owned())
+            ]
+        );
+        for path in &opened {
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+        // Opened copies go; a failure stays until dismissed.
+        browser.update(cx, |b, cx| {
+            let failed = b.transfers.first().unwrap();
+            assert!(
+                matches!(&failed.state, TransferState::Failed(why) if why.contains("doesn't exist"))
+            );
+            b.dismiss(failed.id, cx);
+            assert!(b.transfers.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn files_and_folders_download_where_saved(cx: &mut TestAppContext) {
+        let engine: Arc<dyn Engine> = Arc::new(FixtureEngine::default());
+        let volume = block_on(engine.list_volumes()).unwrap().remove(0).name;
+        let browser = browser(cx, &engine, &FilesTarget::Volume(volume), Vec::new());
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("saved");
+        browser.update(cx, |b, cx| b.transfer("/base", Purpose::Download, cx));
+        cx.run_until_parked();
+        assert!(cx.did_prompt_for_new_path());
+        cx.simulate_new_path_selection(|_| Some(dest.clone()));
+        cx.run_until_parked();
+        assert!(dest.join("1").is_dir());
+        browser.read_with(cx, |b, _| {
+            assert!(matches!(
+                &b.transfers.first().unwrap().state,
+                TransferState::Saved(saved) if *saved == dest
+            ));
+        });
+        // A file replaces what was saved there; not choosing a place drops
+        // the download.
+        browser.update(cx, |b, cx| {
+            b.transfers.clear();
+            b.transfer("/PG_VERSION", Purpose::Download, cx);
+            b.transfer("/postgresql.conf", Purpose::Download, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_new_path_selection(|_| Some(dest.clone()));
+        cx.run_until_parked();
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "/PG_VERSION\n");
+        browser.read_with(cx, |b, _| assert_eq!(b.transfers.len(), 1));
+        // Links out of a volume can't be copied.
+        browser.update(cx, |b, cx| {
+            b.transfers.clear();
+            b.transfer("/escape", Purpose::Download, cx);
+        });
+        cx.run_until_parked();
+        browser.read_with(cx, |b, _| {
+            assert!(matches!(
+                &b.transfers.first().unwrap().state,
+                TransferState::Failed(why) if why.contains("outside")
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn the_tab_asks_once_and_the_helper_lives_with_it(cx: &mut TestAppContext) {
         let fixture = Arc::new(FixtureEngine::default());
         let engine: Arc<dyn Engine> = fixture.clone();
@@ -748,5 +1257,31 @@ mod tests {
         let first = kind(cx, "file-tree-kind-0");
         assert_eq!(kind(cx, "file-tree-kind-8"), first);
         assert_eq!(kind(cx, "file-tree-kind-12"), first);
+        // Copies draw below the tree: one waiting to be saved, one failed.
+        browser.update(cx, |b, cx| {
+            b.selected = Some("/etc/hosts".into());
+            b.transfer("/etc/hosts", Purpose::Download, cx);
+            b.transfer("/etc/localtime", Purpose::Open, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        browser.read_with(cx, |b, _| {
+            assert!(matches!(
+                b.transfers.as_slice(),
+                [
+                    Transfer {
+                        state: TransferState::Running(_),
+                        ..
+                    },
+                    Transfer {
+                        state: TransferState::Failed(_),
+                        ..
+                    }
+                ]
+            ));
+        });
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
     }
 }

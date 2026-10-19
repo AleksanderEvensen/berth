@@ -1,5 +1,7 @@
 //! Realistic fixture data for UI prototyping and tests.
 
+use std::path::Path;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
@@ -1125,6 +1127,16 @@ impl Engine for FixtureEngine {
 
     fn read_link(&self, mount: &FileMount, path: &str) -> BoxFuture<'static, EngineResult<String>> {
         self.fixture_read_link(mount, path)
+    }
+
+    fn copy_out(
+        &self,
+        mount: &FileMount,
+        path: &str,
+        dest: &Path,
+        copied: Arc<AtomicU64>,
+    ) -> BoxFuture<'static, EngineResult<()>> {
+        self.fixture_copy_out(mount, path, dest, copied)
     }
 }
 

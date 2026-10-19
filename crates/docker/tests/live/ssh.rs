@@ -1,8 +1,14 @@
-//! Read-only checks against a real engine over SSH. Nothing is created,
-//! changed or run in a container, so any host you can `ssh` into will do.
+//! Checks against a real engine over SSH. The first only reads: nothing is
+//! created, changed or run in a container, so any host you can `ssh` into
+//! will do. Copying files out starts a helper container next to a running
+//! one, as the Files tab does.
 //! Run: BERTH_TEST_SSH_HOST=ssh://my-host cargo test -p berth-docker --test live ssh -- --ignored
 
-use berth_docker::{BollardEngine, ContainerState, Endpoint, Engine, LogOptions, parse_host};
+use std::sync::Arc;
+
+use berth_docker::{
+    BollardEngine, ContainerState, Endpoint, Engine, FilesTarget, LogOptions, parse_host,
+};
 use futures::{StreamExt as _, executor::block_on};
 
 use super::TestResult;
@@ -42,6 +48,31 @@ fn ssh_engine_reads_like_a_local_one() -> TestResult<()> {
         }
         let sample = block_on(engine.stats(&running.id).next()).ok_or("no stats sample")?;
         sample?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires BERTH_TEST_SSH_HOST with a running container; starts a helper, may pull busybox"]
+fn ssh_engine_copies_files_out() -> TestResult<()> {
+    let host = std::env::var("BERTH_TEST_SSH_HOST")?;
+    let engine = BollardEngine::connect(&parse_host(&host)?)?;
+    let running = block_on(engine.list_containers())?
+        .into_iter()
+        .find(|c| c.state == ContainerState::Running && !c.is_helper())
+        .ok_or("no running container")?;
+    let mount = block_on(engine.open_files(&FilesTarget::Container(running.id)))?;
+    let dir = tempfile::tempdir()?;
+    // The engine writes every container's /etc/hostname.
+    let hostname = dir.path().join("hostname");
+    block_on(engine.copy_out(&mount, "/etc/hostname", &hostname, Arc::default()))?;
+    if std::fs::metadata(&hostname)?.len() == 0 {
+        return Err("/etc/hostname copied empty".into());
+    }
+    let etc = dir.path().join("etc");
+    block_on(engine.copy_out(&mount, "/etc", &etc, Arc::default()))?;
+    if !etc.join("hostname").is_file() {
+        return Err("/etc copied without its hostname".into());
     }
     Ok(())
 }
