@@ -273,7 +273,7 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
     let mut made = HashSet::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
-        let name = entry.path()?.into_owned();
+        let name = entry.path_bytes().into_owned();
         let rel = relative(path, &name)?;
         let kind = entry.header().entry_type();
         // The copied entry itself was a file or folder when resolved; a
@@ -303,14 +303,22 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
                 std::os::unix::fs::symlink(link, &target)?;
             }
             EntryType::Link => {
-                let source = entry.link_name()?.ok_or_else(|| unexpected(&name))?;
+                let source = entry.link_name_bytes().ok_or_else(|| unexpected(&name))?;
                 let source = to.join(relative(path, &source)?);
-                // Only to a file copied already: a link could lead anywhere.
-                if made.contains(&source)
-                    && fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_file())
-                {
-                    fs::hard_link(&source, &target)
-                        .or_else(|_| fs::copy(&source, &target).map(drop))?;
+                // Only to what was copied already, never followed: a file
+                // is linked, a symlink made again.
+                let copied = fs::symlink_metadata(&source)
+                    .ok()
+                    .filter(|_| made.contains(&source));
+                match copied {
+                    Some(meta) if meta.is_file() => fs::hard_link(&source, &target)
+                        .or_else(|_| fs::copy(&source, &target).map(drop))?,
+                    #[cfg(unix)]
+                    Some(meta) if meta.is_symlink() => {
+                        std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
+                    }
+                    // To what was left out.
+                    _ => {}
                 }
             }
             // Devices, pipes and sockets (and links, on Windows).
@@ -353,14 +361,17 @@ impl<R: Read> Read for Ended<R> {
     }
 }
 
-fn relative(path: &str, name: &Path) -> io::Result<PathBuf> {
+fn relative(path: &str, name: &[u8]) -> io::Result<PathBuf> {
     archive_path(path, name).ok_or_else(|| unexpected(name))
 }
 
-fn unexpected(name: &Path) -> io::Error {
+fn unexpected(name: &[u8]) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("unexpected archive entry {}", name.display()),
+        format!(
+            "{} can't be copied here: its name leads out of the copy or isn't allowed",
+            String::from_utf8_lossy(name)
+        ),
     )
 }
 
@@ -922,6 +933,8 @@ mod tests {
                 ("./d/a", EntryType::Regular, "hi"),
                 ("./d/b", EntryType::Link, "./d/a"),
                 ("./d/a", EntryType::Regular, "again"),
+                ("./d/s", EntryType::Symlink, "/etc/hostname"),
+                ("./d/t", EntryType::Link, "./d/s"),
             ],
             true,
         );
@@ -929,6 +942,11 @@ mod tests {
         let copy = dir.path().join("copy");
         assert_eq!(fs::read_to_string(copy.join("a")).unwrap(), "again");
         assert_eq!(fs::read_to_string(copy.join("b")).unwrap(), "hi");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(copy.join("t")).unwrap(),
+            Path::new("/etc/hostname")
+        );
         // Cut short at an entry's end, it isn't complete.
         let (_dir, result) = unpacked(
             &[

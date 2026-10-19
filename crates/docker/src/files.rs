@@ -22,7 +22,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Write as _};
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// Label marking Berth's own helper containers, which the UI hides.
 pub const HELPER_LABEL: &str = "no.ahse.berth.helper";
@@ -683,21 +683,43 @@ fn is_root(path: &str) -> bool {
 }
 
 /// Where an entry of [`FileMount::copy_command`]'s archive of real path
-/// `path` goes, relative to the copy's destination: the copied entry is
-/// the destination itself. `None` for a name that would lead out of it.
+/// `path` goes, relative to the copy's destination.
+///
+/// The copied entry is the destination itself. `entry` is the archived
+/// name's bytes, split at `/` only, as in the container. `None` for a name
+/// that would lead out of the destination, or that this system can't hold
+/// as one name (on Windows, one with `\`, `:` and the like).
 #[must_use]
-pub fn archive_path(path: &str, entry: &Path) -> Option<PathBuf> {
-    let mut parts = entry.components().filter(|c| *c != Component::CurDir);
-    // All but the root's entries start with the copied entry's name.
-    if !is_root(path) && !matches!(parts.next(), Some(Component::Normal(_))) {
+pub fn archive_path(path: &str, entry: &[u8]) -> Option<PathBuf> {
+    if entry.starts_with(b"/") {
         return None;
     }
-    parts
-        .map(|part| match part {
-            Component::Normal(name) => Some(name),
-            _ => None,
-        })
-        .collect()
+    let mut parts = entry
+        .split(|&b| b == b'/')
+        .filter(|part| !part.is_empty() && *part != b".");
+    // All but the root's entries start with the copied entry's name.
+    if !is_root(path) && parts.next().is_none_or(|name| name == b"..") {
+        return None;
+    }
+    parts.map(local_name).collect()
+}
+
+/// One name of an archived path, as a name here.
+#[cfg(unix)]
+fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
+    use std::os::unix::ffi::OsStrExt as _;
+    (part != b"..").then(|| std::ffi::OsStr::from_bytes(part))
+}
+
+/// One name of an archived path, as a name here.
+#[cfg(not(unix))]
+fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
+    let name = std::str::from_utf8(part).ok()?;
+    let allowed = name != ".."
+        && !name
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c));
+    allowed.then(|| std::ffi::OsStr::new(name))
 }
 
 /// A copy being written in a folder of its own next to its destination.
@@ -1104,7 +1126,7 @@ mod tests {
 
     #[test]
     fn archive_entries_stay_in_the_destination() {
-        let at = |path, entry: &str| archive_path(path, Path::new(entry));
+        let at = |path, entry: &str| archive_path(path, entry.as_bytes());
         assert_eq!(at("/etc", "./etc/"), Some(PathBuf::new()));
         assert_eq!(
             at("/etc", "./etc/nginx/x.conf"),
@@ -1116,6 +1138,11 @@ mod tests {
         assert_eq!(at("/etc", "./etc/../../x"), None);
         assert_eq!(at("/etc", "/etc/passwd"), None);
         assert_eq!(at("/etc", "../x"), None);
+        // Only `/` separates names, as in the container.
+        #[cfg(unix)]
+        assert_eq!(at("/etc", "./etc/a\\b").unwrap().iter().count(), 1);
+        #[cfg(windows)]
+        assert_eq!(at("/etc", "./etc/a\\b"), None);
     }
 
     #[test]
