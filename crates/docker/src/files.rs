@@ -714,8 +714,19 @@ fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
 /// One name of an archived path, as a name here.
 #[cfg(not(unix))]
 fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
+    const RESERVED: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
     let name = std::str::from_utf8(part).ok()?;
+    let stem = name.split('.').next().unwrap_or(name);
+    // Windows drops a trailing dot or space, and takes device names for
+    // devices, whatever their extension.
     let allowed = name != ".."
+        && !name.ends_with(['.', ' '])
+        && !RESERVED
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(stem.trim_end()))
         && !name
             .chars()
             .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c));

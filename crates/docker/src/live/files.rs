@@ -196,12 +196,21 @@ impl BollardEngine {
             };
             // Only an exit status says the archive is complete; a failed
             // `tar` explains a broken archive best.
-            if exit_code(&docker, &exec).await? != 0 {
-                return Err(EngineError::NotFound(tar_error(&stderr)));
+            let failed = exit_code(&docker, &exec).await? != 0;
+            // Moving into place and removing what was there can take a
+            // while, which isn't the engine's workers' to spend.
+            let mut finished = tokio::task::spawn_blocking(move || {
+                if failed {
+                    drop(unpacked);
+                    return Ok(false);
+                }
+                unpacked.and_then(Staging::finish).map(|()| true)
+            });
+            match joined(&mut finished).await? {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(EngineError::NotFound(tar_error(&stderr))),
+                Err(error) => Err(EngineError::writing(&error)),
             }
-            unpacked
-                .and_then(Staging::finish)
-                .map_err(|e| EngineError::writing(&e))
         })
     }
 }
@@ -271,6 +280,9 @@ impl Read for Chunks {
 fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::Result<()> {
     let mut archive = tar::Archive::new(Ended::from(archive));
     let mut made = HashSet::new();
+    // Folder permissions, set once their entries are written.
+    #[cfg(unix)]
+    let mut folders = Vec::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path_bytes().into_owned();
@@ -294,6 +306,10 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
             EntryType::Directory => {
                 if !target.is_dir() {
                     fs::create_dir(&target)?;
+                }
+                #[cfg(unix)]
+                if let Ok(mode) = entry.header().mode() {
+                    folders.push((target.clone(), mode));
                 }
                 true
             }
@@ -346,6 +362,12 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
             io::ErrorKind::UnexpectedEof,
             "the copy ended early",
         ));
+    }
+    // Deepest first, kept open to the user, as files are.
+    #[cfg(unix)]
+    for (folder, mode) in folders.into_iter().rev() {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(folder, fs::Permissions::from_mode((mode & 0o777) | 0o700))?;
     }
     Ok(())
 }
@@ -909,7 +931,11 @@ mod tests {
         for &(name, kind, data) in entries {
             let mut header = tar::Header::new_ustar();
             header.set_entry_type(kind);
-            header.set_mode(0o644);
+            header.set_mode(if kind == EntryType::Directory {
+                0o700
+            } else {
+                0o644
+            });
             let body = match kind {
                 EntryType::Regular => data.as_bytes(),
                 EntryType::Symlink | EntryType::Link => {
@@ -964,6 +990,13 @@ mod tests {
         );
         // What was left out isn't linked to either.
         assert!(fs::symlink_metadata(copy.join("q")).is_err());
+        // Folders keep their permissions, as files do.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&copy).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
         // Cut short at an entry's end, it isn't complete.
         let (_dir, result) = unpacked(
             &[
