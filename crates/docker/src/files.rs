@@ -20,7 +20,6 @@
 //! destination on this machine.
 
 use std::collections::{HashMap, VecDeque};
-use std::ffi::OsString;
 use std::fmt::{self, Write as _};
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -561,13 +560,55 @@ impl FileMount {
     /// # Errors
     /// As [`FileMount::helper_path`].
     pub fn list_command(&self, path: &str) -> Result<Vec<String>, String> {
+        Ok(list_command(
+            &self.helper_path(path)?,
+            &self.on_the_way(path)?,
+        ))
+    }
+
+    /// The helper paths of the folders leading to real path `path`, and of
+    /// `path`.
+    fn on_the_way(&self, path: &str) -> Result<Vec<String>, String> {
         let mut checked = Vec::new();
         let mut prefix = String::new();
         for part in path.split('/').filter(|p| !p.is_empty()) {
             prefix = join_path(&prefix, part);
             checked.push(self.helper_path(&prefix)?);
         }
-        Ok(list_command(&self.helper_path(path)?, &checked))
+        Ok(checked)
+    }
+
+    /// The command telling the types of the folders leading to real path
+    /// `path` (`/A<raw mode hex>` each, as [`list_command`]'s checks, for
+    /// [`parse_listing`]), so a copy doesn't follow one replaced by a link
+    /// since it was resolved. `None` when no folder leads to it.
+    ///
+    /// # Errors
+    /// As [`FileMount::helper_path`].
+    pub fn check_command(&self, path: &str) -> Result<Option<Vec<String>>, String> {
+        let mut checked = self.on_the_way(path)?;
+        checked.pop();
+        if checked.is_empty() {
+            return Ok(None);
+        }
+        let mut command: Vec<String> = ["timeout", &LIST_TIMEOUT_SECS.to_string(), "find"]
+            .map(str::to_owned)
+            .to_vec();
+        command.extend(checked);
+        command.extend(
+            [
+                "-maxdepth",
+                "0",
+                "-exec",
+                "stat",
+                "-c",
+                CHECK_FORMAT,
+                "{}",
+                "+",
+            ]
+            .map(str::to_owned),
+        );
+        Ok(Some(command))
     }
 
     /// The command reading the targets of the symlinks in the folder at
@@ -659,69 +700,60 @@ pub fn archive_path(path: &str, entry: &Path) -> Option<PathBuf> {
         .collect()
 }
 
-/// A copy being written next to its destination, so that it replaces
-/// whatever is there only once complete, with a rename. Dropped
-/// unfinished (failed or cancelled), it removes what was written.
+/// A copy being written in a folder of its own next to its destination.
+///
+/// It replaces whatever is there only once complete, with a rename.
+/// Dropped (failed, cancelled, or finished), the folder goes with what is
+/// left in it.
 #[derive(Debug)]
 pub struct Staging {
-    path: PathBuf,
+    dir: tempfile::TempDir,
     dest: PathBuf,
-    finished: bool,
 }
 
 impl Staging {
     /// # Errors
-    /// `dest` has no file name, or a leftover copy can't be removed.
+    /// The staging folder can't be made next to `dest`.
     pub fn new(dest: &Path) -> io::Result<Self> {
-        let name = dest.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "The destination has no name")
-        })?;
-        let mut staged = OsString::from(".");
-        staged.push(name);
-        staged.push(".berth-partial");
-        let path = dest.with_file_name(staged);
-        remove(&path)?;
+        let parent = match dest.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
         Ok(Self {
-            path,
+            dir: tempfile::Builder::new()
+                .prefix(".berth-")
+                .tempdir_in(parent)?,
             dest: dest.to_owned(),
-            finished: false,
         })
     }
 
     /// Where the copy is written.
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.dir.path().join("copy")
     }
 
-    /// Move the copy to its destination, replacing what is there.
+    /// Move the copy to its destination. What was there is moved aside
+    /// first, and back if the copy can't take its place.
     ///
     /// # Errors
-    /// Nothing was written, or the move failed.
-    pub fn finish(mut self) -> io::Result<()> {
-        std::fs::symlink_metadata(&self.path)?;
-        remove(&self.dest)?;
-        std::fs::rename(&self.path, &self.dest)?;
-        self.finished = true;
-        Ok(())
-    }
-}
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        if !self.finished {
-            let _ = remove(&self.path);
+    /// Nothing was written, or a move failed.
+    pub fn finish(self) -> io::Result<()> {
+        let copy = self.path();
+        std::fs::symlink_metadata(&copy)?;
+        let old = self.dir.path().join("old");
+        let replaced = match std::fs::rename(&self.dest, &old) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = std::fs::rename(&copy, &self.dest) {
+            if replaced {
+                let _ = std::fs::rename(&old, &self.dest);
+            }
+            return Err(error);
         }
-    }
-}
-
-/// Remove the file, link or folder at `path`, if any.
-fn remove(path: &Path) -> io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
-        Ok(_) => std::fs::remove_file(path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+        Ok(())
     }
 }
 
@@ -1058,6 +1090,16 @@ mod tests {
         );
         assert!(mount.copy_command("/a\\\\200").is_ok());
         assert!(mount.copy_command("/a\\200").is_err());
+        assert_eq!(mount.check_command("/x").unwrap(), None);
+        assert_eq!(
+            mount
+                .check_command("/a/b/c")
+                .unwrap()
+                .unwrap()
+                .get(2..5)
+                .unwrap(),
+            ["find", "/proc/1/root/a", "/proc/1/root/a/b"]
+        );
     }
 
     #[test]
@@ -1081,8 +1123,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out");
         std::fs::create_dir_all(dest.join("old")).unwrap();
+        // Copies to the same place don't meet.
         let staging = Staging::new(&dest).unwrap();
+        let other = Staging::new(&dest).unwrap();
         std::fs::write(staging.path(), "new").unwrap();
+        std::fs::write(other.path(), "other").unwrap();
+        drop(other);
         staging.finish().unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
         // Unfinished, a copy leaves nothing behind and the destination as it

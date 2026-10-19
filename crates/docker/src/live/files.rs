@@ -2,7 +2,7 @@
 //! starting it, keeping it alive, removing it, running its commands, and
 //! unpacking what it copies out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -141,16 +141,26 @@ impl BollardEngine {
         let docker = self.docker.clone();
         let helper = mount.container.clone();
         let command = mount.copy_command(path).map_err(EngineError::Unsupported);
+        let check = mount.check_command(path).map_err(EngineError::Unsupported);
         let (path, dest) = (path.to_owned(), dest.to_owned());
         self.spawn(async move {
             let command = command?;
+            if let Some(check) = check? {
+                match run(&docker, &helper, check, RUN_DEADLINE).await? {
+                    (0, output, _) => {
+                        parse_listing("/", &output).map_err(EngineError::Unsupported)?;
+                    }
+                    (124 | 143, _, _) => return Err(timed_out()),
+                    (_, _, stderr) => return Err(EngineError::NotFound(command_error(&stderr))),
+                }
+            }
             let staging = Staging::new(&dest).map_err(|e| EngineError::writing(&e))?;
             // Unpacked as it arrives, on a thread of its own. The staging
             // goes with it, so a cancelled copy is removed only once that
             // thread is done writing it.
             let (sender, chunks) = tokio::sync::mpsc::channel(COPY_CHUNKS);
             let mut unpacking = tokio::task::spawn_blocking(move || {
-                unpack(Chunks::new(chunks), staging.path(), &path, &copied).map(|()| staging)
+                unpack(Chunks::new(chunks), &staging.path(), &path, &copied).map(|()| staging)
             });
             let (exec, mut output) = start(&docker, &helper, command).await?;
             let mut stderr = Vec::new();
@@ -259,12 +269,28 @@ impl Read for Chunks {
 /// Unpack [`FileMount::copy_command`]'s archive of real path `path` into
 /// `to`, adding the bytes of file data written to `copied`.
 fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::Result<()> {
-    let mut archive = tar::Archive::new(archive);
+    let mut archive = tar::Archive::new(Ended::from(archive));
+    let mut made = HashSet::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.into_owned();
-        let target = place(to, &relative(path, &name)?, true)?;
-        match entry.header().entry_type() {
+        let rel = relative(path, &name)?;
+        let kind = entry.header().entry_type();
+        // The copied entry itself was a file or folder when resolved; a
+        // link now would be followed where the copy is opened.
+        if rel.as_os_str().is_empty()
+            && !matches!(
+                kind,
+                EntryType::Regular | EntryType::Continuous | EntryType::Directory
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "This changed since it was listed. Reload to see it.",
+            ));
+        }
+        let target = place(to, &rel, &mut made)?;
+        match kind {
             EntryType::Directory => {
                 if !target.is_dir() {
                     fs::create_dir(&target)?;
@@ -278,9 +304,11 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
             }
             EntryType::Link => {
                 let source = entry.link_name()?.ok_or_else(|| unexpected(&name))?;
-                let source = place(to, &relative(path, &source)?, false)?;
+                let source = to.join(relative(path, &source)?);
                 // Only to a file copied already: a link could lead anywhere.
-                if fs::symlink_metadata(&source)?.is_file() {
+                if made.contains(&source)
+                    && fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_file())
+                {
                     fs::hard_link(&source, &target)
                         .or_else(|_| fs::copy(&source, &target).map(drop))?;
                 }
@@ -289,7 +317,40 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
             _ => {}
         }
     }
+    // Input ending before the end-of-archive blocks is a copy cut short,
+    // which the archive reader takes for its end.
+    if archive.into_inner().ended {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the copy ended early",
+        ));
+    }
     Ok(())
+}
+
+/// A reader telling whether it was read to its end.
+struct Ended<R> {
+    inner: R,
+    ended: bool,
+}
+
+impl<R> From<R> for Ended<R> {
+    fn from(inner: R) -> Self {
+        Self {
+            inner,
+            ended: false,
+        }
+    }
+}
+
+impl<R: Read> Read for Ended<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read == 0 && !buf.is_empty() {
+            self.ended = true;
+        }
+        Ok(read)
+    }
 }
 
 fn relative(path: &str, name: &Path) -> io::Result<PathBuf> {
@@ -303,42 +364,57 @@ fn unexpected(name: &Path) -> io::Error {
     )
 }
 
-/// `to` joined with `rel`, checking that no folder on the way is a link,
-/// which could lead out of `to`. With `create`, the folders on the way are
-/// created as needed, and whatever is at the end removed unless a folder.
-fn place(to: &Path, rel: &Path, create: bool) -> io::Result<PathBuf> {
+/// `to` joined with `rel`, the folders on the way created as needed.
+///
+/// Everything under `to` is made here, and recorded in `made`, so finding
+/// anything else on the way (a link, which could lead out of `to`) or at
+/// the end is a clash: two names the file system doesn't tell apart, e.g.
+/// by case. What an earlier entry of the same name made is replaced,
+/// unless a folder.
+fn place(to: &Path, rel: &Path, made: &mut HashSet<PathBuf>) -> io::Result<PathBuf> {
     let mut parts = rel.iter();
     let last = parts.next_back();
     let mut at = to.to_owned();
     if last.is_some() {
-        folder(&at, create)?;
+        folder(to, &at, made)?;
     }
     for part in parts {
         at.push(part);
-        folder(&at, create)?;
+        folder(to, &at, made)?;
     }
     if let Some(last) = last {
         at.push(last);
     }
-    if create
-        && let Ok(meta) = fs::symlink_metadata(&at)
-        && !meta.is_dir()
-    {
-        fs::remove_file(&at)?;
+    match fs::symlink_metadata(&at) {
+        Ok(_) if !made.contains(&at) => return Err(clash(to, &at)),
+        Ok(meta) if !meta.is_dir() => fs::remove_file(&at)?,
+        _ => {}
     }
+    made.insert(at.clone());
     Ok(at)
 }
 
-fn folder(at: &Path, create: bool) -> io::Result<()> {
+fn folder(to: &Path, at: &Path, made: &mut HashSet<PathBuf>) -> io::Result<()> {
     match fs::symlink_metadata(at) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{} isn't a folder", at.display()),
-        )),
-        Err(error) if create && error.kind() == io::ErrorKind::NotFound => fs::create_dir(at),
+        Ok(meta) if meta.is_dir() && made.contains(at) => Ok(()),
+        Ok(_) => Err(clash(to, at)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(at)?;
+            made.insert(at.to_owned());
+            Ok(())
+        }
         Err(error) => Err(error),
     }
+}
+
+fn clash(to: &Path, at: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "{} clashes with another name in the copy, e.g. one differing only in case",
+            at.strip_prefix(to).unwrap_or(at).display()
+        ),
+    )
 }
 
 /// Write a file entry to `target`, with its modification time and (on
@@ -800,6 +876,85 @@ mod tests {
         assert!(matches!(result, Err(EngineError::Unsupported(m)) if m.contains("longer than")));
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(listener);
+    }
+
+    /// An archive of `entries` (name, type, data or link target), cut
+    /// before its end-of-archive blocks unless `end`.
+    fn archive(entries: &[(&str, EntryType, &str)], end: bool) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for &(name, kind, data) in entries {
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(kind);
+            header.set_mode(0o644);
+            let body = match kind {
+                EntryType::Regular => data.as_bytes(),
+                EntryType::Symlink | EntryType::Link => {
+                    header.set_link_name(data).unwrap();
+                    b""
+                }
+                _ => b"",
+            };
+            header.set_size(u64::try_from(body.len()).unwrap());
+            builder.append_data(&mut header, name, body).unwrap();
+        }
+        let mut bytes = builder.into_inner().unwrap();
+        if !end {
+            bytes.truncate(bytes.len().saturating_sub(1024));
+        }
+        bytes
+    }
+
+    fn unpacked(
+        entries: &[(&str, EntryType, &str)],
+        end: bool,
+    ) -> (tempfile::TempDir, io::Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join("copy");
+        let result = unpack(&archive(entries, end)[..], &to, "/d", &AtomicU64::new(0));
+        (dir, result)
+    }
+
+    #[test]
+    fn folders_unpack_inside_their_copy() {
+        let (dir, result) = unpacked(
+            &[
+                ("./d/", EntryType::Directory, ""),
+                ("./d/a", EntryType::Regular, "hi"),
+                ("./d/b", EntryType::Link, "./d/a"),
+                ("./d/a", EntryType::Regular, "again"),
+            ],
+            true,
+        );
+        result.unwrap();
+        let copy = dir.path().join("copy");
+        assert_eq!(fs::read_to_string(copy.join("a")).unwrap(), "again");
+        assert_eq!(fs::read_to_string(copy.join("b")).unwrap(), "hi");
+        // Cut short at an entry's end, it isn't complete.
+        let (_dir, result) = unpacked(
+            &[
+                ("./d/", EntryType::Directory, ""),
+                ("./d/a", EntryType::Regular, "hi"),
+            ],
+            false,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn unpacking_never_writes_through_a_link() {
+        let (dir, result) = unpacked(
+            &[
+                ("./d/", EntryType::Directory, ""),
+                ("./d/out", EntryType::Symlink, "/tmp"),
+                ("./d/out/x", EntryType::Regular, "escaped"),
+            ],
+            true,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(fs::symlink_metadata(dir.path().join("copy/out")).is_ok());
+        // Nor is the copied entry itself a link now.
+        let (_dir, result) = unpacked(&[("./d", EntryType::Symlink, "/etc/passwd")], true);
+        assert!(result.unwrap_err().to_string().contains("changed"));
     }
 
     #[test]

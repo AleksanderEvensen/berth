@@ -219,6 +219,13 @@ fn copy_out_of_a_container(
         assert!(names.contains(&b"nl\nname".to_vec()));
     }
 
+    // A folder replaced by a link since it was resolved isn't followed
+    // inside the helper.
+    exec_sh(runtime, docker, id, "mv /c /c-moved && ln -s /etc /c");
+    let error = block_on(engine.copy_out(mount, "/c/hi", &dir.path().join("x"), Arc::default()))
+        .unwrap_err();
+    assert!(error.to_string().contains("changed"), "{error}");
+
     // A failure leaves nothing behind.
     let missing = dir.path().join("missing");
     assert!(matches!(

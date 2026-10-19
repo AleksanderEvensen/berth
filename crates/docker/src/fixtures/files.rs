@@ -245,7 +245,7 @@ impl FixtureEngine {
                     .kind
             };
             let staging = Staging::new(&dest).map_err(|e| EngineError::writing(&e))?;
-            copy_tree(confined, &path, kind, staging.path(), &copied)?;
+            copy_tree(confined, &path, kind, &staging.path(), &copied)?;
             staging.finish().map_err(|e| EngineError::writing(&e))
         })
     }
