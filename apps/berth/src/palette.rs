@@ -20,7 +20,7 @@ use crate::screens::{
 };
 use crate::store::Store;
 
-/// Results shown before the list scrolls.
+/// Results shown before the list scrolls, in a window tall enough.
 const VISIBLE_RESULTS: usize = 8;
 /// A result row and the gap below it.
 const RESULT_HEIGHT: f32 = Theme::RESOURCE_ROW_HEIGHT + 2.0;
@@ -227,10 +227,13 @@ impl Render for Palette {
             .h(px(
                 RESULT_HEIGHT * f32::from(u8::try_from(shown).unwrap_or(u8::MAX))
             ))
+            // Shorter windows shrink the list, which then scrolls.
+            .min_h_0()
             .into_any_element()
         };
         let card = div()
             .id("palette")
+            .debug_selector(|| "palette".into())
             .key_context(PALETTE_CONTEXT)
             .on_action(cx.listener(|this, _: &MenuPrev, _, cx| this.step(true, cx)))
             .on_action(cx.listener(|this, _: &MenuNext, _, cx| this.step(false, cx)))
@@ -238,6 +241,7 @@ impl Render for Palette {
             .on_action(cx.listener(|_, _: &MenuCancel, _, cx| cx.emit(PaletteEvent::Dismiss)))
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)))
             .w(px(580.0))
+            .min_h_0()
             .flex()
             .flex_col()
             .gap(px(Theme::SPACE_SM))
@@ -266,9 +270,10 @@ impl Render for Palette {
                 .absolute()
                 .inset_0()
                 .flex()
-                .justify_center()
-                .items_start()
+                .flex_col()
+                .items_center()
                 .pt(px(Theme::HEADER_HEIGHT + 56.0))
+                .pb(px(Theme::SPACE_LG))
                 .bg(theme.scrim)
                 .occlude()
                 .child(card),

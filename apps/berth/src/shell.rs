@@ -1032,6 +1032,21 @@ mod tests {
     }
 
     #[gpui::test]
+    fn palette_fits_the_smallest_window(cx: &mut TestAppContext) {
+        let (_, cx) = open_shell(cx);
+        // Without the entrance spring, so the card is where it settles.
+        cx.update(|_, cx| preferences::update(cx, |s| s.reduce_motion = true));
+        let window = gpui::size(px(860.0), px(520.0));
+        cx.simulate_resize(window);
+        cx.simulate_keystrokes("secondary-k");
+        cx.run_until_parked();
+        let Some(palette) = cx.debug_bounds("palette") else {
+            panic!("the palette didn't render");
+        };
+        assert!(palette.bottom() <= window.height, "{palette:?}");
+    }
+
+    #[gpui::test]
     fn closing_the_palette_restores_focus(cx: &mut TestAppContext) {
         let (shell, cx) = open_shell(cx);
         cx.simulate_keystrokes("secondary-f");
