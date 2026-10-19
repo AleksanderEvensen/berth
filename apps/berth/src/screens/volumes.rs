@@ -167,6 +167,11 @@ impl VolumesScreen {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub fn selected(&self) -> Option<&str> {
+        self.selection.single().map(String::as_str)
+    }
+
     /// Returns whether any rows changed.
     fn sync_rows(&mut self, store: &Store) -> bool {
         let (mut in_use, mut unused): (Vec<&Volume>, Vec<&Volume>) =

@@ -1401,7 +1401,7 @@ fn port_menu(
 /// The menu item an arrow key lands on, wrapping around `count` items;
 /// `back` is up. With none highlighted, down starts at the top, up at the
 /// bottom.
-fn menu_step(from: Option<usize>, count: usize, back: bool) -> Option<usize> {
+pub fn menu_step(from: Option<usize>, count: usize, back: bool) -> Option<usize> {
     let last = count.checked_sub(1)?;
     Some(match (from, back) {
         (None, false) => 0,

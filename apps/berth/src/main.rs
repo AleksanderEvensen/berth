@@ -7,6 +7,7 @@ mod files;
 mod format;
 mod keymap;
 mod live;
+mod palette;
 mod preferences;
 mod screens;
 mod selection;

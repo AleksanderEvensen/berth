@@ -279,6 +279,7 @@ pub struct ResourceRow {
     title: SharedString,
     subtitle: Option<SharedString>,
     meta: Option<SharedString>,
+    trailing: Option<AnyElement>,
     selected: bool,
     cursor: bool,
     dimmed: bool,
@@ -297,6 +298,7 @@ impl ResourceRow {
             title: title.into(),
             subtitle: None,
             meta: None,
+            trailing: None,
             selected: false,
             cursor: false,
             dimmed: false,
@@ -321,6 +323,12 @@ impl ResourceRow {
     /// Short trailing text (e.g. "2/3"), shown before the actions.
     pub fn meta(mut self, meta: impl Into<SharedString>) -> Self {
         self.meta = Some(meta.into());
+        self
+    }
+
+    /// A trailing element (e.g. keycaps), shown after the meta text.
+    pub fn trailing(mut self, trailing: impl IntoElement) -> Self {
+        self.trailing = Some(trailing.into_any_element());
         self
     }
 
@@ -513,6 +521,9 @@ impl RenderOnce for ResourceRow {
                         .text_color(theme.text_faint)
                         .child(meta),
                 )
+            })
+            .when_some(self.trailing, |d, trailing| {
+                d.child(div().flex_none().child(trailing))
             })
             .when(busy, |d| {
                 d.child(

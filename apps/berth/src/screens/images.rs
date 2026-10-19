@@ -10,8 +10,8 @@ use berth_ui::{
     ResourceRow, SectionLabel, Theme, empty_state, icons,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Render,
-    SharedString, Task, Window, div, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, FontWeight, IntoElement, Modifiers,
+    Render, SharedString, Task, Window, div, list, prelude::*, px,
 };
 
 use super::{
@@ -82,6 +82,8 @@ pub struct ImagesScreen {
     /// Inspect details for the single selected image.
     details: Option<Fetched>,
     fetch: Option<Task<()>>,
+    /// An image to scroll into view once the rows are next synced.
+    reveal: Option<String>,
 }
 
 impl EventEmitter<ConfirmRequest> for ImagesScreen {}
@@ -108,6 +110,7 @@ impl ImagesScreen {
             chrome: Chrome::default(),
             details: None,
             fetch: None,
+            reveal: None,
         }
     }
 
@@ -161,6 +164,14 @@ impl ImagesScreen {
         }
     }
 
+    /// Select only `id` and scroll it into view.
+    pub fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = id.to_string();
+        self.selection.click(&id, Modifiers::default(), &self.order);
+        self.reveal = Some(id);
+        cx.notify();
+    }
+
     fn group_of(store: &Store, image: &Image) -> Group {
         if store.image_in_use(image) {
             Group::InUse
@@ -171,7 +182,8 @@ impl ImagesScreen {
         }
     }
 
-    fn sync_rows(&mut self, store: &Store) {
+    /// Returns whether any rows changed.
+    fn sync_rows(&mut self, store: &Store) -> bool {
         let mut groups: [(Group, Vec<&Image>); 3] = [
             (Group::InUse, Vec::new()),
             (Group::Unused, Vec::new()),
@@ -199,8 +211,9 @@ impl ImagesScreen {
                 order.push(image.id.clone());
             }
         }
-        self.rows.sync(rows);
+        let changed = self.rows.sync(rows);
         self.order = order;
+        changed
     }
 
     fn click(&mut self, id: &str, event: &ClickEvent, cx: &mut Context<Self>) {
@@ -425,7 +438,14 @@ impl Render for ImagesScreen {
         self.sync_details(cx);
         let store_entity = self.store.clone();
         let store = store_entity.read(cx);
-        self.sync_rows(store);
+        let rows_changed = self.sync_rows(store);
+        if let Some(id) = self.reveal.take()
+            && let Some(ix) = self
+                .rows
+                .position(|row| matches!(row, Row::Image(row_id) if *row_id == id))
+        {
+            self.rows.reveal(ix, rows_changed);
+        }
         let theme = Theme::of(cx);
         let now = format::now_unix();
 

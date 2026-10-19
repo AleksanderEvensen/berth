@@ -32,7 +32,8 @@ with a note saying what is missing.
       handles it yet.
 - [ ] B12 — Run-container form.
 - [ ] H3 — Rebind keyboard shortcuts.
-- [ ] A3 — Command palette (`ctrl+k`): run any action, jump to any container/image/volume.
+- [x] A3 — Command palette (`ctrl+k` / `cmd+k`): runs any command in the
+      keyboard map and jumps to any container, image or volume by name.
 - [ ] Builds.
 - [ ] Kubernetes.
 - [x] H4 — SSH remotes. `ssh://` endpoints connect through the system

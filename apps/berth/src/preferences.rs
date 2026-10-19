@@ -119,6 +119,24 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// Default settings that are never read from or saved to disk.
+#[cfg(test)]
+pub fn init_in_memory(cx: &mut App) {
+    let current = Settings::default();
+    cx.set_global(Preferences {
+        engine: Arc::new(Mutex::new(current.engine.clone())),
+        current,
+        revision: 0,
+        path: None,
+        writer: Arc::default(),
+        load_problem: None,
+        save_error: None,
+        system: Appearance::Dark,
+        save: None,
+    });
+    apply_theme(cx);
+}
+
 pub fn get(cx: &App) -> &Settings {
     &cx.global::<Preferences>().current
 }

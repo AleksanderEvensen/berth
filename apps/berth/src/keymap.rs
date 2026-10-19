@@ -1,8 +1,9 @@
 //! The keyboard map (NFR-U1): every app action and its keys, in one table
 //! that both binds the keys and renders the reference on Settings →
-//! Shortcuts, so the two can't drift apart.
+//! Shortcuts, so the two can't drift apart. The command palette lists its
+//! actions from the same table.
 
-use gpui::{App, KeyBinding, actions};
+use gpui::{Action, App, KeyBinding, actions};
 
 use crate::dialogs;
 
@@ -13,6 +14,8 @@ actions!(
         ToggleSidebar,
         #[derive(Eq)]
         FocusSearch,
+        #[derive(Eq)]
+        TogglePalette,
         #[derive(Eq)]
         OpenSettings,
         #[derive(Eq)]
@@ -111,6 +114,11 @@ const LIST: &str = "Shell && !Input && !Terminal && !ConfirmDialog && !FileTree"
 /// Key context of an open menu (the port menu). Deeper than [`LIST`], so
 /// its keys win over the list's.
 pub const MENU_CONTEXT: &str = "PortMenu";
+/// Key context of the open command palette.
+pub const PALETTE_CONTEXT: &str = "CommandPalette";
+/// The palette's text field, which would otherwise take the arrows, Enter
+/// and Esc itself. Bound after `gpui-base`'s input keys, so these win.
+const PALETTE: &str = "CommandPalette > Input";
 /// Detail tabs also switch from inside the terminal, so it can be left by
 /// keyboard.
 const TABS: &str = "Shell && !ConfirmDialog";
@@ -141,16 +149,33 @@ type Bind = fn(&str, Option<&str>) -> KeyBinding;
 /// One line of the keyboard map. `keys` use gpui's keystroke syntax
 /// (`secondary` is cmd on macOS, ctrl elsewhere); alternatives are listed
 /// side by side. Entries without `bind` document keys handled elsewhere
-/// (focused controls, the port menu).
+/// (focused controls, the port menu). Bound entries are also commands in the
+/// palette, except those marked `key:` (moving around, dialog keys).
 pub struct Shortcut {
     pub group: Group,
     pub label: &'static str,
     pub keys: &'static [&'static str],
     context: Option<&'static str>,
     bind: Option<Bind>,
+    command: bool,
+}
+
+impl Shortcut {
+    /// The action the palette runs for this entry, if it is a command.
+    pub fn command(&self) -> Option<Box<dyn Action>> {
+        let bind = self.bind.filter(|_| self.command)?;
+        let key = self.keys.first()?;
+        Some(bind(key, self.context).action().boxed_clone())
+    }
 }
 
 macro_rules! shortcut {
+    (key: $group:ident, $label:literal, [$($key:literal),+], $context:expr, $action:expr) => {
+        Shortcut {
+            command: false,
+            ..shortcut!($group, $label, [$($key),+], $context, $action)
+        }
+    };
     ($group:ident, $label:literal, [$($key:literal),+], $context:expr, $action:expr) => {
         Shortcut {
             group: Group::$group,
@@ -158,6 +183,7 @@ macro_rules! shortcut {
             keys: &[$($key),+],
             context: $context,
             bind: Some(|key, context| KeyBinding::new(key, $action, context)),
+            command: true,
         }
     };
     ($group:ident, $label:literal, [$($key:literal),+]) => {
@@ -167,6 +193,7 @@ macro_rules! shortcut {
             keys: &[$($key),+],
             context: None,
             bind: None,
+            command: false,
         }
     };
 }
@@ -198,6 +225,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
         None,
         ToggleSidebar
     ),
+    shortcut!(
+        key: General,
+        "Command palette",
+        ["secondary-k"],
+        None,
+        TogglePalette
+    ),
     shortcut!(General, "Settings", ["secondary-,"], None, OpenSettings),
     shortcut!(
         General,
@@ -208,28 +242,28 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!(General, "Leave settings", ["escape"]),
     shortcut!(
-        General,
+        key: General,
         "Scroll up a page",
         ["pageup"],
         Some(LIST),
         ScrollPageUp
     ),
     shortcut!(
-        General,
+        key: General,
         "Scroll down a page",
         ["pagedown"],
         Some(LIST),
         ScrollPageDown
     ),
     shortcut!(
-        General,
+        key: General,
         "Scroll to the top",
         ["secondary-home"],
         Some(LIST),
         ScrollTop
     ),
     shortcut!(
-        General,
+        key: General,
         "Scroll to the bottom (Logs: follow new lines)",
         ["secondary-end"],
         Some(LIST),
@@ -240,9 +274,9 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Scroll (screens without a list)",
         ["up", "down", "home", "end"]
     ),
-    shortcut!(General, "Next control", ["tab"], Some(SHELL), FocusNext),
+    shortcut!(key: General, "Next control", ["tab"], Some(SHELL), FocusNext),
     shortcut!(
-        General,
+        key: General,
         "Previous control",
         ["shift-tab"],
         Some(SHELL),
@@ -250,54 +284,54 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!(General, "Press the focused control", ["enter", "space"]),
     shortcut!(General, "Quit", ["secondary-q"], None, Quit),
-    shortcut!(Lists, "Select previous row", ["up"], Some(LIST), SelectPrev),
-    shortcut!(Lists, "Select next row", ["down"], Some(LIST), SelectNext),
-    shortcut!(Lists, "Select first row", ["home"], Some(LIST), SelectFirst),
-    shortcut!(Lists, "Select last row", ["end"], Some(LIST), SelectLast),
+    shortcut!(key: Lists, "Select previous row", ["up"], Some(LIST), SelectPrev),
+    shortcut!(key: Lists, "Select next row", ["down"], Some(LIST), SelectNext),
+    shortcut!(key: Lists, "Select first row", ["home"], Some(LIST), SelectFirst),
+    shortcut!(key: Lists, "Select last row", ["end"], Some(LIST), SelectLast),
     shortcut!(
-        Lists,
+        key: Lists,
         "Extend selection up",
         ["shift-up"],
         Some(LIST),
         ExtendPrev
     ),
     shortcut!(
-        Lists,
+        key: Lists,
         "Extend selection down",
         ["shift-down"],
         Some(LIST),
         ExtendNext
     ),
     shortcut!(
-        Lists,
+        key: Lists,
         "Extend selection to the first row",
         ["shift-home"],
         Some(LIST),
         ExtendFirst
     ),
     shortcut!(
-        Lists,
+        key: Lists,
         "Extend selection to the last row",
         ["shift-end"],
         Some(LIST),
         ExtendLast
     ),
     shortcut!(
-        Lists,
+        key: Lists,
         "Move the cursor up",
         ["secondary-up"],
         Some(LIST),
         CursorPrev
     ),
     shortcut!(
-        Lists,
+        key: Lists,
         "Move the cursor down",
         ["secondary-down"],
         Some(LIST),
         CursorNext
     ),
     shortcut!(
-        Lists,
+        key: Lists,
         "Add or remove the row under the cursor",
         ["ctrl-space"],
         Some(LIST),
@@ -371,45 +405,73 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!(Containers, "Files tab", ["alt-5"], Some(TABS), ShowFiles),
     shortcut!(
-        Dialogs,
+        key: Dialogs,
         "Confirm (Enter on a focused button presses it)",
         ["enter"],
         Some(dialogs::CONFIRM_CONTEXT),
         dialogs::Confirm
     ),
     shortcut!(
-        Dialogs,
+        key: Dialogs,
         "Cancel",
         ["escape"],
         Some(dialogs::CONFIRM_CONTEXT),
         dialogs::Cancel
     ),
     shortcut!(
-        Dialogs,
+        key: Dialogs,
         "Previous menu item",
         ["up"],
         Some(MENU_CONTEXT),
         MenuPrev
     ),
     shortcut!(
-        Dialogs,
+        key: Dialogs,
         "Next menu item",
         ["down"],
         Some(MENU_CONTEXT),
         MenuNext
     ),
     shortcut!(
-        Dialogs,
+        key: Dialogs,
         "Open menu item",
         ["enter"],
         Some(MENU_CONTEXT),
         MenuConfirm
     ),
     shortcut!(
-        Dialogs,
+        key: Dialogs,
         "Close menu",
         ["escape"],
         Some(MENU_CONTEXT),
+        MenuCancel
+    ),
+    shortcut!(
+        key: Dialogs,
+        "Command palette: previous result",
+        ["up"],
+        Some(PALETTE),
+        MenuPrev
+    ),
+    shortcut!(
+        key: Dialogs,
+        "Command palette: next result",
+        ["down"],
+        Some(PALETTE),
+        MenuNext
+    ),
+    shortcut!(
+        key: Dialogs,
+        "Command palette: run or open the result",
+        ["enter"],
+        Some(PALETTE),
+        MenuConfirm
+    ),
+    shortcut!(
+        key: Dialogs,
+        "Command palette: close",
+        ["escape"],
+        Some(PALETTE),
         MenuCancel
     ),
 ];
@@ -476,6 +538,7 @@ fn keycaps_for(keystroke: &str, mac: bool) -> Vec<&'static str> {
             ("v", _) => "V",
             ("b", _) => "B",
             ("f", _) => "F",
+            ("k", _) => "K",
             ("o", _) => "O",
             ("q", _) => "Q",
             ("r", _) => "R",
@@ -560,8 +623,38 @@ mod tests {
         assert!(resolve("down", &["Shell", "Input"]).is_none());
         assert!(resolve("delete", &["Shell", "Terminal"]).is_none());
         assert!(runs("alt-1", &["Shell", "Terminal"], &ShowInfo));
+        // The palette's field gives its keys to the palette.
+        let palette = ["Shell", PALETTE_CONTEXT, "Input"];
+        assert!(runs("down", &palette, &MenuNext));
+        assert!(runs("enter", &palette, &MenuConfirm));
+        assert!(runs("escape", &palette, &MenuCancel));
         // Global keys work anywhere.
         assert!(runs("secondary-1", &["Shell", "Input"], &GoContainers));
+        assert!(runs("secondary-k", &["Shell", "Terminal"], &TogglePalette));
+        assert!(runs("secondary-k", &palette, &TogglePalette));
+    }
+
+    #[test]
+    fn commands_are_bound_actions() {
+        let command = |label: &str| {
+            SHORTCUTS
+                .iter()
+                .find(|s| s.label == label)
+                .and_then(Shortcut::command)
+        };
+        assert!(command("Go to Images").is_some_and(|a| a.partial_eq(&GoImages)));
+        assert!(command("Start or stop").is_some_and(|a| a.partial_eq(&ToggleRunning)));
+        // Keys for moving around, the dialogs and the palette itself aren't.
+        assert!(command("Select next row").is_none());
+        assert!(command("Cancel").is_none());
+        assert!(command("Command palette").is_none());
+        assert!(command("Leave settings").is_none());
+        assert!(
+            SHORTCUTS
+                .iter()
+                .filter(|s| s.group == Group::Dialogs)
+                .all(|s| s.command().is_none())
+        );
     }
 
     #[test]
