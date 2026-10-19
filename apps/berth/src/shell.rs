@@ -10,8 +10,8 @@ use berth_ui::{
 };
 use gpui::{
     AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Render, SharedString, SpringAnimation, Stateful, Subscription, Window, div,
-    prelude::*, px,
+    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, canvas, div, prelude::*,
+    px,
 };
 
 use crate::chrome;
@@ -70,7 +70,6 @@ struct ToastItem {
 struct OpenPalette {
     view: Entity<Palette>,
     previous_focus: Option<FocusHandle>,
-    _keep_focus: Subscription,
 }
 
 pub struct Shell {
@@ -510,18 +509,9 @@ impl Shell {
             },
         )
         .detach();
-        // Something behind may take focus while it is open (a terminal
-        // starting when its container does); take it back.
-        let focus = view.read(cx).focus_handle(cx);
-        let keep_focus = cx.on_focus_out(&focus, window, |this, _, window, cx| {
-            if let Some(focus) = this.focus_trap(cx) {
-                window.focus(&focus, cx);
-            }
-        });
         self.palette = Some(OpenPalette {
             view,
             previous_focus,
-            _keep_focus: keep_focus,
         });
         cx.notify();
     }
@@ -880,6 +870,24 @@ impl Shell {
     }
 }
 
+/// While a modal is open, give it back focus that something behind it took
+/// (a terminal focuses itself when its container starts). Prepainted after
+/// the screens, which may have just done that, and before the deferred
+/// modal, which then marks itself focused for this frame.
+fn keep_focus(trap: FocusHandle) -> impl IntoElement {
+    canvas(
+        move |_, window, cx| {
+            // Focus may be on a control inside it, or on it before its
+            // first frame, which `contains_focused` doesn't know about yet.
+            if !trap.is_focused(window) && !trap.contains_focused(window, cx) {
+                window.focus(&trap, cx);
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let radius = chrome::content_radius(window);
@@ -965,6 +973,7 @@ impl Render for Shell {
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
+            .children(self.focus_trap(cx).map(keep_focus))
             .child(self.render_sidebar_toggle(leading, cx))
             .children(captions)
             .child(self.render_toasts(cx))
@@ -1095,6 +1104,21 @@ mod tests {
         cx.simulate_keystrokes("secondary-k");
         let shell_focus = shell.read_with(cx, |shell, _| shell.focus.clone());
         cx.update(|window, cx| window.focus(&shell_focus, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|window, cx| window.focused(cx)),
+            in_palette_now(&shell, cx)
+        );
+        cx.simulate_keystrokes("escape");
+        assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+
+        // Nor before its first frame.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.toggle_palette(&TogglePalette, window, cx);
+            });
+            window.focus(&shell_focus, cx);
+        });
         cx.run_until_parked();
         assert_eq!(
             cx.update(|window, cx| window.focused(cx)),
