@@ -770,8 +770,14 @@ impl Staging {
             Err(error) => return Err(error),
         };
         if let Err(error) = std::fs::rename(&copy, &self.dest) {
-            if replaced {
-                let _ = std::fs::rename(&old, &self.dest);
+            if replaced && std::fs::rename(&old, &self.dest).is_err() {
+                // Something else took its place meanwhile: keep the
+                // original where it was moved, and say so.
+                let kept = self.dir.keep().join("old");
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{error}. What was there is kept at {}", kept.display()),
+                ));
             }
             return Err(error);
         }

@@ -32,7 +32,8 @@ with a note saying what is missing.
       tabs. Progress and errors show below the tree. Copies go through the
       helper's `tar`, so they work over SSH too (not yet checked against a
       real remote). Later: links inside a downloaded folder are left out on
-      Windows; opened copies stay in the temporary folder, and edits to them
+      Windows; pseudo-files that report no size (`/proc`, `/sys`) copy
+      empty; opened copies stay in the temporary folder, and edits to them
       don't go back into the container.
 - [ ] B12 — Run-container form.
 - [ ] H3 — Rebind keyboard shortcuts.

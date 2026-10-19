@@ -499,6 +499,8 @@ pub trait Engine: Send + Sync + 'static {
     /// complete ([`crate::Staging`]), and adding the bytes of file data
     /// written to `copied` as it goes. A folder's links are copied as
     /// links (left out on Windows), its devices, pipes and sockets left out.
+    /// Files are copied as long as their size says, so pseudo-files that
+    /// report none (`/proc`, `/sys`) copy empty.
     /// Dropping the future stops the copy and removes what it wrote.
     fn copy_out(
         &self,

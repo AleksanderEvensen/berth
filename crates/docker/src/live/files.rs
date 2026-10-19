@@ -290,17 +290,22 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
             ));
         }
         let target = place(to, &rel, &mut made)?;
-        match kind {
+        let written = match kind {
             EntryType::Directory => {
                 if !target.is_dir() {
                     fs::create_dir(&target)?;
                 }
+                true
             }
-            EntryType::Regular | EntryType::Continuous => write_file(&mut entry, &target, copied)?,
+            EntryType::Regular | EntryType::Continuous => {
+                write_file(&mut entry, &target, copied)?;
+                true
+            }
             #[cfg(unix)]
             EntryType::Symlink => {
                 let link = entry.link_name()?.ok_or_else(|| unexpected(&name))?;
                 std::os::unix::fs::symlink(link, &target)?;
+                true
             }
             EntryType::Link => {
                 let source = entry.link_name_bytes().ok_or_else(|| unexpected(&name))?;
@@ -311,18 +316,27 @@ fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::
                     .ok()
                     .filter(|_| made.contains(&source));
                 match copied {
-                    Some(meta) if meta.is_file() => fs::hard_link(&source, &target)
-                        .or_else(|_| fs::copy(&source, &target).map(drop))?,
+                    Some(meta) if meta.is_file() => {
+                        fs::hard_link(&source, &target)
+                            .or_else(|_| fs::copy(&source, &target).map(drop))?;
+                        true
+                    }
                     #[cfg(unix)]
                     Some(meta) if meta.is_symlink() => {
                         std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
+                        true
                     }
                     // To what was left out.
-                    _ => {}
+                    _ => false,
                 }
             }
             // Devices, pipes and sockets (and links, on Windows).
-            _ => {}
+            _ => false,
+        };
+        // Only what is written may be found again (or linked to): a name
+        // left out may be another's, by case.
+        if written {
+            made.insert(target);
         }
     }
     // Input ending before the end-of-archive blocks is a copy cut short,
@@ -377,11 +391,11 @@ fn unexpected(name: &[u8]) -> io::Error {
 
 /// `to` joined with `rel`, the folders on the way created as needed.
 ///
-/// Everything under `to` is made here, and recorded in `made`, so finding
-/// anything else on the way (a link, which could lead out of `to`) or at
-/// the end is a clash: two names the file system doesn't tell apart, e.g.
-/// by case. What an earlier entry of the same name made is replaced,
-/// unless a folder.
+/// Everything under `to` is made here, and recorded in `made` once
+/// written, so finding anything else on the way (a link, which could lead
+/// out of `to`) or at the end is a clash: two names the file system doesn't
+/// tell apart, e.g. by case. What an earlier entry of the same name made is
+/// replaced, unless a folder.
 fn place(to: &Path, rel: &Path, made: &mut HashSet<PathBuf>) -> io::Result<PathBuf> {
     let mut parts = rel.iter();
     let last = parts.next_back();
@@ -401,7 +415,6 @@ fn place(to: &Path, rel: &Path, made: &mut HashSet<PathBuf>) -> io::Result<PathB
         Ok(meta) if !meta.is_dir() => fs::remove_file(&at)?,
         _ => {}
     }
-    made.insert(at.clone());
     Ok(at)
 }
 
@@ -935,6 +948,8 @@ mod tests {
                 ("./d/a", EntryType::Regular, "again"),
                 ("./d/s", EntryType::Symlink, "/etc/hostname"),
                 ("./d/t", EntryType::Link, "./d/s"),
+                ("./d/p", EntryType::Fifo, ""),
+                ("./d/q", EntryType::Link, "./d/p"),
             ],
             true,
         );
@@ -947,6 +962,8 @@ mod tests {
             fs::read_link(copy.join("t")).unwrap(),
             Path::new("/etc/hostname")
         );
+        // What was left out isn't linked to either.
+        assert!(fs::symlink_metadata(copy.join("q")).is_err());
         // Cut short at an entry's end, it isn't complete.
         let (_dir, result) = unpacked(
             &[
