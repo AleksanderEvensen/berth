@@ -6,7 +6,7 @@ use std::time::Duration;
 use berth_ui::{
     Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, ScrollStep, Sidebar, SidebarItem,
     SidebarSection, TabStop, Theme, Toast, ToastKind, icons, item_list, modal_overlay,
-    scroll_active_pane, sidebar_glyph, status_dot,
+    reveal_when_focused, scroll_active_pane, sidebar_glyph, status_dot, tab_stop,
 };
 use gpui::{
     AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
@@ -724,7 +724,7 @@ impl Shell {
                 }
             })
             .child(
-                IconButton::new("settings", icons::SETTINGS)
+                IconButton::new("settings", icons::SETTINGS, "Settings")
                     .size(28.0, 16.0)
                     .tab_stop(!self.sidebar_collapsed)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -832,30 +832,41 @@ impl Shell {
             .footer(self.render_engine_footer(cx))
     }
 
-    fn render_sidebar_toggle(&self, leading: f32, cx: &Context<Self>) -> impl IntoElement {
+    fn render_sidebar_toggle(
+        &self,
+        leading: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let focus = tab_stop("sidebar-toggle", window, cx);
         let theme = Theme::of(cx);
         let color = theme.text_muted;
+        let ring = theme.accent;
         let open = if self.sidebar_collapsed { 0.0 } else { 1.0 };
-        let toggle = div()
-            .id("sidebar-toggle")
+        gpui_base::Button::new("sidebar-toggle")
+            .accessibility_label(if self.sidebar_collapsed {
+                "Show sidebar"
+            } else {
+                "Hide sidebar"
+            })
+            .map(|b| reveal_when_focused(b, &focus, window))
+            .track_focus(&focus)
+            .focus_visible(move |s| s.border_color(ring))
             .border_1()
             .border_color(gpui::transparent_black())
             .absolute()
             .top(px((Theme::HEADER_HEIGHT - 28.0) / 2.0))
             .left(px(leading))
             .size(px(28.0))
-            .flex()
-            .items_center()
-            .justify_center()
             .rounded(px(Theme::CONTROL_RADIUS))
             .cursor_pointer()
             .hover(|s| s.bg(theme.element_hover))
             .occlude()
-            .map(|d| {
+            .map(|b| {
                 if theme.reduce_motion {
-                    d.child(sidebar_glyph(open, 18.0, color))
+                    b.child(sidebar_glyph(open, 18.0, color))
                 } else {
-                    d.child(div().with_spring(
+                    b.child(div().with_spring(
                         "sidebar-glyph",
                         SpringAnimation::new(PANEL_SPRING).to(open),
                         move |this, t: f32| this.child(sidebar_glyph(t, 18.0, color)),
@@ -865,8 +876,7 @@ impl Shell {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
-            );
-        TabStop::new("sidebar-toggle", toggle)
+            )
     }
 }
 
@@ -974,7 +984,7 @@ impl Render for Shell {
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
             .children(self.focus_trap(cx).map(keep_focus))
-            .child(self.render_sidebar_toggle(leading, cx))
+            .child(self.render_sidebar_toggle(leading, window, cx))
             .children(captions)
             .child(self.render_toasts(cx))
             .children(self.palette.as_ref().map(|palette| palette.view.clone()))

@@ -286,11 +286,15 @@ impl VolumesScreen {
         .selected(self.selection.contains(&name))
         .keyboard_cursor(self.selection.is_cursor(&name))
         .action(
-            IconButton::new(SharedString::from(format!("delete-{name}")), icons::TRASH)
-                .tone(ButtonTone::Danger)
-                .disabled(in_use)
-                .tab_stop(false)
-                .on_click(delete),
+            IconButton::new(
+                SharedString::from(format!("delete-{name}")),
+                icons::TRASH,
+                "Delete volume",
+            )
+            .tone(ButtonTone::Danger)
+            .disabled(in_use)
+            .tab_stop(false)
+            .on_click(delete),
         )
         .on_click(click)
     }
@@ -429,21 +433,25 @@ impl Render for VolumesScreen {
         );
         let reclaim = store.reclaimable(PruneTarget::UnusedVolumes);
         let header = ListHeader::new("Volumes").subtitle(subtitle).action(
-            IconButton::new("remove-unused-volumes", icons::BROOM)
-                .disabled(unused.is_empty())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let title = reclaim.map_or_else(
-                        || format!("Delete {} unused volumes?", unused.len()),
-                        |b| {
-                            format!(
-                                "Delete {} unused volumes ({})?",
-                                unused.len(),
-                                format::bytes(b)
-                            )
-                        },
-                    );
-                    this.confirm_remove(unused.clone(), title, cx);
-                })),
+            IconButton::new(
+                "remove-unused-volumes",
+                icons::BROOM,
+                "Delete unused volumes",
+            )
+            .disabled(unused.is_empty())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let title = reclaim.map_or_else(
+                    || format!("Delete {} unused volumes?", unused.len()),
+                    |b| {
+                        format!(
+                            "Delete {} unused volumes ({})?",
+                            unused.len(),
+                            format::bytes(b)
+                        )
+                    },
+                );
+                this.confirm_remove(unused.clone(), title, cx);
+            })),
         );
 
         let body = if self.rows.is_empty() {

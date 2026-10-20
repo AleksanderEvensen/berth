@@ -316,11 +316,15 @@ impl ImagesScreen {
             .selected(self.selection.contains(&id))
             .keyboard_cursor(self.selection.is_cursor(&id))
             .action(
-                IconButton::new(SharedString::from(format!("delete-{id}")), icons::TRASH)
-                    .tone(ButtonTone::Danger)
-                    .disabled(in_use)
-                    .tab_stop(false)
-                    .on_click(delete),
+                IconButton::new(
+                    SharedString::from(format!("delete-{id}")),
+                    icons::TRASH,
+                    "Delete image",
+                )
+                .tone(ButtonTone::Danger)
+                .disabled(in_use)
+                .tab_stop(false)
+                .on_click(delete),
             )
             .on_click(click)
     }
@@ -462,7 +466,7 @@ impl Render for ImagesScreen {
         let header = ListHeader::new("Images")
             .subtitle(format!("{} total", format::bytes(total)))
             .action(
-                IconButton::new("remove-dangling", icons::BROOM)
+                IconButton::new("remove-dangling", icons::BROOM, "Delete dangling images")
                     .disabled(dangling.is_empty())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let title = format!(

@@ -748,7 +748,7 @@ impl FileBrowser {
                     }))
             }))
             .child(
-                IconButton::new("files-reload", icons::RESTART)
+                IconButton::new("files-reload", icons::RESTART, "Reload")
                     .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
             )
     }
@@ -847,7 +847,7 @@ fn render_transfer(transfer: &Transfer, cx: &Context<FileBrowser>) -> AnyElement
                 .on_click(move |_, _, cx| cx.reveal_path(&dest))
         }))
         .child(
-            IconButton::new(("transfer-dismiss", id), icons::CLOSE)
+            IconButton::new(("transfer-dismiss", id), icons::CLOSE, "Dismiss")
                 .size(22.0, 13.0)
                 .on_click(cx.listener(move |this, _, _, cx| this.dismiss(id, cx))),
         )

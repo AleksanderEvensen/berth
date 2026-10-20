@@ -280,7 +280,7 @@ impl RenderOnce for Toast {
             )
             .when_some(on_dismiss, |d, f| {
                 d.child(
-                    IconButton::new("dismiss", icons::CLOSE)
+                    IconButton::new("dismiss", icons::CLOSE, "Dismiss")
                         .size(22.0, 13.0)
                         .on_click(f),
                 )

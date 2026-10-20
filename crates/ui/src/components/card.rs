@@ -159,7 +159,7 @@ impl Cell {
             .opacity(if focused { 1.0 } else { 0.0 })
             .group_hover(group.clone(), |s| s.opacity(1.0))
             .child(
-                IconButton::new("copy", icons::COPY)
+                IconButton::new("copy", icons::COPY, "Copy")
                     .size(20.0, 12.0)
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.to_string()));
