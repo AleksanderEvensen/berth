@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/AleksanderEvensen/berth/compare/v0.1.0...v0.1.1) - 2026-10-20
+
+### Added
+
+- *(files)* open and download files and folders ([#4](https://github.com/AleksanderEvensen/berth/pull/4))
+- *(berth)* command palette (A3) ([#5](https://github.com/AleksanderEvensen/berth/pull/5))
+- *(docker)* connect to remote engines over SSH
+
+### Fixed
+
+- *(docker)* complete bounded TTY logs, remote port URLs, one TaskStream
+- *(berth)* storage refresh races, stale volume usage, selection and cleanup totals
+- *(settings)* never overwrite unreadable or unbacked-up settings; unique temp files
+
+### Other
+
+- cleaned up unused icons
+
 ## [0.1.0](https://github.com/AleksanderEvensen/berth/releases/tag/v0.1.0) - 2026-10-14
 
 ### Added
