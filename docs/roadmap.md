@@ -50,7 +50,15 @@ with a note saying what is missing.
 ## Open questions
 
 - Build `Button`/`IconButton` and `Dialog` on `gpui-base`'s unstyled
-  primitives instead of plain `div`s, keeping our styling? The gain would be
-  keyboard focus and accessibility behaviour we don't have to maintain;
-  `Dialog` focus trapping would also need `gpui-base`'s Root integration. Not
-  a code-size win.
+  primitives instead of plain `div`s, keeping our styling? Tried on
+  `feat/gpui-base-primitives`: buttons, the confirm dialog (on `Root` and
+  `AlertDialog`) and the toasts (`ToastManager`/`ToastStack`) are rebuilt,
+  looking as before. Gained: every button and toast has a screen-reader role
+  and label, the dialog is an alert dialog, and Tab, Enter and Esc in modals
+  are gpui-base's, so berth's own Tab cycling, dialog actions and toast
+  timers are gone. Cost: about the same production code (+429/−287 lines),
+  a `NoAction` binding so Enter on a focused dialog button doesn't confirm,
+  `#[doc(hidden)]` setters for the dialog's focus, a viewport-wide dialog
+  host that has to be inset for the CSD frame, and a toast layout tuned
+  through its collapse parameters. Open: keep it or not; the PR has the
+  details.
