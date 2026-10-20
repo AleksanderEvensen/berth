@@ -724,7 +724,9 @@ fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
 #[must_use]
 pub fn windows_allows(name: &str) -> bool {
     // `COM0`/`LPT0` too, which some versions take for devices.
-    const RESERVED: [&str; 30] = [
+    const RESERVED: [&str; 32] = [
+        "CONIN$",
+        "CONOUT$",
         "CON",
         "PRN",
         "AUX",
@@ -1218,6 +1220,8 @@ mod tests {
             "com1 .tar.gz",
             "COM\u{b9}.txt",
             "lpt\u{b3}",
+            "CONIN$",
+            "conout$.log",
             "a.",
             "a ",
             "a:b",

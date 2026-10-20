@@ -154,13 +154,14 @@ impl BollardEngine {
                     (_, _, stderr) => return Err(EngineError::NotFound(command_error(&stderr))),
                 }
             }
-            let staging = Staging::new(&dest).map_err(|e| EngineError::writing(&e))?;
-            // Unpacked as it arrives, on a thread of its own. The staging
+            // Unpacked as it arrives, on a thread of its own, where the
+            // staging is made (the destination may be a slow mount) and
             // goes with it, so a cancelled copy is removed only once that
             // thread is done writing it, and comes back as `Staged`, so a
             // result nobody collects is removed off the engine's workers.
             let (sender, chunks) = tokio::sync::mpsc::channel(COPY_CHUNKS);
             let mut unpacking = tokio::task::spawn_blocking(move || {
+                let staging = Staging::new(&dest)?;
                 unpack(Chunks::new(chunks), &staging.path(), &path, &copied)
                     .map(|()| Staged(Some(staging)))
             });
