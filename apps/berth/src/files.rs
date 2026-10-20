@@ -496,8 +496,7 @@ impl FileBrowser {
                 return Err("A folder can't be opened. Download it instead.".into());
             }
             // A folder of its own, so the copy keeps its name.
-            (Purpose::Open, FileKind::File) => tempfile::Builder::new()
-                .prefix("berth-")
+            (Purpose::Open, FileKind::File) => berth_docker::private_dir("berth-")
                 .tempdir()
                 .map_err(|e| format!("Couldn't make a temporary folder: {e}"))?
                 .keep()

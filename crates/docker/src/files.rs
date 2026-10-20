@@ -733,6 +733,21 @@ fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
     allowed.then(|| std::ffi::OsStr::new(name))
 }
 
+/// A temporary folder builder whose folders only the user can enter (on
+/// Unix), so nobody else reads a copy while it is written, nor an opened
+/// copy after.
+#[must_use]
+pub fn private_dir(prefix: &str) -> tempfile::Builder<'_, '_> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder
+}
+
 /// A copy being written in a folder of its own next to its destination.
 ///
 /// It replaces whatever is there only once complete, with a rename.
@@ -753,9 +768,7 @@ impl Staging {
             _ => Path::new("."),
         };
         Ok(Self {
-            dir: tempfile::Builder::new()
-                .prefix(".berth-")
-                .tempdir_in(parent)?,
+            dir: private_dir(".berth-").tempdir_in(parent)?,
             dest: dest.to_owned(),
         })
     }
@@ -1167,8 +1180,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out");
         std::fs::create_dir_all(dest.join("old")).unwrap();
-        // Copies to the same place don't meet.
+        // Copies to the same place don't meet, nor can others look in.
         let staging = Staging::new(&dest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let parent = staging.path().parent().unwrap().to_owned();
+            let mode = std::fs::metadata(parent).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
         let other = Staging::new(&dest).unwrap();
         std::fs::write(staging.path(), "new").unwrap();
         std::fs::write(other.path(), "other").unwrap();
