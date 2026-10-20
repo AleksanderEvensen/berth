@@ -855,23 +855,36 @@ fn render_transfer(transfer: &Transfer, cx: &Context<FileBrowser>) -> AnyElement
 }
 
 /// A name for the local copy of the entry named `name` (escaped): as it
-/// shows, with what Windows doesn't allow in names replaced.
+/// shows, and on Windows one it keeps as is ([`windows_name`]).
 fn local_name(name: &str) -> String {
     let shown = display_name(name);
     if cfg!(windows) {
-        shown
-            .chars()
-            .map(|c| {
-                if c.is_control() || "<>:\"/\\|?*".contains(c) {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect()
+        windows_name(&shown)
     } else {
         shown
     }
+}
+
+/// `name` with what Windows refuses replaced, a trailing dot or space
+/// marked, and a device name (`AUX.txt`) led by `_`.
+fn windows_name(name: &str) -> String {
+    let mut name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if name.ends_with(['.', ' ']) {
+        name.push('_');
+    }
+    if !berth_docker::windows_allows(&name) {
+        name.insert(0, '_');
+    }
+    name
 }
 
 /// The error of an update to a browser that has gone.
@@ -1197,6 +1210,17 @@ mod tests {
                 TransferState::Failed(why) if why.contains("outside")
             ));
         });
+    }
+
+    #[test]
+    fn copies_get_names_windows_keeps() {
+        assert_eq!(windows_name("report.txt"), "report.txt");
+        assert_eq!(windows_name("AUX.txt"), "_AUX.txt");
+        assert_eq!(windows_name("a:b?"), "a_b_");
+        assert_eq!(windows_name("notes."), "notes._");
+        for name in ["AUX.txt", "nul", "a:b?", "notes. ", "con "] {
+            assert!(berth_docker::windows_allows(&windows_name(name)), "{name}");
+        }
     }
 
     #[gpui::test]

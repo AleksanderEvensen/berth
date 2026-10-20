@@ -714,23 +714,27 @@ fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
 /// One name of an archived path, as a name here.
 #[cfg(not(unix))]
 fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
+    let name = std::str::from_utf8(part).ok()?;
+    (name != ".." && windows_allows(name)).then(|| std::ffi::OsStr::new(name))
+}
+
+/// Whether Windows keeps `name` as it is: it drops a trailing dot or
+/// space, takes device names for devices whatever their extension, and
+/// refuses a few characters.
+#[must_use]
+pub fn windows_allows(name: &str) -> bool {
     const RESERVED: [&str; 22] = [
         "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
         "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
-    let name = std::str::from_utf8(part).ok()?;
     let stem = name.split('.').next().unwrap_or(name);
-    // Windows drops a trailing dot or space, and takes device names for
-    // devices, whatever their extension.
-    let allowed = name != ".."
-        && !name.ends_with(['.', ' '])
+    !name.ends_with(['.', ' '])
         && !RESERVED
             .iter()
             .any(|r| r.eq_ignore_ascii_case(stem.trim_end()))
         && !name
             .chars()
-            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c));
-    allowed.then(|| std::ffi::OsStr::new(name))
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
 }
 
 /// A temporary folder builder whose folders only the user can enter (on
@@ -1173,6 +1177,15 @@ mod tests {
         assert_eq!(at("/etc", "./etc/a\\b").unwrap().iter().count(), 1);
         #[cfg(windows)]
         assert_eq!(at("/etc", "./etc/a\\b"), None);
+    }
+
+    #[test]
+    fn windows_names_are_told_apart() {
+        assert!(windows_allows("report.txt"));
+        assert!(windows_allows("console.log"));
+        for name in ["AUX.txt", "nul", "com1 .tar.gz", "a.", "a ", "a:b", "a\\b"] {
+            assert!(!windows_allows(name), "{name}");
+        }
     }
 
     #[test]
