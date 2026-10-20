@@ -11,8 +11,9 @@
 //!   runtime and must not require the caller to be inside one.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
@@ -394,6 +395,14 @@ pub enum EngineError {
     Transport(String),
 }
 
+impl EngineError {
+    /// Writing a copy on this machine failed ([`Engine::copy_out`]).
+    #[must_use]
+    pub fn writing(error: &std::io::Error) -> Self {
+        Self::Unsupported(format!("Couldn't write the copy: {error}"))
+    }
+}
+
 /// A container engine speaking (a dialect of) the Docker Engine API.
 pub trait Engine: Send + Sync + 'static {
     fn info(&self) -> BoxFuture<'static, EngineResult<EngineInfo>>;
@@ -484,4 +493,20 @@ pub trait Engine: Send + Sync + 'static {
     /// The target (escaped) of the symlink at real path `path` of
     /// `mount`'s tree.
     fn read_link(&self, mount: &FileMount, path: &str) -> BoxFuture<'static, EngineResult<String>>;
+
+    /// Copy the file or folder at real path `path` of `mount`'s tree to
+    /// `dest` on this machine, replacing whatever is there once the copy is
+    /// complete ([`crate::Staging`]), and adding the bytes of file data
+    /// written to `copied` as it goes. A folder's links are copied as
+    /// links (left out on Windows), its devices, pipes and sockets left out.
+    /// Files are copied as long as their size says, so pseudo-files that
+    /// report none (`/proc`, `/sys`) copy empty.
+    /// Dropping the future stops the copy and removes what it wrote.
+    fn copy_out(
+        &self,
+        mount: &FileMount,
+        path: &str,
+        dest: &Path,
+        copied: Arc<AtomicU64>,
+    ) -> BoxFuture<'static, EngineResult<()>>;
 }

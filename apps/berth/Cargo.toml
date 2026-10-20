@@ -25,6 +25,8 @@ log.workspace = true
 chrono.workspace = true
 aho-corasick.workspace = true
 num-traits.workspace = true
+# Files: the Downloads folder to save to.
+dirs.workspace = true
 
 [build-dependencies]
 # The icon resource in the Windows executable; the version matches gpui-pre's.

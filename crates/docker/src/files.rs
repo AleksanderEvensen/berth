@@ -14,9 +14,15 @@
 //! inside the helper, so they are resolved here instead ([`resolve_path`]),
 //! reading their targets only as needed; a listing checks that the folders
 //! leading to it are still no links.
+//!
+//! Files and folders are copied out as a tar archive the helper writes
+//! ([`FileMount::copy_command`]), into a [`Staging`] place next to their
+//! destination on this machine.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Write as _};
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// Label marking Berth's own helper containers, which the UI hides.
 pub const HELPER_LABEL: &str = "no.ahse.berth.helper";
@@ -202,7 +208,8 @@ fn parent_path(path: &str) -> String {
 /// Where a path of the browsed tree leads once its symlinks are followed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
-    /// This directory, with no symlinks left in it.
+    /// This directory (or, from [`resolve_entry`], any entry), with no
+    /// symlinks left in its path.
     Real(String),
     /// The listing of this (real) directory is needed to go on.
     Needs(String),
@@ -221,6 +228,25 @@ pub enum Resolution {
 pub fn resolve_path<'a>(
     path: &str,
     confined: bool,
+    lookup: impl Fn(&str) -> Option<&'a Folder>,
+) -> Resolution {
+    resolve(path, confined, false, lookup)
+}
+
+/// [`resolve_path`] for any entry: `path` may lead to a file (or a special
+/// file) as well as to a folder, e.g. to copy it.
+pub fn resolve_entry<'a>(
+    path: &str,
+    confined: bool,
+    lookup: impl Fn(&str) -> Option<&'a Folder>,
+) -> Resolution {
+    resolve(path, confined, true, lookup)
+}
+
+fn resolve<'a>(
+    path: &str,
+    confined: bool,
+    any_entry: bool,
     lookup: impl Fn(&str) -> Option<&'a Folder>,
 ) -> Resolution {
     const MAX_LINKS: u32 = 40;
@@ -263,6 +289,7 @@ pub fn resolve_path<'a>(
                     pending.push_front(part.to_owned());
                 }
             }
+            _ if any_entry && pending.is_empty() => current = child,
             _ => {
                 return Resolution::Failed(format!("{} isn't a folder", display_name(&child)));
             }
@@ -533,13 +560,55 @@ impl FileMount {
     /// # Errors
     /// As [`FileMount::helper_path`].
     pub fn list_command(&self, path: &str) -> Result<Vec<String>, String> {
+        Ok(list_command(
+            &self.helper_path(path)?,
+            &self.on_the_way(path)?,
+        ))
+    }
+
+    /// The helper paths of the folders leading to real path `path`, and of
+    /// `path`.
+    fn on_the_way(&self, path: &str) -> Result<Vec<String>, String> {
         let mut checked = Vec::new();
         let mut prefix = String::new();
         for part in path.split('/').filter(|p| !p.is_empty()) {
             prefix = join_path(&prefix, part);
             checked.push(self.helper_path(&prefix)?);
         }
-        Ok(list_command(&self.helper_path(path)?, &checked))
+        Ok(checked)
+    }
+
+    /// The command telling the types of the folders leading to real path
+    /// `path` (`/A<raw mode hex>` each, as [`list_command`]'s checks, for
+    /// [`parse_listing`]), so a copy doesn't follow one replaced by a link
+    /// since it was resolved. `None` when no folder leads to it.
+    ///
+    /// # Errors
+    /// As [`FileMount::helper_path`].
+    pub fn check_command(&self, path: &str) -> Result<Option<Vec<String>>, String> {
+        let mut checked = self.on_the_way(path)?;
+        checked.pop();
+        if checked.is_empty() {
+            return Ok(None);
+        }
+        let mut command: Vec<String> = ["timeout", &LIST_TIMEOUT_SECS.to_string(), "find"]
+            .map(str::to_owned)
+            .to_vec();
+        command.extend(checked);
+        command.extend(
+            [
+                "-maxdepth",
+                "0",
+                "-exec",
+                "stat",
+                "-c",
+                CHECK_FORMAT,
+                "{}",
+                "+",
+            ]
+            .map(str::to_owned),
+        );
+        Ok(Some(command))
     }
 
     /// The command reading the targets of the symlinks in the folder at
@@ -585,6 +654,193 @@ impl FileMount {
         ]
         .map(str::to_owned)
         .to_vec())
+    }
+
+    /// The command writing the file or folder at real path `path` to stdout
+    /// as a tar archive, its entries named as [`archive_path`] expects.
+    /// Links in a folder are archived as links, not followed.
+    ///
+    /// # Errors
+    /// As [`FileMount::helper_path`].
+    pub fn copy_command(&self, path: &str) -> Result<Vec<String>, String> {
+        let helper = self.helper_path(path)?;
+        // The root (`/proc/1/root` is itself a link) as `.`; anything else
+        // as `./<name>` from its folder, so a leading `-` is no option.
+        let (dir, name) = if is_root(path) {
+            (helper.as_str(), ".".to_owned())
+        } else {
+            let (dir, name) = helper.rsplit_once('/').unwrap_or(("", &helper));
+            (if dir.is_empty() { "/" } else { dir }, format!("./{name}"))
+        };
+        Ok(["tar", "-c", "-f", "-", "-C", dir, &name]
+            .map(str::to_owned)
+            .to_vec())
+    }
+}
+
+fn is_root(path: &str) -> bool {
+    path.split('/').all(|part| part.is_empty() || part == ".")
+}
+
+/// Where an entry of [`FileMount::copy_command`]'s archive of real path
+/// `path` goes, relative to the copy's destination.
+///
+/// The copied entry is the destination itself. `entry` is the archived
+/// name's bytes, split at `/` only, as in the container. `None` for a name
+/// that would lead out of the destination, or that this system can't hold
+/// as one name (on Windows, one with `\`, `:` and the like).
+#[must_use]
+pub fn archive_path(path: &str, entry: &[u8]) -> Option<PathBuf> {
+    if entry.starts_with(b"/") {
+        return None;
+    }
+    let mut parts = entry
+        .split(|&b| b == b'/')
+        .filter(|part| !part.is_empty() && *part != b".");
+    // All but the root's entries start with the copied entry's name.
+    if !is_root(path) && parts.next().is_none_or(|name| name == b"..") {
+        return None;
+    }
+    parts.map(local_name).collect()
+}
+
+/// One name of an archived path, as a name here.
+#[cfg(unix)]
+fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
+    use std::os::unix::ffi::OsStrExt as _;
+    (part != b"..").then(|| std::ffi::OsStr::from_bytes(part))
+}
+
+/// One name of an archived path, as a name here.
+#[cfg(not(unix))]
+fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
+    let name = std::str::from_utf8(part).ok()?;
+    (name != ".." && windows_allows(name)).then(|| std::ffi::OsStr::new(name))
+}
+
+/// Whether Windows keeps `name` as it is: it drops a trailing dot or
+/// space, takes device names for devices whatever their extension, and
+/// refuses a few characters.
+#[must_use]
+pub fn windows_allows(name: &str) -> bool {
+    // `COM0`/`LPT0` too, which some versions take for devices.
+    const RESERVED: [&str; 32] = [
+        "CONIN$",
+        "CONOUT$",
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM0",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "COM\u{b9}",
+        "COM\u{b2}",
+        "COM\u{b3}",
+        "LPT0",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+        "LPT\u{b9}",
+        "LPT\u{b2}",
+        "LPT\u{b3}",
+    ];
+    let stem = name.split('.').next().unwrap_or(name);
+    !name.ends_with(['.', ' '])
+        && !RESERVED
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(stem.trim_end()))
+        && !name
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+}
+
+/// A temporary folder builder whose folders only the user can enter (on
+/// Unix), so nobody else reads a copy while it is written, nor an opened
+/// copy after.
+#[must_use]
+pub fn private_dir(prefix: &str) -> tempfile::Builder<'_, '_> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder
+}
+
+/// A copy being written in a folder of its own next to its destination.
+///
+/// It replaces whatever is there only once complete, with a rename.
+/// Dropped (failed, cancelled, or finished), the folder goes with what is
+/// left in it.
+#[derive(Debug)]
+pub struct Staging {
+    dir: tempfile::TempDir,
+    dest: PathBuf,
+}
+
+impl Staging {
+    /// # Errors
+    /// The staging folder can't be made next to `dest`.
+    pub fn new(dest: &Path) -> io::Result<Self> {
+        let parent = match dest.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        Ok(Self {
+            dir: private_dir(".berth-").tempdir_in(parent)?,
+            dest: dest.to_owned(),
+        })
+    }
+
+    /// Where the copy is written.
+    #[must_use]
+    pub fn path(&self) -> PathBuf {
+        self.dir.path().join("copy")
+    }
+
+    /// Move the copy to its destination. What was there is moved aside
+    /// first, and back if the copy can't take its place.
+    ///
+    /// # Errors
+    /// Nothing was written, or a move failed.
+    pub fn finish(self) -> io::Result<()> {
+        let copy = self.path();
+        std::fs::symlink_metadata(&copy)?;
+        let old = self.dir.path().join("old");
+        let replaced = match std::fs::rename(&self.dest, &old) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = std::fs::rename(&copy, &self.dest) {
+            if replaced && std::fs::rename(&old, &self.dest).is_err() {
+                // Something else took its place meanwhile: keep the
+                // original where it was moved, and say so.
+                let kept = self.dir.keep().join("old");
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{error}. What was there is kept at {}", kept.display()),
+                ));
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -890,6 +1146,125 @@ mod tests {
         assert_eq!(mount.helper_path("/").unwrap(), "/proc/1/root/");
         assert_eq!(mount.helper_path("/a\\\\b").unwrap(), "/proc/1/root/a\\b");
         assert!(mount.helper_path("/a\\200").is_err());
+    }
+
+    #[test]
+    fn links_resolve_to_files_for_copying() {
+        let tree = tree();
+        let entry = |path| resolve_entry(path, false, |dir| tree.get(dir));
+        assert_eq!(entry("/hosts"), Resolution::Real("/etc-hosts".into()));
+        assert_eq!(entry("/bin"), Resolution::Real("/usr/bin".into()));
+        // Only the last part may be a file.
+        assert!(matches!(entry("/hosts/x"), Resolution::Failed(m) if m.contains("isn't a folder")));
+        assert!(matches!(entry("/nope"), Resolution::Failed(m) if m.contains("doesn't exist")));
+    }
+
+    #[test]
+    fn copies_archive_the_entry_from_its_folder() {
+        let mount = FileMount::new("id".into(), CONTAINER_ROOT.into(), false, || {});
+        assert_eq!(
+            mount.copy_command("/etc/-n").unwrap(),
+            ["tar", "-c", "-f", "-", "-C", "/proc/1/root/etc", "./-n"]
+        );
+        assert_eq!(
+            mount.copy_command("/").unwrap(),
+            ["tar", "-c", "-f", "-", "-C", "/proc/1/root/", "."]
+        );
+        let volume = FileMount::new("id".into(), VOLUME_ROOT.into(), true, || {});
+        assert_eq!(
+            volume.copy_command("/x").unwrap(),
+            ["tar", "-c", "-f", "-", "-C", "/volume", "./x"]
+        );
+        assert!(mount.copy_command("/a\\\\200").is_ok());
+        assert!(mount.copy_command("/a\\200").is_err());
+        assert_eq!(mount.check_command("/x").unwrap(), None);
+        assert_eq!(
+            mount
+                .check_command("/a/b/c")
+                .unwrap()
+                .unwrap()
+                .get(2..5)
+                .unwrap(),
+            ["find", "/proc/1/root/a", "/proc/1/root/a/b"]
+        );
+    }
+
+    #[test]
+    fn archive_entries_stay_in_the_destination() {
+        let at = |path, entry: &str| archive_path(path, entry.as_bytes());
+        assert_eq!(at("/etc", "./etc/"), Some(PathBuf::new()));
+        assert_eq!(
+            at("/etc", "./etc/nginx/x.conf"),
+            Some("nginx/x.conf".into())
+        );
+        assert_eq!(at("/etc/hosts", "hosts"), Some(PathBuf::new()));
+        assert_eq!(at("/", "./"), Some(PathBuf::new()));
+        assert_eq!(at("/", "./bin/sh"), Some("bin/sh".into()));
+        assert_eq!(at("/etc", "./etc/../../x"), None);
+        assert_eq!(at("/etc", "/etc/passwd"), None);
+        assert_eq!(at("/etc", "../x"), None);
+        // Only `/` separates names, as in the container.
+        #[cfg(unix)]
+        assert_eq!(at("/etc", "./etc/a\\b").unwrap().iter().count(), 1);
+        #[cfg(windows)]
+        assert_eq!(at("/etc", "./etc/a\\b"), None);
+    }
+
+    #[test]
+    fn windows_names_are_told_apart() {
+        assert!(windows_allows("report.txt"));
+        assert!(windows_allows("console.log"));
+        for name in [
+            "AUX.txt",
+            "nul",
+            "com1 .tar.gz",
+            "COM\u{b9}.txt",
+            "lpt\u{b3}",
+            "CONIN$",
+            "conout$.log",
+            "a.",
+            "a ",
+            "a:b",
+            "a\\b",
+        ] {
+            assert!(!windows_allows(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn staged_copies_replace_their_destination_once_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(dest.join("old")).unwrap();
+        // Copies to the same place don't meet, nor can others look in.
+        let staging = Staging::new(&dest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let parent = staging.path().parent().unwrap().to_owned();
+            let mode = std::fs::metadata(parent).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let other = Staging::new(&dest).unwrap();
+        std::fs::write(staging.path(), "new").unwrap();
+        std::fs::write(other.path(), "other").unwrap();
+        drop(other);
+        staging.finish().unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        // Unfinished, a copy leaves nothing behind and the destination as it
+        // was.
+        let staging = Staging::new(&dest).unwrap();
+        std::fs::create_dir(staging.path()).unwrap();
+        std::fs::write(staging.path().join("part"), "x").unwrap();
+        drop(staging);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["out"]);
+        // Nothing written is an error, not an empty copy.
+        assert!(Staging::new(&dest).unwrap().finish().is_err());
+        assert!(dest.exists());
     }
 
     #[test]

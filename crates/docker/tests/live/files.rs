@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use berth_docker::{FileEntry, FileKind, FileMount, FilesTarget, Folder, Resolution, resolve_path};
@@ -139,6 +142,7 @@ fn browse_a_container(engine: &BollardEngine, runtime: &Runtime, docker: &Docker
         block_on(engine.list_files(&mount, "/etc/hosts")),
         Err(EngineError::NotFound(_))
     ));
+    copy_out_of_a_container(engine, runtime, docker, id, &mount);
     // A folder replaced by a link since it was resolved isn't followed
     // inside the helper.
     assert_eq!(names(&list(engine, &mount, "/t/real").unwrap()), ["in"]);
@@ -152,6 +156,88 @@ fn browse_a_container(engine: &BollardEngine, runtime: &Runtime, docker: &Docker
     assert!(error.to_string().contains("changed"), "{error}");
     drop(mount);
     wait_for_no_helpers(runtime, docker);
+}
+
+fn copy(engine: &BollardEngine, mount: &FileMount, path: &str, dest: &Path) -> u64 {
+    let copied = Arc::new(AtomicU64::new(0));
+    block_on(engine.copy_out(mount, path, dest, copied.clone())).unwrap();
+    copied.load(Ordering::Relaxed)
+}
+
+fn copy_out_of_a_container(
+    engine: &BollardEngine,
+    runtime: &Runtime,
+    docker: &Docker,
+    id: &str,
+    mount: &FileMount,
+) {
+    exec_sh(
+        runtime,
+        docker,
+        id,
+        "mkdir -p /c/in && cd /c && printf hi > hi && chmod 750 hi && ln hi hard && mkfifo pipe && \
+         head -c 3000000 /dev/urandom > big && ln -s /etc/hostname host",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let hi = dir.path().join("hi");
+    assert_eq!(copy(engine, mount, "/c/hi", &hi), 2);
+    assert_eq!(std::fs::read(&hi).unwrap(), b"hi");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&hi).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750);
+    }
+
+    // A folder: links stay links, even to what the helper has too; hard
+    // links are kept; pipes are left out.
+    let real = dir.path().join("real");
+    assert!(copy(engine, mount, "/c", &real) >= 3_000_002);
+    assert_eq!(
+        std::fs::metadata(real.join("big")).unwrap().len(),
+        3_000_000
+    );
+    assert_eq!(std::fs::read(real.join("hard")).unwrap(), b"hi");
+    assert!(real.join("in").is_dir());
+    assert!(std::fs::symlink_metadata(real.join("pipe")).is_err());
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::read_link(real.join("host")).unwrap(),
+        Path::new("/etc/hostname")
+    );
+
+    // Odd names, and a copy over what is there: a folder replaces a file.
+    copy(engine, mount, "/t", &hi);
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        let names: Vec<Vec<u8>> = std::fs::read_dir(&hi)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().as_bytes().to_vec())
+            .collect();
+        assert!(names.contains(&b"a\x80".to_vec()));
+        assert!(names.contains(&b"nl\nname".to_vec()));
+    }
+
+    // A folder replaced by a link since it was resolved isn't followed
+    // inside the helper.
+    exec_sh(runtime, docker, id, "mv /c /c-moved && ln -s /etc /c");
+    let error = block_on(engine.copy_out(mount, "/c/hi", &dir.path().join("x"), Arc::default()))
+        .unwrap_err();
+    assert!(error.to_string().contains("changed"), "{error}");
+
+    // A failure leaves nothing behind.
+    let missing = dir.path().join("missing");
+    assert!(matches!(
+        block_on(engine.copy_out(mount, "/t/nope", &missing, Arc::default())),
+        Err(EngineError::NotFound(_))
+    ));
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["hi", "real"]);
 }
 
 /// A container in another's process namespace isn't its process 1.
@@ -274,6 +360,15 @@ fn browse_a_volume(endpoint: &Endpoint, runtime: &Runtime, docker: &Docker, name
     let helper = block_on(engine.inspect_container(&mount.container)).unwrap();
     assert!(helper.is_helper());
     assert_eq!(list(&engine, &mount, "/").unwrap(), []);
+    // The volume's root copies as a folder.
+    let dir = tempfile::tempdir().unwrap();
+    copy(&engine, &mount, "/", &dir.path().join("volume"));
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("volume"))
+            .unwrap()
+            .count(),
+        0
+    );
 
     // Dropping the engine first must not strand the helper.
     let helper_id = mount.container.clone();

@@ -2,13 +2,17 @@
 //! volume, seen through helpers that appear in the container list like the
 //! live ones.
 
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use futures::future::BoxFuture;
 
 use super::{FixtureEngine, FixtureState};
 use crate::{
     CONTAINER_ROOT, Container, ContainerState, EngineError, EngineResult, EventAction, FileEntry,
     FileKind, FileMount, FilesTarget, HELPER_IMAGE, HELPER_LABEL, Mount, MountKind, ObjectKind,
-    VOLUME_ROOT, sort_entries,
+    Staging, VOLUME_ROOT, join_path, sort_entries,
 };
 
 const MODIFIED: i64 = 1_791_000_000;
@@ -216,6 +220,64 @@ impl FixtureEngine {
                 .ok_or_else(|| EngineError::NotFound("Invalid argument".into()))
         })
     }
+
+    pub(super) fn fixture_copy_out(
+        &self,
+        mount: &FileMount,
+        path: &str,
+        dest: &Path,
+        copied: Arc<AtomicU64>,
+    ) -> BoxFuture<'static, EngineResult<()>> {
+        let (helper, confined, path) = (mount.container.clone(), mount.confined, path.to_owned());
+        let dest = dest.to_owned();
+        self.mutate(move |s| {
+            helper_exists(s, &helper)?;
+            let kind = if path == "/" {
+                FileKind::Directory
+            } else {
+                let (parent, name) = path.rsplit_once('/').unwrap_or(("", &path));
+                let parent = if parent.is_empty() { "/" } else { parent };
+                listing(confined, parent)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|e| e.name == name)
+                    .ok_or_else(|| EngineError::NotFound("No such file or directory".into()))?
+                    .kind
+            };
+            let staging = Staging::new(&dest).map_err(|e| EngineError::writing(&e))?;
+            copy_tree(confined, &path, kind, &staging.path(), &copied)?;
+            staging.finish().map_err(|e| EngineError::writing(&e))
+        })
+    }
+}
+
+/// Write the entry at `path` to `to`: a file holds its own path; links and
+/// special files are left out.
+fn copy_tree(
+    confined: bool,
+    path: &str,
+    kind: FileKind,
+    to: &Path,
+    copied: &AtomicU64,
+) -> EngineResult<()> {
+    match kind {
+        FileKind::Directory => {
+            let entries = listing(confined, path)
+                .ok_or_else(|| EngineError::NotFound("Permission denied".into()))?;
+            std::fs::create_dir(to).map_err(|e| EngineError::writing(&e))?;
+            for entry in entries {
+                let child = join_path(path, &entry.name);
+                copy_tree(confined, &child, entry.kind, &to.join(&entry.name), copied)?;
+            }
+        }
+        FileKind::File => {
+            let content = format!("{path}\n");
+            std::fs::write(to, &content).map_err(|e| EngineError::writing(&e))?;
+            copied.fetch_add(u64::try_from(content.len()).unwrap_or(0), Ordering::Relaxed);
+        }
+        FileKind::Symlink | FileKind::Other => {}
+    }
+    Ok(())
 }
 
 /// The tree a helper sees: a volume's, or a container's.
@@ -298,6 +360,35 @@ mod tests {
         ));
         assert!(matches!(
             block_on(engine.open_files(&FilesTarget::Volume("missing".into()))),
+            Err(EngineError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn files_and_folders_copy_out() {
+        let engine = FixtureEngine::default();
+        let target = FilesTarget::Container(running(&engine).id);
+        let mount = block_on(engine.open_files(&target)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let copied = Arc::new(AtomicU64::new(0));
+        let copy =
+            |path: &str, dest: &Path| block_on(engine.copy_out(&mount, path, dest, copied.clone()));
+        copy("/etc/hosts", &dir.path().join("hosts")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hosts")).unwrap(),
+            "/etc/hosts\n"
+        );
+        copy("/etc/nginx", &dir.path().join("nginx")).unwrap();
+        assert!(dir.path().join("nginx/conf.d/default.conf").is_file());
+        assert!(copied.load(Ordering::Relaxed) > 0);
+        // A failed copy leaves nothing.
+        assert!(matches!(
+            copy("/root", &dir.path().join("root")),
+            Err(EngineError::NotFound(_))
+        ));
+        assert!(!dir.path().join("root").exists());
+        assert!(matches!(
+            copy("/missing", &dir.path().join("missing")),
             Err(EngineError::NotFound(_))
         ));
     }

@@ -1,29 +1,44 @@
 //! Browsing files through a helper container (see [`crate::files`]):
-//! starting it, keeping it alive, removing it, and running its commands.
+//! starting it, keeping it alive, removing it, running its commands, and
+//! unpacking what it copies out.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, UNIX_EPOCH};
 
 use bollard::{
     Docker,
     container::LogOutput,
+    errors::Error as BollardError,
     exec::{StartExecOptions, StartExecResults},
     models::{ContainerCreateBody, ExecConfig, HostConfig},
     query_parameters as query,
 };
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use futures::{FutureExt as _, StreamExt as _};
+use futures::{FutureExt as _, Stream, StreamExt as _};
+use tar::EntryType;
 
 use super::{BollardEngine, client, mapping};
 use crate::{
     CONTAINER_ROOT, Endpoint, EngineError, EngineResult, FileEntry, FileKind, FileMount,
-    FilesTarget, HELPER_IMAGE, HELPER_LABEL, LIST_TIMEOUT_SECS, VOLUME_ROOT, apply_link_targets,
-    escape_name, parse_listing,
+    FilesTarget, HELPER_IMAGE, HELPER_LABEL, LIST_TIMEOUT_SECS, Staging, VOLUME_ROOT,
+    apply_link_targets, archive_path, escape_name, parse_listing,
 };
 
 /// Output larger than this fails rather than being buffered.
 const MAX_OUTPUT: usize = 32 << 20;
+
+/// A copy's error output kept, at most.
+const MAX_STDERR: usize = 64 << 10;
+
+/// Chunks of a copy in flight to its unpacking, at most.
+const COPY_CHUNKS: usize = 16;
 
 /// Helpers stuck unstarted for this long are orphans.
 const ORPHAN_AGE_SECS: i64 = 600;
@@ -115,6 +130,418 @@ impl BollardEngine {
             }
         })
     }
+
+    pub(super) fn live_copy_out(
+        &self,
+        mount: &FileMount,
+        path: &str,
+        dest: &Path,
+        copied: Arc<AtomicU64>,
+    ) -> BoxFuture<'static, EngineResult<()>> {
+        let docker = self.docker.clone();
+        let helper = mount.container.clone();
+        let command = mount.copy_command(path).map_err(EngineError::Unsupported);
+        let check = mount.check_command(path).map_err(EngineError::Unsupported);
+        let (path, dest) = (path.to_owned(), dest.to_owned());
+        self.spawn(async move {
+            let command = command?;
+            if let Some(check) = check? {
+                match run(&docker, &helper, check, RUN_DEADLINE).await? {
+                    (0, output, _) => {
+                        parse_listing("/", &output).map_err(EngineError::Unsupported)?;
+                    }
+                    (124 | 143, _, _) => return Err(timed_out()),
+                    (_, _, stderr) => return Err(EngineError::NotFound(command_error(&stderr))),
+                }
+            }
+            // Unpacked as it arrives, on a thread of its own, where the
+            // staging is made (the destination may be a slow mount) and
+            // goes with it, so a cancelled copy is removed only once that
+            // thread is done writing it, and comes back as `Staged`, so a
+            // result nobody collects is removed off the engine's workers.
+            let (sender, chunks) = tokio::sync::mpsc::channel(COPY_CHUNKS);
+            let mut unpacking = tokio::task::spawn_blocking(move || {
+                let staging = Staging::new(&dest)?;
+                unpack(Chunks::new(chunks), &staging.path(), &path, &copied)
+                    .map(|()| Staged(Some(staging)))
+            });
+            let (exec, mut output) = start(&docker, &helper, command).await?;
+            let mut stderr = Vec::new();
+            let mut unpacked = None;
+            // A hung network mount stalls the copy; a long one is fine.
+            while let Some(frame) = tokio::time::timeout(RUN_DEADLINE, output.next())
+                .await
+                .map_err(|_| stalled())?
+            {
+                match frame.map_err(mapping::error)? {
+                    LogOutput::StdErr { message } => {
+                        if stderr.len() < MAX_STDERR {
+                            stderr.extend_from_slice(&message);
+                        }
+                    }
+                    LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                        if unpacked.is_none() && sender.send(message.into()).await.is_err() {
+                            // The unpacking stopped before the output did:
+                            // at the archive's end, or failing the copy.
+                            let staged = joined(&mut unpacking)
+                                .await?
+                                .map_err(|e| EngineError::writing(&e))?;
+                            unpacked = Some(staged);
+                        }
+                    }
+                    LogOutput::StdIn { .. } => {}
+                }
+            }
+            drop((output, sender));
+            let unpacked = match unpacked {
+                Some(staged) => Ok(staged),
+                None => joined(&mut unpacking).await?,
+            };
+            // Only an exit status says the archive is complete; a failed
+            // `tar` explains a broken archive best.
+            if exit_code(&docker, &exec).await? != 0 {
+                return Err(EngineError::NotFound(tar_error(&stderr)));
+            }
+            unpacked
+                .map_err(|e| EngineError::writing(&e))?
+                .finish()
+                .await
+        })
+    }
+}
+
+/// A staged copy held on an engine worker. Moving it into place, or
+/// removing it when dropped (failed or cancelled), can take a while, which
+/// isn't the workers' to spend: both run on a blocking thread.
+struct Staged(Option<Staging>);
+
+impl Staged {
+    /// Finish the copy, unless dropped (cancelled) before the blocking
+    /// thread gets to it.
+    async fn finish(mut self) -> EngineResult<()> {
+        let Some(staging) = self.0.take() else {
+            return Ok(());
+        };
+        let (_alive, cancelled) = oneshot::channel::<()>();
+        let mut finished = tokio::task::spawn_blocking(move || {
+            let mut cancelled = cancelled;
+            match cancelled.try_recv() {
+                Err(oneshot::Canceled) => Ok(()),
+                Ok(_) => staging.finish(),
+            }
+        });
+        joined(&mut finished)
+            .await?
+            .map_err(|e| EngineError::writing(&e))
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(staging) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            drop(runtime.spawn_blocking(move || drop(staging)));
+        }
+    }
+}
+
+async fn joined<T>(task: &mut tokio::task::JoinHandle<T>) -> EngineResult<T> {
+    task.await
+        .map_err(|error| EngineError::Transport(error.to_string()))
+}
+
+fn stalled() -> EngineError {
+    EngineError::Unsupported(format!(
+        "Nothing arrived for {LIST_TIMEOUT_SECS} seconds. The file may be on an unresponsive \
+         network mount."
+    ))
+}
+
+/// `tar: can't open './x': Permission denied` → `Can't open './x':
+/// Permission denied`.
+fn tar_error(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let line = stderr.lines().next().unwrap_or_default();
+    let line = line.strip_prefix("tar: ").unwrap_or(line);
+    let mut chars = line.chars();
+    chars.next().map_or_else(
+        || "Couldn't copy this".to_owned(),
+        |first| first.to_uppercase().chain(chars).collect(),
+    )
+}
+
+/// The archive as it arrives, read on the unpacking thread.
+struct Chunks {
+    receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    chunk: Vec<u8>,
+    read: usize,
+}
+
+impl Chunks {
+    const fn new(receiver: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            receiver,
+            chunk: Vec::new(),
+            read: 0,
+        }
+    }
+}
+
+impl Read for Chunks {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut rest = self.chunk.get(self.read..).unwrap_or_default();
+            if !rest.is_empty() {
+                let read = rest.read(buf)?;
+                self.read = self.read.saturating_add(read);
+                return Ok(read);
+            }
+            // The sender gone, the archive ends (cut short if cancelled).
+            match self.receiver.blocking_recv() {
+                Some(chunk) => (self.chunk, self.read) = (chunk, 0),
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
+/// Unpack [`FileMount::copy_command`]'s archive of real path `path` into
+/// `to`, adding the bytes of file data written to `copied`.
+fn unpack(archive: impl Read, to: &Path, path: &str, copied: &AtomicU64) -> io::Result<()> {
+    let mut archive = tar::Archive::new(Ended::from(archive));
+    let mut made = HashSet::new();
+    // Folder permissions, set once their entries are written.
+    #[cfg(unix)]
+    let mut folders = Vec::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let name = entry.path_bytes().into_owned();
+        let rel = relative(path, &name)?;
+        let kind = entry.header().entry_type();
+        // The copied entry itself was a file or folder when resolved; a
+        // link now would be followed where the copy is opened.
+        if rel.as_os_str().is_empty()
+            && !matches!(
+                kind,
+                EntryType::Regular | EntryType::Continuous | EntryType::Directory
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "This changed since it was listed. Reload to see it.",
+            ));
+        }
+        let target = place(to, &rel, &mut made)?;
+        let written = match kind {
+            EntryType::Directory => {
+                if !target.is_dir() {
+                    fs::create_dir(&target)?;
+                }
+                #[cfg(unix)]
+                if let Ok(mode) = entry.header().mode() {
+                    folders.push((target.clone(), mode));
+                }
+                true
+            }
+            EntryType::Regular | EntryType::Continuous => {
+                write_file(&mut entry, &target, copied)?;
+                true
+            }
+            #[cfg(unix)]
+            EntryType::Symlink => {
+                let link = entry.link_name()?.ok_or_else(|| unexpected(&name))?;
+                std::os::unix::fs::symlink(link, &target)?;
+                true
+            }
+            EntryType::Link => {
+                let source = entry.link_name_bytes().ok_or_else(|| unexpected(&name))?;
+                let source = to.join(relative(path, &source)?);
+                // Only to what was copied already, never followed: a file
+                // is linked, a symlink made again.
+                let copied = fs::symlink_metadata(&source)
+                    .ok()
+                    .filter(|_| made.contains(&source));
+                match copied {
+                    Some(meta) if meta.is_file() => {
+                        fs::hard_link(&source, &target)
+                            .or_else(|_| fs::copy(&source, &target).map(drop))?;
+                        true
+                    }
+                    #[cfg(unix)]
+                    Some(meta) if meta.is_symlink() => {
+                        std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
+                        true
+                    }
+                    // To what was left out.
+                    _ => false,
+                }
+            }
+            // Devices, pipes and sockets (and links, on Windows).
+            _ => false,
+        };
+        // Only what is written may be found again (or linked to): a name
+        // left out may be another's, by case.
+        if written {
+            made.insert(target);
+        }
+    }
+    // Input ending before the end-of-archive blocks is a copy cut short,
+    // which the archive reader takes for its end.
+    if archive.into_inner().ended {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "the copy ended early",
+        ));
+    }
+    // Deepest first, kept open to the user, as files are.
+    #[cfg(unix)]
+    for (folder, mode) in folders.into_iter().rev() {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(folder, fs::Permissions::from_mode((mode & 0o777) | 0o700))?;
+    }
+    Ok(())
+}
+
+/// A reader telling whether it was read to its end.
+struct Ended<R> {
+    inner: R,
+    ended: bool,
+}
+
+impl<R> From<R> for Ended<R> {
+    fn from(inner: R) -> Self {
+        Self {
+            inner,
+            ended: false,
+        }
+    }
+}
+
+impl<R: Read> Read for Ended<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read == 0 && !buf.is_empty() {
+            self.ended = true;
+        }
+        Ok(read)
+    }
+}
+
+fn relative(path: &str, name: &[u8]) -> io::Result<PathBuf> {
+    archive_path(path, name).ok_or_else(|| unexpected(name))
+}
+
+fn unexpected(name: &[u8]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "{} can't be copied here: its name leads out of the copy or isn't allowed",
+            String::from_utf8_lossy(name)
+        ),
+    )
+}
+
+/// `to` joined with `rel`, the folders on the way created as needed.
+///
+/// Everything under `to` is made here, and recorded in `made` once
+/// written, so finding anything else on the way (a link, which could lead
+/// out of `to`) or at the end is a clash: two names the file system doesn't
+/// tell apart, e.g. by case. What an earlier entry of the same name made is
+/// replaced, unless a folder.
+fn place(to: &Path, rel: &Path, made: &mut HashSet<PathBuf>) -> io::Result<PathBuf> {
+    let mut parts = rel.iter();
+    let last = parts.next_back();
+    let mut at = to.to_owned();
+    if last.is_some() {
+        folder(to, &at, made)?;
+    }
+    for part in parts {
+        at.push(part);
+        folder(to, &at, made)?;
+    }
+    if let Some(last) = last {
+        at.push(last);
+    }
+    match fs::symlink_metadata(&at) {
+        Ok(_) if !made.contains(&at) => return Err(clash(to, &at)),
+        Ok(meta) if !meta.is_dir() => fs::remove_file(&at)?,
+        _ => {}
+    }
+    Ok(at)
+}
+
+fn folder(to: &Path, at: &Path, made: &mut HashSet<PathBuf>) -> io::Result<()> {
+    match fs::symlink_metadata(at) {
+        Ok(meta) if meta.is_dir() && made.contains(at) => Ok(()),
+        Ok(_) => Err(clash(to, at)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(at)?;
+            made.insert(at.to_owned());
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn clash(to: &Path, at: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "{} clashes with another name in the copy, e.g. one differing only in case",
+            at.strip_prefix(to).unwrap_or(at).display()
+        ),
+    )
+}
+
+/// Write a file entry to `target`, with its modification time and (on
+/// Unix) permissions, kept readable and writable by the user.
+fn write_file<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    target: &Path,
+    copied: &AtomicU64,
+) -> io::Result<()> {
+    let mut file = fs::File::create(target)?;
+    io::copy(
+        entry,
+        &mut Counted {
+            inner: &mut file,
+            copied,
+        },
+    )?;
+    let header = entry.header();
+    if let Some(time) = header
+        .mtime()
+        .ok()
+        .and_then(|secs| UNIX_EPOCH.checked_add(Duration::from_secs(secs)))
+    {
+        let _ = file.set_modified(time);
+    }
+    #[cfg(unix)]
+    if let Ok(mode) = header.mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode((mode & 0o777) | 0o600))?;
+    }
+    Ok(())
+}
+
+/// A writer counting what it writes into `copied`.
+struct Counted<'a, W> {
+    inner: W,
+    copied: &'a AtomicU64,
+}
+
+impl<W: Write> Write for Counted<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.copied
+            .fetch_add(u64::try_from(written).unwrap_or(0), Ordering::Relaxed);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Where the helper sees `target`'s files, and whether links must stay
@@ -199,11 +626,10 @@ async fn run(
         .unwrap_or_else(|_| Err(timed_out()))
 }
 
-async fn run_to_end(
-    docker: &Docker,
-    id: &str,
-    command: Vec<String>,
-) -> EngineResult<(i64, Vec<u8>, Vec<u8>)> {
+type Output = Pin<Box<dyn Stream<Item = Result<LogOutput, BollardError>> + Send>>;
+
+/// Start `command` in helper `id`: the exec's ID and its output.
+async fn start(docker: &Docker, id: &str, command: Vec<String>) -> EngineResult<(String, Output)> {
     let created = docker
         .create_exec(
             id,
@@ -217,13 +643,22 @@ async fn run_to_end(
         )
         .await
         .map_err(mapping::error)?;
-    let StartExecResults::Attached { mut output, .. } = docker
+    let StartExecResults::Attached { output, .. } = docker
         .start_exec(&created.id, None::<StartExecOptions>)
         .await
         .map_err(mapping::error)?
     else {
         return Err(EngineError::Transport("exec unexpectedly detached".into()));
     };
+    Ok((created.id, output))
+}
+
+async fn run_to_end(
+    docker: &Docker,
+    id: &str,
+    command: Vec<String>,
+) -> EngineResult<(i64, Vec<u8>, Vec<u8>)> {
+    let (exec, mut output) = start(docker, id, command).await?;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     while let Some(frame) = output.next().await {
@@ -243,7 +678,7 @@ async fn run_to_end(
     drop(output);
     // The stream also ends if the connection drops: only an exit status
     // says the output is complete.
-    let code = exit_code(docker, &created.id).await?;
+    let code = exit_code(docker, &exec).await?;
     Ok((code, stdout, stderr))
 }
 
@@ -518,6 +953,138 @@ mod tests {
         assert!(matches!(result, Err(EngineError::Unsupported(m)) if m.contains("longer than")));
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(listener);
+    }
+
+    /// An archive of `entries` (name, type, data or link target), cut
+    /// before its end-of-archive blocks unless `end`.
+    fn archive(entries: &[(&str, EntryType, &str)], end: bool) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for &(name, kind, data) in entries {
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(kind);
+            header.set_mode(if kind == EntryType::Directory {
+                0o700
+            } else {
+                0o644
+            });
+            let body = match kind {
+                EntryType::Regular => data.as_bytes(),
+                EntryType::Symlink | EntryType::Link => {
+                    header.set_link_name(data).unwrap();
+                    b""
+                }
+                _ => b"",
+            };
+            header.set_size(u64::try_from(body.len()).unwrap());
+            builder.append_data(&mut header, name, body).unwrap();
+        }
+        let mut bytes = builder.into_inner().unwrap();
+        if !end {
+            bytes.truncate(bytes.len().saturating_sub(1024));
+        }
+        bytes
+    }
+
+    fn unpacked(
+        entries: &[(&str, EntryType, &str)],
+        end: bool,
+    ) -> (tempfile::TempDir, io::Result<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let to = dir.path().join("copy");
+        let result = unpack(&archive(entries, end)[..], &to, "/d", &AtomicU64::new(0));
+        (dir, result)
+    }
+
+    #[test]
+    fn folders_unpack_inside_their_copy() {
+        let (dir, result) = unpacked(
+            &[
+                ("./d/", EntryType::Directory, ""),
+                ("./d/a", EntryType::Regular, "hi"),
+                ("./d/b", EntryType::Link, "./d/a"),
+                ("./d/a", EntryType::Regular, "again"),
+                ("./d/s", EntryType::Symlink, "/etc/hostname"),
+                ("./d/t", EntryType::Link, "./d/s"),
+                ("./d/p", EntryType::Fifo, ""),
+                ("./d/q", EntryType::Link, "./d/p"),
+            ],
+            true,
+        );
+        result.unwrap();
+        let copy = dir.path().join("copy");
+        assert_eq!(fs::read_to_string(copy.join("a")).unwrap(), "again");
+        assert_eq!(fs::read_to_string(copy.join("b")).unwrap(), "hi");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(copy.join("t")).unwrap(),
+            Path::new("/etc/hostname")
+        );
+        // What was left out isn't linked to either.
+        assert!(fs::symlink_metadata(copy.join("q")).is_err());
+        // Folders keep their permissions, as files do.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&copy).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // Cut short at an entry's end, it isn't complete.
+        let (_dir, result) = unpacked(
+            &[
+                ("./d/", EntryType::Directory, ""),
+                ("./d/a", EntryType::Regular, "hi"),
+            ],
+            false,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn unpacking_never_writes_through_a_link() {
+        let (dir, result) = unpacked(
+            &[
+                ("./d/", EntryType::Directory, ""),
+                ("./d/out", EntryType::Symlink, "/tmp"),
+                ("./d/out/x", EntryType::Regular, "escaped"),
+            ],
+            true,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(fs::symlink_metadata(dir.path().join("copy/out")).is_ok());
+        // Nor is the copied entry itself a link now.
+        let (_dir, result) = unpacked(&[("./d", EntryType::Symlink, "/etc/passwd")], true);
+        assert!(result.unwrap_err().to_string().contains("changed"));
+    }
+
+    #[test]
+    fn a_cancelled_copy_never_takes_its_place() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::write(&dest, "original").unwrap();
+        let staging = Staging::new(&dest).unwrap();
+        fs::write(staging.path(), "copy").unwrap();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        runtime.block_on(async {
+            let busy = tokio::task::spawn_blocking(move || wait.recv());
+            // Finishing waits behind the busy thread, and is cancelled.
+            let mut finish = Box::pin(Staged(Some(staging)).finish());
+            assert!(futures::poll!(&mut finish).is_pending());
+            drop(finish);
+            release.send(()).unwrap();
+            busy.await.unwrap().unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        });
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "original");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["dest"]);
     }
 
     #[test]

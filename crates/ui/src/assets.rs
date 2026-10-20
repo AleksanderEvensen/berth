@@ -58,6 +58,7 @@ icon_assets![
     (MONITOR, "monitor"),
     (FOLDER, "folder"),
     (FILE, "file"),
+    (DOWNLOAD, "download"),
     (COPY, "copy"),
     (LIST, "list"),
     (CLOSE, "close"),

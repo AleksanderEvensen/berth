@@ -22,14 +22,19 @@ with a note saying what is missing.
 
 - [x] macOS release: the `.dmg` is built, signed and notarized; v0.1.0
       ships `Berth_0.1.0_universal.dmg`.
-- [ ] B9 — Container Files tab. Browsing is in for any running container.
-      Stopped containers can't be browsed, nor ones sharing another's process
-      namespace (`--pid=host`, `--pid=container:…`). Missing: opening and
-      downloading files (below).
-- [ ] Files: open a file with double-click / Enter in the program the OS
-      picks (copy it out of the container to a temp file first), and
-      download files and folders. `FileTree::on_open` already fires; nothing
-      handles it yet.
+- [ ] B9 — Container Files tab. Browsing, opening and downloading are in
+      for any running container. Missing: stopped containers can't be
+      browsed, nor ones sharing another's process namespace (`--pid=host`,
+      `--pid=container:…`).
+- [x] Files: open a file with double-click / Enter (or Open) in the program
+      the OS picks, from a copy in a temporary folder, and download files and
+      folders (Download, with a save dialog), in container and volume Files
+      tabs. Progress and errors show below the tree. Copies go through the
+      helper's `tar`, so they work over SSH too (not yet checked against a
+      real remote). Later: links inside a downloaded folder are left out on
+      Windows; pseudo-files that report no size (`/proc`, `/sys`) copy
+      empty; opened copies stay in the temporary folder, and edits to them
+      don't go back into the container.
 - [ ] B12 — Run-container form.
 - [ ] H3 — Rebind keyboard shortcuts.
 - [x] A3 — Command palette (`ctrl+k` / `cmd+k`): runs any command in the
