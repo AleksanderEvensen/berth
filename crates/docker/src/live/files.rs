@@ -183,7 +183,7 @@ impl BollardEngine {
                             let staging = joined(&mut unpacking)
                                 .await?
                                 .map_err(|e| EngineError::writing(&e))?;
-                            unpacked = Some(staging);
+                            unpacked = Some(Staged(Some(staging)));
                         }
                     }
                     LogOutput::StdIn { .. } => {}
@@ -191,27 +191,57 @@ impl BollardEngine {
             }
             drop((output, sender));
             let unpacked = match unpacked {
-                Some(staging) => Ok(staging),
-                None => joined(&mut unpacking).await?,
+                Some(staged) => Ok(staged),
+                None => joined(&mut unpacking)
+                    .await?
+                    .map(|staging| Staged(Some(staging))),
             };
             // Only an exit status says the archive is complete; a failed
             // `tar` explains a broken archive best.
-            let failed = exit_code(&docker, &exec).await? != 0;
-            // Moving into place and removing what was there can take a
-            // while, which isn't the engine's workers' to spend.
-            let mut finished = tokio::task::spawn_blocking(move || {
-                if failed {
-                    drop(unpacked);
-                    return Ok(false);
-                }
-                unpacked.and_then(Staging::finish).map(|()| true)
-            });
-            match joined(&mut finished).await? {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(EngineError::NotFound(tar_error(&stderr))),
-                Err(error) => Err(EngineError::writing(&error)),
+            if exit_code(&docker, &exec).await? != 0 {
+                return Err(EngineError::NotFound(tar_error(&stderr)));
             }
+            unpacked
+                .map_err(|e| EngineError::writing(&e))?
+                .finish()
+                .await
         })
+    }
+}
+
+/// A staged copy held on an engine worker. Moving it into place, or
+/// removing it when dropped (failed or cancelled), can take a while, which
+/// isn't the workers' to spend: both run on a blocking thread.
+struct Staged(Option<Staging>);
+
+impl Staged {
+    /// Finish the copy, unless dropped (cancelled) before the blocking
+    /// thread gets to it.
+    async fn finish(mut self) -> EngineResult<()> {
+        let Some(staging) = self.0.take() else {
+            return Ok(());
+        };
+        let (_alive, cancelled) = oneshot::channel::<()>();
+        let mut finished = tokio::task::spawn_blocking(move || {
+            let mut cancelled = cancelled;
+            match cancelled.try_recv() {
+                Err(oneshot::Canceled) => Ok(()),
+                Ok(_) => staging.finish(),
+            }
+        });
+        joined(&mut finished)
+            .await?
+            .map_err(|e| EngineError::writing(&e))
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if let Some(staging) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            drop(runtime.spawn_blocking(move || drop(staging)));
+        }
     }
 }
 
@@ -1023,6 +1053,37 @@ mod tests {
         // Nor is the copied entry itself a link now.
         let (_dir, result) = unpacked(&[("./d", EntryType::Symlink, "/etc/passwd")], true);
         assert!(result.unwrap_err().to_string().contains("changed"));
+    }
+
+    #[test]
+    fn a_cancelled_copy_never_takes_its_place() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::write(&dest, "original").unwrap();
+        let staging = Staging::new(&dest).unwrap();
+        fs::write(staging.path(), "copy").unwrap();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        runtime.block_on(async {
+            let busy = tokio::task::spawn_blocking(move || wait.recv());
+            // Finishing waits behind the busy thread, and is cancelled.
+            let mut finish = Box::pin(Staged(Some(staging)).finish());
+            assert!(futures::poll!(&mut finish).is_pending());
+            drop(finish);
+            release.send(()).unwrap();
+            busy.await.unwrap().unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        });
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "original");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["dest"]);
     }
 
     #[test]
