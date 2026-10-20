@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use berth_ui::{
     Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, ScrollStep, Sidebar, SidebarItem,
-    SidebarSection, TabStop, Theme, Toast, ToastKind, icons, item_list, modal_overlay,
+    SidebarSection, TabStop, Theme, Toast, ToastKind, icons, item_list, modal_backdrop,
     reveal_when_focused, scroll_active_pane, sidebar_glyph, status_dot, tab_stop,
 };
 use gpui::{
@@ -15,14 +15,16 @@ use gpui::{
 };
 
 use crate::chrome;
-use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
+use gpui_base::{AlertDialog, AlertDialogPopup};
+
+use crate::dialogs::ConfirmRequest;
 use crate::keymap::{
     ClearSelection, Collapse, CursorNext, CursorPrev, DeleteSelected, Expand, ExtendFirst,
-    ExtendLast, ExtendNext, ExtendPrev, FocusNext, FocusPrev, FocusSearch, GoActivity, GoCleanup,
-    GoContainers, GoImages, GoNetworks, GoVolumes, OpenPort, OpenSettings, Restart, ScrollBottom,
-    ScrollPageDown, ScrollPageUp, ScrollTop, SelectAll, SelectFirst, SelectLast, SelectNext,
-    SelectPrev, ShowFiles, ShowInfo, ShowLogs, ShowShortcuts, ShowStats, ShowTerminal,
-    TogglePalette, ToggleRunning, ToggleSelected, ToggleSidebar,
+    ExtendLast, ExtendNext, ExtendPrev, FocusSearch, GoActivity, GoCleanup, GoContainers, GoImages,
+    GoNetworks, GoVolumes, OpenPort, OpenSettings, Restart, ScrollBottom, ScrollPageDown,
+    ScrollPageUp, ScrollTop, SelectAll, SelectFirst, SelectLast, SelectNext, SelectPrev, ShowFiles,
+    ShowInfo, ShowLogs, ShowShortcuts, ShowStats, ShowTerminal, TogglePalette, ToggleRunning,
+    ToggleSelected, ToggleSidebar,
 };
 use crate::palette::{Palette, PaletteEvent, Target};
 use crate::preferences;
@@ -66,6 +68,14 @@ struct ToastItem {
     detail: SharedString,
 }
 
+/// The open confirm dialog.
+struct OpenConfirm {
+    request: ConfirmRequest,
+    /// The dialog's own focus, where Enter confirms. It must outlive a
+    /// frame: gpui-base's `Dialog` takes a new handle each render otherwise.
+    focus: FocusHandle,
+}
+
 /// The open command palette and the focus to give back when it closes.
 struct OpenPalette {
     view: Entity<Palette>,
@@ -74,7 +84,6 @@ struct OpenPalette {
 
 pub struct Shell {
     focus: FocusHandle,
-    dialog_focus: FocusHandle,
     sidebar_collapsed: bool,
     store: Entity<Store>,
     route: Route,
@@ -87,7 +96,7 @@ pub struct Shell {
     activity: Entity<ActivityScreen>,
     cleanup: Entity<CleanupScreen>,
     settings: Entity<SettingsScreen>,
-    confirm: Option<ConfirmRequest>,
+    confirm: Option<OpenConfirm>,
     palette: Option<OpenPalette>,
     toasts: Vec<ToastItem>,
     next_toast_id: usize,
@@ -117,7 +126,7 @@ impl Shell {
         // A focused control can disappear (a disabled button, a closed
         // terminal); without focus no shortcut resolves, so take it back.
         cx.on_focus_lost(window, |this: &mut Self, window, cx| {
-            let target = this.focus_trap(cx).unwrap_or_else(|| this.focus.clone());
+            let target = this.modal_focus(cx).unwrap_or_else(|| this.focus.clone());
             window.focus(&target, cx);
         })
         .detach();
@@ -162,7 +171,6 @@ impl Shell {
 
         Self {
             focus,
-            dialog_focus: cx.focus_handle(),
             sidebar_collapsed: preferences::get(cx).sidebar_collapsed,
             store,
             route: Route::Containers,
@@ -208,8 +216,12 @@ impl Shell {
             screen,
             window,
             |this, _, request: &ConfirmRequest, window, cx| {
-                this.confirm = Some(request.clone());
-                window.focus(&this.dialog_focus, cx);
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                this.confirm = Some(OpenConfirm {
+                    request: request.clone(),
+                    focus,
+                });
                 cx.notify();
             },
         )
@@ -308,38 +320,15 @@ impl Shell {
 
     /// Where focus must stay while a modal is open: the confirm dialog or
     /// the palette.
-    fn focus_trap(&self, cx: &Context<Self>) -> Option<FocusHandle> {
-        if self.confirm.is_some() {
-            Some(self.dialog_focus.clone())
-        } else {
-            self.palette
-                .as_ref()
-                .map(|palette| palette.view.read(cx).focus_handle(cx))
-        }
-    }
-
-    /// Tab and Shift+Tab. While a modal is open, focus stays in it, so
-    /// nothing behind it can be pressed.
-    fn cycle_focus(&self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Bounds the search for a stop inside the modal.
-        const MAX_STOPS: usize = 1024;
-        let trap = self.focus_trap(cx);
-        for _ in 0..MAX_STOPS {
-            if forward {
-                window.focus_next(cx);
-            } else {
-                window.focus_prev(cx);
-            }
-            if trap
-                .as_ref()
-                .is_none_or(|trap| trap.contains_focused(window, cx))
-            {
-                return;
-            }
-        }
-        if let Some(trap) = trap {
-            window.focus(&trap, cx);
-        }
+    fn modal_focus(&self, cx: &Context<Self>) -> Option<FocusHandle> {
+        self.confirm.as_ref().map_or_else(
+            || {
+                self.palette
+                    .as_ref()
+                    .map(|palette| palette.view.read(cx).focus_handle(cx))
+            },
+            |confirm| Some(confirm.focus.clone()),
+        )
     }
 
     /// `Esc` clears the selection; on Settings it goes back.
@@ -558,41 +547,37 @@ impl Shell {
 
     // ---- confirm dialog ----
 
-    /// Enter confirms while the dialog itself has focus. With a button
-    /// focused (Tab), Enter presses that button instead, so Enter on Cancel
-    /// cancels.
-    fn confirm_key(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_focus.is_focused(window) {
-            self.accept(window, cx);
-        } else {
-            cx.propagate();
-        }
-    }
-
     fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = self.confirm.take() {
-            (request.on_confirm)(window, cx);
+        if let Some(confirm) = self.confirm.take() {
+            (confirm.request.on_confirm)(window, cx);
         }
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    fn render_confirm(&self, request: &ConfirmRequest, cx: &Context<Self>) -> AnyElement {
+    /// gpui-base's alert dialog owns the keys (Enter confirms, Esc cancels)
+    /// and keeps Tab inside it; we draw the backdrop and the card.
+    fn render_confirm(
+        confirm: &OpenConfirm,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let request = &confirm.request;
         let theme = Theme::of(cx);
-        let mut dialog = Dialog::new(request.title.clone()).message(request.message.clone());
+        let mut card = Dialog::new(request.title.clone()).message(request.message.clone());
         if !request.items.is_empty() {
-            dialog = dialog.body(item_list(&request.items, 6, theme));
+            card = card.body(item_list(&request.items, 6, theme));
         }
-        let dialog = dialog
+        let card = card
             .button(
                 Button::new("confirm-cancel", "Cancel")
-                    .on_click(cx.listener(|this, _, window, cx| this.cancel(&Cancel, window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
             )
             .button(
                 Button::new("confirm-accept", request.confirm_label.clone())
@@ -600,16 +585,33 @@ impl Shell {
                     .tone(ButtonTone::Danger)
                     .on_click(cx.listener(|this, _, window, cx| this.accept(window, cx))),
             );
-        modal_overlay(
-            div()
-                .track_focus(&self.dialog_focus)
-                .key_context(CONFIRM_CONTEXT)
-                .on_action(cx.listener(Self::confirm_key))
-                .on_action(cx.listener(Self::cancel))
-                .child(dialog),
-            theme,
-        )
-        .into_any_element()
+        let backdrop = modal_backdrop(theme).rounded(px(chrome::content_radius(window)));
+        // The dialog spans the window; it covers the content, inside the
+        // frame, as the screens' own overlays do.
+        let inset = chrome::content_insets(window);
+        let viewport = window.viewport_size();
+        let width = f32::from(viewport.width) - f32::from(inset.left) - f32::from(inset.right);
+        let height = f32::from(viewport.height) - f32::from(inset.top) - f32::from(inset.bottom);
+        let (on_ok, on_cancel) = (cx.weak_entity(), cx.weak_entity());
+        AlertDialog::new(cx)
+            .top(inset.top)
+            .left(inset.left)
+            .w(px(width))
+            .h(px(height))
+            .focus_handle(confirm.focus.clone())
+            .backdrop(backdrop)
+            .popup(AlertDialogPopup::new().child(card))
+            .on_ok(move |_, window, cx| {
+                on_ok.update(cx, |this, cx| this.accept(window, cx)).ok();
+                true
+            })
+            .on_cancel(move |_, window, cx| {
+                on_cancel
+                    .update(cx, |this, cx| this.cancel(window, cx))
+                    .ok();
+                true
+            })
+            .into_any_element()
     }
 
     // ---- toasts ----
@@ -954,19 +956,13 @@ impl Render for Shell {
         let captions = chrome::caption_buttons(window, cx);
         let confirm = self
             .confirm
-            .clone()
-            .map(|request| self.render_confirm(&request, cx));
+            .as_ref()
+            .map(|confirm| Self::render_confirm(confirm, window, cx));
 
         let content = div()
             .id("shell")
             .track_focus(&self.focus)
             .key_context("Shell")
-            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
-                this.cycle_focus(true, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
-                this.cycle_focus(false, window, cx);
-            }))
             .map(|content| {
                 if self.confirm.is_none() {
                     Self::screen_actions(content, cx)
@@ -983,7 +979,7 @@ impl Render for Shell {
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
-            .children(self.focus_trap(cx).map(keep_focus))
+            .children(self.modal_focus(cx).map(keep_focus))
             .child(self.render_sidebar_toggle(leading, window, cx))
             .children(captions)
             .child(self.render_toasts(cx))
@@ -996,10 +992,14 @@ impl Render for Shell {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use berth_docker::fixtures::FixtureEngine;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, Role, TestAppContext, VisualTestContext};
+    use gpui_base::Root;
+    use gpui_base::test_support::{ElementSnapshot, snapshots};
 
     use super::*;
     use crate::keymap;
@@ -1012,7 +1012,15 @@ mod tests {
             keymap::bind(cx);
         });
         let connector: Connector = Arc::new(|| Ok(Arc::new(FixtureEngine::default())));
-        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(connector, window, cx));
+        // Rooted as in main.rs: Root handles Tab.
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let shell = cx.new(|cx| Shell::new(connector, window, cx));
+            Root::new(shell, window, cx)
+        });
+        let Ok(shell) = root.read_with(cx, |root, _| root.view().clone().downcast::<Shell>())
+        else {
+            panic!("the root isn't the shell's");
+        };
         // Focus events need an active window.
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1137,9 +1145,146 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
 
+        // Tab doesn't leave it.
+        cx.simulate_keystrokes("secondary-k");
+        for key in ["tab", "tab", "shift-tab"] {
+            cx.simulate_keystrokes(key);
+            assert_eq!(
+                cx.update(|window, cx| window.focused(cx)),
+                in_palette_now(&shell, cx),
+                "{key} left the palette"
+            );
+        }
+        cx.simulate_keystrokes("escape");
+
         // ctrl-k toggles it closed too.
         cx.simulate_keystrokes("secondary-k secondary-k");
         assert!(!palette_open(&shell, cx));
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+    }
+
+    /// Ask for a confirmation as a screen would; the cell records whether
+    /// it was given.
+    fn ask(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Rc<Cell<bool>> {
+        let confirmed = Rc::new(Cell::new(false));
+        let on_confirm = confirmed.clone();
+        shell.update(cx, |shell, cx| {
+            shell.containers.update(cx, |_, cx| {
+                cx.emit(ConfirmRequest {
+                    title: "Delete web?".into(),
+                    message: "It can't be undone.".into(),
+                    items: Vec::new(),
+                    confirm_label: "Delete".into(),
+                    on_confirm: Rc::new(move |_, _| on_confirm.set(true)),
+                });
+            });
+        });
+        cx.run_until_parked();
+        confirmed
+    }
+
+    fn confirm_open(shell: &Entity<Shell>, cx: &VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, _| shell.confirm.is_some())
+    }
+
+    /// Whether focus is in the open dialog.
+    fn in_dialog(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        let Some(focus) = shell.read_with(cx, |shell, _| {
+            shell.confirm.as_ref().map(|confirm| confirm.focus.clone())
+        }) else {
+            return false;
+        };
+        cx.update(|window, cx| focus.contains_focused(window, cx))
+    }
+
+    /// The last painted facts of the element keyed `id`.
+    fn snapshot(id: &str, cx: &mut VisualTestContext) -> Option<ElementSnapshot> {
+        let id = gpui::ElementId::from(SharedString::from(id.to_string()));
+        cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .find(|s| s.path().last() == Some(&id))
+        })
+    }
+
+    /// Down and up: a focused button clicks on the key's release.
+    fn press(key: &str, cx: &mut VisualTestContext) {
+        let keystroke = Keystroke::parse(key).unwrap_or_else(|e| panic!("{e}"));
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_confirm_dialog_is_an_alert_dialog(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        ask(&shell, cx);
+        let dialogs: Vec<_> = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| s.role() == Some(Role::AlertDialog))
+                .collect()
+        });
+        assert_eq!(dialogs.len(), 1, "{dialogs:?}");
+        for (id, label) in [("confirm-cancel", "Cancel"), ("confirm-accept", "Delete")] {
+            let Some(button) = snapshot(id, cx) else {
+                panic!("{id} wasn't painted");
+            };
+            assert_eq!(button.role(), Some(Role::Button), "{id}");
+            assert_eq!(button.label(), Some(label), "{id}");
+        }
+    }
+
+    #[gpui::test]
+    fn the_confirm_dialog_keeps_focus_and_keys(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        let confirmed = ask(&shell, cx);
+        assert!(in_dialog(&shell, cx));
+
+        // Keys for the screens don't act behind it.
+        cx.simulate_keystrokes("alt-3 down secondary-2");
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.containers.read(cx).tab()),
+            0
+        );
+        assert_eq!(route(&shell, cx), Route::Containers);
+        assert!(in_dialog(&shell, cx));
+
+        // Tab and Shift+Tab go round its two buttons and never leave it.
+        let mut cancel_focused = false;
+        for key in ["tab", "tab", "tab", "shift-tab", "shift-tab", "tab"] {
+            cx.simulate_keystrokes(key);
+            assert!(in_dialog(&shell, cx), "{key} left the dialog");
+            cancel_focused |=
+                snapshot("confirm-cancel", cx).and_then(|s| s.focused()) == Some(true);
+        }
+        assert!(cancel_focused, "Tab never reached Cancel");
+
+        // Enter on a focused Cancel cancels.
+        while snapshot("confirm-cancel", cx).and_then(|s| s.focused()) != Some(true) {
+            cx.simulate_keystrokes("tab");
+        }
+        press("enter", cx);
+        assert!(!confirm_open(&shell, cx));
+        assert!(!confirmed.get());
+
+        // Esc cancels, too.
+        let confirmed = ask(&shell, cx);
+        cx.simulate_keystrokes("escape");
+        assert!(!confirm_open(&shell, cx));
+        assert!(!confirmed.get());
+
+        // Enter on the dialog itself confirms.
+        let confirmed = ask(&shell, cx);
+        cx.simulate_keystrokes("enter");
+        assert!(!confirm_open(&shell, cx));
+        assert!(confirmed.get());
+        // Focus returns to the shell, where the keys work again.
+        cx.simulate_keystrokes("secondary-2");
+        assert_eq!(route(&shell, cx), Route::Volumes);
     }
 }

@@ -9,6 +9,7 @@ use gpui::{
     IntoElement, Render, ScrollStrategy, SharedString, SpringAnimation, Subscription,
     UniformListScrollHandle, Window, deferred, div, prelude::*, px, uniform_list,
 };
+use gpui_base::FocusTrapElement as _;
 use gpui_base::input::{InputEvent, InputState};
 
 use crate::keymap::{
@@ -79,6 +80,8 @@ pub struct Palette {
     /// Index into `matches` that Enter runs.
     highlight: usize,
     scroll: UniformListScrollHandle,
+    /// The card's, which Tab doesn't leave while the palette is open.
+    trap: FocusHandle,
     _subscriptions: [Subscription; 2],
 }
 
@@ -124,6 +127,7 @@ impl Palette {
             matches,
             highlight: 0,
             scroll: UniformListScrollHandle::new(),
+            trap: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
     }
@@ -252,7 +256,8 @@ impl Render for Palette {
             .border_color(theme.border_strong)
             .shadow_2xl()
             .child(SearchField::new(&self.input))
-            .child(results);
+            .child(results)
+            .focus_trap("palette-trap", &self.trap);
         let card = if theme.reduce_motion {
             card.into_any_element()
         } else {

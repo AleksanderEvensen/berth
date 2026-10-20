@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ElementId, FontWeight, Hsla, IntoElement,
-    RenderOnce, SharedString, Transformation, Window, deferred, div, percentage, prelude::*, px,
+    Animation, AnimationExt as _, AnyElement, App, Div, ElementId, FontWeight, Hsla, IntoElement,
+    RenderOnce, SharedString, Stateful, Transformation, Window, div, percentage, prelude::*, px,
 };
 
 use super::{ClickHandler, IconButton, icon};
@@ -53,23 +53,19 @@ impl RenderOnce for Spinner {
     }
 }
 
-/// Full-window scrim that centres `content` above everything else and
-/// swallows pointer events behind it.
-pub fn modal_overlay(content: impl IntoElement, theme: &Theme) -> impl IntoElement {
-    deferred(
-        div()
-            .id("modal-overlay")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.scrim)
-            .occlude()
-            .child(content),
-    )
-    .with_priority(1)
+/// Full-window scrim behind a modal; swallows pointer events behind it.
+#[must_use]
+pub fn modal_backdrop(theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("modal-backdrop")
+        .size_full()
+        .bg(theme.scrim)
+        .occlude()
 }
+
+/// Key context of a dialog's button row, where Enter presses the focused
+/// button rather than confirming the dialog.
+pub const DIALOG_BUTTONS_CONTEXT: &str = "DialogButtons";
 
 /// A modal dialog card: title, message, optional body and a right-aligned
 /// button row.
@@ -143,6 +139,7 @@ impl RenderOnce for Dialog {
             .children(self.body)
             .child(
                 div()
+                    .key_context(DIALOG_BUTTONS_CONTEXT)
                     .pt(px(Theme::SPACE_XS))
                     .flex()
                     .justify_end()
