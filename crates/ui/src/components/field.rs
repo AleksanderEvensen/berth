@@ -66,7 +66,7 @@ impl RenderOnce for SearchField {
             )
             .when_some(self.on_clear.filter(|_| has_value), |d, f| {
                 d.child(
-                    IconButton::new("search-clear", icons::CLOSE)
+                    IconButton::new("search-clear", icons::CLOSE, "Clear search")
                         .size(22.0, 12.0)
                         .on_click(f),
                 )

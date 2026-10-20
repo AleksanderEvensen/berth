@@ -383,7 +383,7 @@ impl LogsView {
                     .child(status),
             )
             .child(
-                IconButton::new("logs-timestamps", icons::CLOCK)
+                IconButton::new("logs-timestamps", icons::CLOCK, "Show timestamps")
                     .active(self.timestamps)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.timestamps = !this.timestamps;
@@ -395,17 +395,17 @@ impl LogsView {
                     })),
             )
             .child(
-                IconButton::new("logs-wrap", icons::WRAP)
+                IconButton::new("logs-wrap", icons::WRAP, "Wrap lines")
                     .active(self.wrap)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
             )
             .child(
-                IconButton::new("logs-copy", icons::COPY)
+                IconButton::new("logs-copy", icons::COPY, "Copy logs")
                     .disabled(self.buffer.is_empty())
                     .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
             )
             .child(
-                IconButton::new("logs-clear", icons::TRASH)
+                IconButton::new("logs-clear", icons::TRASH, "Clear logs")
                     .disabled(self.buffer.total() == 0)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.buffer.clear();

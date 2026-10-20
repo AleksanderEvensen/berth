@@ -64,7 +64,12 @@ fn main() {
                     app_id: Some("no.ahse.berth".into()),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Shell::new(connector, window, cx)),
+                |window, cx| {
+                    let shell = cx.new(|cx| Shell::new(connector, window, cx));
+                    // gpui-base's root handles Tab, keeping focus inside an
+                    // open dialog or the palette.
+                    cx.new(|cx| gpui_base::Root::new(shell, window, cx))
+                },
             ) {
                 log::error!("failed to open the main window: {error}");
                 cx.quit();

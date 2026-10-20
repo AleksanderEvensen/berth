@@ -5,8 +5,8 @@
 use berth_settings::WindowButtons;
 use berth_ui::{Appearance, TabStop, Theme};
 use gpui::{
-    AnyElement, App, Div, Hsla, IntoElement, MouseButton, Pixels, Point, Window, div, prelude::*,
-    px, transparent_black,
+    AnyElement, App, Div, Edges, Hsla, IntoElement, MouseButton, Pixels, Point, Window, div,
+    prelude::*, px, transparent_black,
 };
 #[cfg(not(windows))]
 use gpui::{PathBuilder, canvas};
@@ -358,6 +358,28 @@ fn cross(color: Hsla) -> impl IntoElement {
         },
     )
     .size_full()
+}
+
+/// How far the content sits inside the window on each side: a floating
+/// CSD window's transparent resize band and its hairline border. A modal's
+/// backdrop covers the content, not the band.
+pub fn content_insets(window: &Window) -> Edges<Pixels> {
+    let Some(tiling) = resize::client_tiling(window) else {
+        return Edges::default();
+    };
+    let inset = |tiled: bool| {
+        if tiled {
+            px(0.0)
+        } else {
+            px(f32::from(FRAME_INSET) + 1.0)
+        }
+    };
+    Edges {
+        top: inset(tiling.top),
+        right: inset(tiling.right),
+        bottom: inset(tiling.bottom),
+        left: inset(tiling.left),
+    }
 }
 
 /// Wrap the app content in the client-side frame: transparent resize

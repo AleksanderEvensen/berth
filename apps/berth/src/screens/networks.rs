@@ -207,11 +207,15 @@ impl NetworksScreen {
         .selected(self.selection.contains(&id))
         .keyboard_cursor(self.selection.is_cursor(&id))
         .action(
-            IconButton::new(SharedString::from(format!("delete-{id}")), icons::TRASH)
-                .tone(ButtonTone::Danger)
-                .disabled(!removable)
-                .tab_stop(false)
-                .on_click(delete),
+            IconButton::new(
+                SharedString::from(format!("delete-{id}")),
+                icons::TRASH,
+                "Delete network",
+            )
+            .tone(ButtonTone::Danger)
+            .disabled(!removable)
+            .tab_stop(false)
+            .on_click(delete),
         )
         .on_click(click);
         if !network.endpoints.is_empty() {
@@ -330,11 +334,15 @@ impl Render for NetworksScreen {
         let header = ListHeader::new("Networks")
             .subtitle(format!("{total} network{}", plural(total)))
             .action(
-                IconButton::new("remove-unused-networks", icons::BROOM)
-                    .disabled(unused.is_empty())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.confirm_prune(unused.clone(), cx);
-                    })),
+                IconButton::new(
+                    "remove-unused-networks",
+                    icons::BROOM,
+                    "Delete unused networks",
+                )
+                .disabled(unused.is_empty())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.confirm_prune(unused.clone(), cx);
+                })),
             );
 
         let body = if self.rows.is_empty() {

@@ -3,9 +3,8 @@
 //! Shortcuts, so the two can't drift apart. The command palette lists its
 //! actions from the same table.
 
-use gpui::{Action, App, KeyBinding, actions};
-
-use crate::dialogs;
+use berth_ui::DIALOG_BUTTONS_CONTEXT;
+use gpui::{Action, App, KeyBinding, NoAction, actions};
 
 actions!(
     berth,
@@ -32,10 +31,6 @@ actions!(
         GoActivity,
         #[derive(Eq)]
         GoCleanup,
-        #[derive(Eq)]
-        FocusNext,
-        #[derive(Eq)]
-        FocusPrev,
         #[derive(Eq)]
         SelectPrev,
         #[derive(Eq)]
@@ -105,15 +100,14 @@ actions!(
     ]
 );
 
-/// Anywhere in the window.
-const SHELL: &str = "Shell";
 /// Anywhere but the command palette, so these keys can't act behind it.
 /// They still run when picked in the palette, which dispatches the action.
 const OUTSIDE_PALETTE: &str = "!CommandPalette";
 /// Where list keys apply: anywhere in the shell except text inputs, the
-/// terminal and the confirm dialog, which own these keys.
-/// A focused file tree handles its own arrows, Home, End and Enter.
-const LIST: &str = "Shell && !Input && !Terminal && !ConfirmDialog && !FileTree";
+/// terminal and an open dialog (gpui-base's `Dialog` context), which own
+/// these keys. A focused file tree handles its own arrows, Home, End and
+/// Enter.
+const LIST: &str = "Shell && !Input && !Terminal && !Dialog && !FileTree";
 /// Key context of an open menu (the port menu). Deeper than [`LIST`], so
 /// its keys win over the list's.
 pub const MENU_CONTEXT: &str = "PortMenu";
@@ -124,7 +118,7 @@ pub const PALETTE_CONTEXT: &str = "CommandPalette";
 const PALETTE: &str = "CommandPalette > Input";
 /// Detail tabs also switch from inside the terminal, so it can be left by
 /// keyboard.
-const TABS: &str = "Shell && !ConfirmDialog && !CommandPalette";
+const TABS: &str = "Shell && !Dialog && !CommandPalette";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -313,14 +307,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Scroll (screens without a list)",
         ["up", "down", "home", "end"]
     ),
-    shortcut!(key: General, "Next control", ["tab"], Some(SHELL), FocusNext),
-    shortcut!(
-        key: General,
-        "Previous control",
-        ["shift-tab"],
-        Some(SHELL),
-        FocusPrev
-    ),
+    shortcut!(General, "Next control", ["tab"]),
+    shortcut!(General, "Previous control", ["shift-tab"]),
     shortcut!(General, "Press the focused control", ["enter", "space"]),
     shortcut!(General, "Quit", ["secondary-q"], None, Quit),
     shortcut!(key: Lists, "Select previous row", ["up"], Some(LIST), SelectPrev),
@@ -444,19 +432,11 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!(Containers, "Files tab", ["alt-5"], Some(TABS), ShowFiles),
     shortcut!(
-        key: Dialogs,
+        Dialogs,
         "Confirm (Enter on a focused button presses it)",
-        ["enter"],
-        Some(dialogs::CONFIRM_CONTEXT),
-        dialogs::Confirm
+        ["enter"]
     ),
-    shortcut!(
-        key: Dialogs,
-        "Cancel",
-        ["escape"],
-        Some(dialogs::CONFIRM_CONTEXT),
-        dialogs::Cancel
-    ),
+    shortcut!(Dialogs, "Cancel", ["escape"]),
     shortcut!(
         key: Dialogs,
         "Previous menu item",
@@ -518,6 +498,14 @@ pub const SHORTCUTS: &[Shortcut] = &[
 /// Bind every key in [`SHORTCUTS`].
 pub fn bind(cx: &mut App) {
     cx.bind_keys(key_bindings());
+    // gpui-base's dialog binds Enter to confirm, which runs before a
+    // focused button sees the key. In the button row Enter is unbound, so
+    // it presses the focused button: Enter on Cancel cancels.
+    cx.bind_keys([KeyBinding::new(
+        "enter",
+        NoAction,
+        Some(DIALOG_BUTTONS_CONTEXT),
+    )]);
 }
 
 fn key_bindings() -> Vec<KeyBinding> {
@@ -652,9 +640,10 @@ mod tests {
         assert!(runs("down", &["Shell", MENU_CONTEXT], &MenuNext));
         assert!(runs("escape", &["Shell", MENU_CONTEXT], &MenuCancel));
         assert!(runs("enter", &["Shell", MENU_CONTEXT], &MenuConfirm));
-        let dialog = ["Shell", dialogs::CONFIRM_CONTEXT];
-        assert!(runs("escape", &dialog, &dialogs::Cancel));
-        assert!(runs("enter", &dialog, &dialogs::Confirm));
+        // gpui-base binds the open dialog's own keys; none of ours act
+        // behind it.
+        let dialog = ["Root", "Shell", "Dialog"];
+        assert!(resolve("escape", &dialog).is_none());
         assert!(resolve("down", &dialog).is_none());
         assert!(resolve("alt-1", &dialog).is_none());
         // Text fields and the terminal keep their keys, but the tab keys

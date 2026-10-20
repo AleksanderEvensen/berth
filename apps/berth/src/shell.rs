@@ -5,24 +5,29 @@ use std::time::Duration;
 
 use berth_ui::{
     Button, ButtonTone, Dialog, IconButton, PANEL_SPRING, ScrollStep, Sidebar, SidebarItem,
-    SidebarSection, TabStop, Theme, Toast, ToastKind, icons, item_list, modal_overlay,
-    scroll_active_pane, sidebar_glyph, status_dot,
+    SidebarSection, TabStop, Theme, Toast, ToastKind, icons, item_list, modal_backdrop,
+    reveal_when_focused, scroll_active_pane, sidebar_glyph, status_dot, tab_stop,
 };
 use gpui::{
-    AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, canvas, div, prelude::*,
-    px,
+    Anchor, Animation, AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter,
+    FocusHandle, FontWeight, IntoElement, Render, SharedString, SpringAnimation, Stateful, Task,
+    Window, canvas, div, prelude::*, px,
 };
 
 use crate::chrome;
-use crate::dialogs::{CONFIRM_CONTEXT, Cancel, Confirm, ConfirmRequest};
+use gpui_base::{
+    AlertDialog, AlertDialogPopup, ToastManager, ToastMotion, ToastOptions, ToastStack,
+    ToastStackState, ToastTransitionStatus,
+};
+
+use crate::dialogs::ConfirmRequest;
 use crate::keymap::{
     ClearSelection, Collapse, CursorNext, CursorPrev, DeleteSelected, Expand, ExtendFirst,
-    ExtendLast, ExtendNext, ExtendPrev, FocusNext, FocusPrev, FocusSearch, GoActivity, GoCleanup,
-    GoContainers, GoImages, GoNetworks, GoVolumes, OpenPort, OpenSettings, Restart, ScrollBottom,
-    ScrollPageDown, ScrollPageUp, ScrollTop, SelectAll, SelectFirst, SelectLast, SelectNext,
-    SelectPrev, ShowFiles, ShowInfo, ShowLogs, ShowShortcuts, ShowStats, ShowTerminal,
-    TogglePalette, ToggleRunning, ToggleSelected, ToggleSidebar,
+    ExtendLast, ExtendNext, ExtendPrev, FocusSearch, GoActivity, GoCleanup, GoContainers, GoImages,
+    GoNetworks, GoVolumes, OpenPort, OpenSettings, Restart, ScrollBottom, ScrollPageDown,
+    ScrollPageUp, ScrollTop, SelectAll, SelectFirst, SelectLast, SelectNext, SelectPrev, ShowFiles,
+    ShowInfo, ShowLogs, ShowShortcuts, ShowStats, ShowTerminal, TogglePalette, ToggleRunning,
+    ToggleSelected, ToggleSidebar,
 };
 use crate::palette::{Palette, PaletteEvent, Target};
 use crate::preferences;
@@ -45,7 +50,8 @@ use crate::store::{Connector, Store, StoreEvent};
 /// sidebar is collapsed.
 const TOGGLE_CLEARANCE: f32 = 34.0;
 const TOAST_LIFETIME: Duration = Duration::from_secs(6);
-const MAX_TOASTS: usize = 3;
+/// How often the toasts' clock runs while any are up.
+const TOAST_TICK: Duration = Duration::from_millis(100);
 
 /// Which screen the sidebar has selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +66,17 @@ enum Route {
 }
 
 struct ToastItem {
-    id: usize,
     kind: ToastKind,
     title: SharedString,
     detail: SharedString,
+}
+
+/// The open confirm dialog.
+struct OpenConfirm {
+    request: ConfirmRequest,
+    /// The dialog's own focus, where Enter confirms. It must outlive a
+    /// frame: gpui-base's `Dialog` takes a new handle each render otherwise.
+    focus: FocusHandle,
 }
 
 /// The open command palette and the focus to give back when it closes.
@@ -74,7 +87,6 @@ struct OpenPalette {
 
 pub struct Shell {
     focus: FocusHandle,
-    dialog_focus: FocusHandle,
     sidebar_collapsed: bool,
     store: Entity<Store>,
     route: Route,
@@ -87,10 +99,13 @@ pub struct Shell {
     activity: Entity<ActivityScreen>,
     cleanup: Entity<CleanupScreen>,
     settings: Entity<SettingsScreen>,
-    confirm: Option<ConfirmRequest>,
+    confirm: Option<OpenConfirm>,
     palette: Option<OpenPalette>,
-    toasts: Vec<ToastItem>,
+    toasts: ToastManager<usize, ToastItem>,
+    toast_stack: ToastStackState,
     next_toast_id: usize,
+    /// Advances the toasts' lifecycle while any are up.
+    toast_clock: Option<Task<()>>,
     /// The settings problem already toasted, so it is reported once.
     settings_problem: Option<SharedString>,
 }
@@ -117,7 +132,7 @@ impl Shell {
         // A focused control can disappear (a disabled button, a closed
         // terminal); without focus no shortcut resolves, so take it back.
         cx.on_focus_lost(window, |this: &mut Self, window, cx| {
-            let target = this.focus_trap(cx).unwrap_or_else(|| this.focus.clone());
+            let target = this.modal_focus(cx).unwrap_or_else(|| this.focus.clone());
             window.focus(&target, cx);
         })
         .detach();
@@ -162,7 +177,6 @@ impl Shell {
 
         Self {
             focus,
-            dialog_focus: cx.focus_handle(),
             sidebar_collapsed: preferences::get(cx).sidebar_collapsed,
             store,
             route: Route::Containers,
@@ -176,8 +190,10 @@ impl Shell {
             settings,
             confirm: None,
             palette: None,
-            toasts: Vec::new(),
+            toasts: ToastManager::new(toast_motion()),
+            toast_stack: ToastStackState::default(),
             next_toast_id: 0,
+            toast_clock: None,
             settings_problem: None,
         }
     }
@@ -208,8 +224,12 @@ impl Shell {
             screen,
             window,
             |this, _, request: &ConfirmRequest, window, cx| {
-                this.confirm = Some(request.clone());
-                window.focus(&this.dialog_focus, cx);
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                this.confirm = Some(OpenConfirm {
+                    request: request.clone(),
+                    focus,
+                });
                 cx.notify();
             },
         )
@@ -308,38 +328,15 @@ impl Shell {
 
     /// Where focus must stay while a modal is open: the confirm dialog or
     /// the palette.
-    fn focus_trap(&self, cx: &Context<Self>) -> Option<FocusHandle> {
-        if self.confirm.is_some() {
-            Some(self.dialog_focus.clone())
-        } else {
-            self.palette
-                .as_ref()
-                .map(|palette| palette.view.read(cx).focus_handle(cx))
-        }
-    }
-
-    /// Tab and Shift+Tab. While a modal is open, focus stays in it, so
-    /// nothing behind it can be pressed.
-    fn cycle_focus(&self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Bounds the search for a stop inside the modal.
-        const MAX_STOPS: usize = 1024;
-        let trap = self.focus_trap(cx);
-        for _ in 0..MAX_STOPS {
-            if forward {
-                window.focus_next(cx);
-            } else {
-                window.focus_prev(cx);
-            }
-            if trap
-                .as_ref()
-                .is_none_or(|trap| trap.contains_focused(window, cx))
-            {
-                return;
-            }
-        }
-        if let Some(trap) = trap {
-            window.focus(&trap, cx);
-        }
+    fn modal_focus(&self, cx: &Context<Self>) -> Option<FocusHandle> {
+        self.confirm.as_ref().map_or_else(
+            || {
+                self.palette
+                    .as_ref()
+                    .map(|palette| palette.view.read(cx).focus_handle(cx))
+            },
+            |confirm| Some(confirm.focus.clone()),
+        )
     }
 
     /// `Esc` clears the selection; on Settings it goes back.
@@ -558,41 +555,37 @@ impl Shell {
 
     // ---- confirm dialog ----
 
-    /// Enter confirms while the dialog itself has focus. With a button
-    /// focused (Tab), Enter presses that button instead, so Enter on Cancel
-    /// cancels.
-    fn confirm_key(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dialog_focus.is_focused(window) {
-            self.accept(window, cx);
-        } else {
-            cx.propagate();
-        }
-    }
-
     fn accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = self.confirm.take() {
-            (request.on_confirm)(window, cx);
+        if let Some(confirm) = self.confirm.take() {
+            (confirm.request.on_confirm)(window, cx);
         }
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    fn cancel(&mut self, _: &Cancel, window: &mut Window, cx: &mut Context<Self>) {
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    fn render_confirm(&self, request: &ConfirmRequest, cx: &Context<Self>) -> AnyElement {
+    /// gpui-base's alert dialog owns the keys (Enter confirms, Esc cancels)
+    /// and keeps Tab inside it; we draw the backdrop and the card.
+    fn render_confirm(
+        confirm: &OpenConfirm,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let request = &confirm.request;
         let theme = Theme::of(cx);
-        let mut dialog = Dialog::new(request.title.clone()).message(request.message.clone());
+        let mut card = Dialog::new(request.title.clone()).message(request.message.clone());
         if !request.items.is_empty() {
-            dialog = dialog.body(item_list(&request.items, 6, theme));
+            card = card.body(item_list(&request.items, 6, theme));
         }
-        let dialog = dialog
+        let card = card
             .button(
                 Button::new("confirm-cancel", "Cancel")
-                    .on_click(cx.listener(|this, _, window, cx| this.cancel(&Cancel, window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
             )
             .button(
                 Button::new("confirm-accept", request.confirm_label.clone())
@@ -600,16 +593,33 @@ impl Shell {
                     .tone(ButtonTone::Danger)
                     .on_click(cx.listener(|this, _, window, cx| this.accept(window, cx))),
             );
-        modal_overlay(
-            div()
-                .track_focus(&self.dialog_focus)
-                .key_context(CONFIRM_CONTEXT)
-                .on_action(cx.listener(Self::confirm_key))
-                .on_action(cx.listener(Self::cancel))
-                .child(dialog),
-            theme,
-        )
-        .into_any_element()
+        let backdrop = modal_backdrop(theme).rounded(px(chrome::content_radius(window)));
+        // The dialog spans the window; it covers the content, inside the
+        // frame, as the screens' own overlays do.
+        let inset = chrome::content_insets(window);
+        let viewport = window.viewport_size();
+        let width = f32::from(viewport.width) - f32::from(inset.left) - f32::from(inset.right);
+        let height = f32::from(viewport.height) - f32::from(inset.top) - f32::from(inset.bottom);
+        let (on_ok, on_cancel) = (cx.weak_entity(), cx.weak_entity());
+        AlertDialog::new(cx)
+            .top(inset.top)
+            .left(inset.left)
+            .w(px(width))
+            .h(px(height))
+            .focus_handle(confirm.focus.clone())
+            .backdrop(backdrop)
+            .popup(AlertDialogPopup::new().child(card))
+            .on_ok(move |_, window, cx| {
+                on_ok.update(cx, |this, cx| this.accept(window, cx)).ok();
+                true
+            })
+            .on_cancel(move |_, window, cx| {
+                on_cancel
+                    .update(cx, |this, cx| this.cancel(window, cx))
+                    .ok();
+                true
+            })
+            .into_any_element()
     }
 
     // ---- toasts ----
@@ -622,46 +632,97 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let id = self.next_toast_id;
-        // IDs only identify the bounded list of recent toasts.
+        // IDs only identify the recent toasts.
         self.next_toast_id = self.next_toast_id.wrapping_add(1);
-        self.toasts.push(ToastItem {
-            id,
+        let toast = ToastItem {
             kind,
             title: title.into(),
             detail: detail.into(),
-        });
-        if self.toasts.len() > MAX_TOASTS {
-            self.toasts.remove(0);
-        }
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_LIFETIME).await;
-            this.update(cx, |this, cx| this.dismiss_toast(id, cx)).ok();
-        })
-        .detach();
+        };
+        let lifetime = ToastOptions {
+            timeout: Some(TOAST_LIFETIME),
+        };
+        self.toasts
+            .push(id, toast, lifetime, cx.background_executor().now());
+        self.run_toast_clock(cx);
         cx.notify();
     }
 
     fn dismiss_toast(&mut self, id: usize, cx: &mut Context<Self>) {
-        self.toasts.retain(|t| t.id != id);
+        self.toasts.dismiss(&id, cx.background_executor().now());
         cx.notify();
     }
 
+    /// Tick the toasts' lifecycle until none are left. Their lifetimes
+    /// stand still while the pointer is over them.
+    fn run_toast_clock(&mut self, cx: &Context<Self>) {
+        if self.toast_clock.is_some() {
+            return;
+        }
+        self.toast_clock = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TOAST_TICK).await;
+                let ticking = this.update(cx, |this, cx| {
+                    let now = cx.background_executor().now();
+                    if this
+                        .toasts
+                        .advance(now, this.toast_stack.is_expanded())
+                        .changed
+                    {
+                        cx.notify();
+                    }
+                    if this.toasts.is_empty() {
+                        this.toast_clock = None;
+                    }
+                    this.toast_clock.is_some()
+                });
+                if !matches!(ticking, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn render_toasts(&self, cx: &Context<Self>) -> impl IntoElement {
+        let motion = toast_motion();
+        let reduce_motion = Theme::of(cx).reduce_motion;
+        let stack = self
+            .toasts
+            .visible(motion.collapsed_visible)
+            // Without motion a closing toast just goes.
+            .filter(|(_, _, status)| !(reduce_motion && *status == ToastTransitionStatus::Ending))
+            .fold(
+                ToastStack::new("toasts", self.toast_stack.clone())
+                    .motion(motion)
+                    .placement(Anchor::BottomCenter)
+                    .w(px(Toast::WIDTH)),
+                |stack, (&id, toast, status)| {
+                    let card = Toast::new(("toast", id), toast.kind, toast.title.clone())
+                        .detail(toast.detail.clone())
+                        .on_dismiss(cx.listener(move |this, _, _, cx| this.dismiss_toast(id, cx)));
+                    let card = if status == ToastTransitionStatus::Ending {
+                        div()
+                            .child(card)
+                            .with_animation(
+                                ("toast-out", id),
+                                Animation::new(motion.exit_duration),
+                                |card, t| card.opacity(1.0 - t),
+                            )
+                            .into_any_element()
+                    } else {
+                        card.into_any_element()
+                    };
+                    stack.item(("toast", id), card)
+                },
+            );
         div()
             .absolute()
             .bottom(px(Theme::SPACE_LG + 4.0))
             .left_0()
             .right_0()
             .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .children(self.toasts.iter().map(|toast| {
-                let id = toast.id;
-                Toast::new(("toast", id), toast.kind, toast.title.clone())
-                    .detail(toast.detail.clone())
-                    .on_dismiss(cx.listener(move |this, _, _, cx| this.dismiss_toast(id, cx)))
-            }))
+            .justify_center()
+            .child(stack)
     }
 
     // ---- sidebar ----
@@ -724,7 +785,7 @@ impl Shell {
                 }
             })
             .child(
-                IconButton::new("settings", icons::SETTINGS)
+                IconButton::new("settings", icons::SETTINGS, "Settings")
                     .size(28.0, 16.0)
                     .tab_stop(!self.sidebar_collapsed)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -832,30 +893,41 @@ impl Shell {
             .footer(self.render_engine_footer(cx))
     }
 
-    fn render_sidebar_toggle(&self, leading: f32, cx: &Context<Self>) -> impl IntoElement {
+    fn render_sidebar_toggle(
+        &self,
+        leading: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let focus = tab_stop("sidebar-toggle", window, cx);
         let theme = Theme::of(cx);
         let color = theme.text_muted;
+        let ring = theme.accent;
         let open = if self.sidebar_collapsed { 0.0 } else { 1.0 };
-        let toggle = div()
-            .id("sidebar-toggle")
+        gpui_base::Button::new("sidebar-toggle")
+            .accessibility_label(if self.sidebar_collapsed {
+                "Show sidebar"
+            } else {
+                "Hide sidebar"
+            })
+            .map(|b| reveal_when_focused(b, &focus, window))
+            .track_focus(&focus)
+            .focus_visible(move |s| s.border_color(ring))
             .border_1()
             .border_color(gpui::transparent_black())
             .absolute()
             .top(px((Theme::HEADER_HEIGHT - 28.0) / 2.0))
             .left(px(leading))
             .size(px(28.0))
-            .flex()
-            .items_center()
-            .justify_center()
             .rounded(px(Theme::CONTROL_RADIUS))
             .cursor_pointer()
             .hover(|s| s.bg(theme.element_hover))
             .occlude()
-            .map(|d| {
+            .map(|b| {
                 if theme.reduce_motion {
-                    d.child(sidebar_glyph(open, 18.0, color))
+                    b.child(sidebar_glyph(open, 18.0, color))
                 } else {
-                    d.child(div().with_spring(
+                    b.child(div().with_spring(
                         "sidebar-glyph",
                         SpringAnimation::new(PANEL_SPRING).to(open),
                         move |this, t: f32| this.child(sidebar_glyph(t, 18.0, color)),
@@ -865,8 +937,22 @@ impl Shell {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
-            );
-        TabStop::new("sidebar-toggle", toggle)
+            )
+    }
+}
+
+/// gpui-base's toast stack, tuned to how toasts stood before it: up to three
+/// at a time, one above the other, as wide as the newest. The stack
+/// collapses older toasts behind the newest until hovered; peeking by a
+/// one-line toast's height plus the gap, they stay where they were.
+fn toast_motion() -> ToastMotion {
+    ToastMotion {
+        duration: Duration::from_millis(200),
+        exit_duration: Duration::from_millis(150),
+        collapsed_peek: px(Toast::ONE_LINE_HEIGHT + Theme::SPACE_SM),
+        expanded_gap: px(Theme::SPACE_SM),
+        collapsed_scale_step: 0.0,
+        collapsed_visible: 3,
     }
 }
 
@@ -944,19 +1030,13 @@ impl Render for Shell {
         let captions = chrome::caption_buttons(window, cx);
         let confirm = self
             .confirm
-            .clone()
-            .map(|request| self.render_confirm(&request, cx));
+            .as_ref()
+            .map(|confirm| Self::render_confirm(confirm, window, cx));
 
         let content = div()
             .id("shell")
             .track_focus(&self.focus)
             .key_context("Shell")
-            .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
-                this.cycle_focus(true, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
-                this.cycle_focus(false, window, cx);
-            }))
             .map(|content| {
                 if self.confirm.is_none() {
                     Self::screen_actions(content, cx)
@@ -973,8 +1053,8 @@ impl Render for Shell {
             .text_size(px(Theme::TEXT_MD))
             .child(self.render_sidebar(radius, cx))
             .child(div().flex_1().min_w_0().h_full().child(screen))
-            .children(self.focus_trap(cx).map(keep_focus))
-            .child(self.render_sidebar_toggle(leading, cx))
+            .children(self.modal_focus(cx).map(keep_focus))
+            .child(self.render_sidebar_toggle(leading, window, cx))
             .children(captions)
             .child(self.render_toasts(cx))
             .children(self.palette.as_ref().map(|palette| palette.view.clone()))
@@ -986,10 +1066,14 @@ impl Render for Shell {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use berth_docker::fixtures::FixtureEngine;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{KeyDownEvent, KeyUpEvent, Keystroke, Role, TestAppContext, VisualTestContext};
+    use gpui_base::Root;
+    use gpui_base::test_support::{ElementSnapshot, snapshots};
 
     use super::*;
     use crate::keymap;
@@ -1002,7 +1086,15 @@ mod tests {
             keymap::bind(cx);
         });
         let connector: Connector = Arc::new(|| Ok(Arc::new(FixtureEngine::default())));
-        let (shell, cx) = cx.add_window_view(|window, cx| Shell::new(connector, window, cx));
+        // Rooted as in main.rs: Root handles Tab.
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let shell = cx.new(|cx| Shell::new(connector, window, cx));
+            Root::new(shell, window, cx)
+        });
+        let Ok(shell) = root.read_with(cx, |root, _| root.view().clone().downcast::<Shell>())
+        else {
+            panic!("the root isn't the shell's");
+        };
         // Focus events need an active window.
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
@@ -1127,9 +1219,232 @@ mod tests {
         cx.simulate_keystrokes("escape");
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
 
+        // Tab doesn't leave it.
+        cx.simulate_keystrokes("secondary-k");
+        for key in ["tab", "tab", "shift-tab"] {
+            cx.simulate_keystrokes(key);
+            assert_eq!(
+                cx.update(|window, cx| window.focused(cx)),
+                in_palette_now(&shell, cx),
+                "{key} left the palette"
+            );
+        }
+        cx.simulate_keystrokes("escape");
+
         // ctrl-k toggles it closed too.
         cx.simulate_keystrokes("secondary-k secondary-k");
         assert!(!palette_open(&shell, cx));
         assert_eq!(cx.update(|window, cx| window.focused(cx)), before);
+    }
+
+    /// Ask for a confirmation as a screen would; the cell records whether
+    /// it was given.
+    fn ask(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Rc<Cell<bool>> {
+        let confirmed = Rc::new(Cell::new(false));
+        let on_confirm = confirmed.clone();
+        shell.update(cx, |shell, cx| {
+            shell.containers.update(cx, |_, cx| {
+                cx.emit(ConfirmRequest {
+                    title: "Delete web?".into(),
+                    message: "It can't be undone.".into(),
+                    items: Vec::new(),
+                    confirm_label: "Delete".into(),
+                    on_confirm: Rc::new(move |_, _| on_confirm.set(true)),
+                });
+            });
+        });
+        cx.run_until_parked();
+        confirmed
+    }
+
+    fn confirm_open(shell: &Entity<Shell>, cx: &VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, _| shell.confirm.is_some())
+    }
+
+    /// Whether focus is in the open dialog.
+    fn in_dialog(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        let Some(focus) = shell.read_with(cx, |shell, _| {
+            shell.confirm.as_ref().map(|confirm| confirm.focus.clone())
+        }) else {
+            return false;
+        };
+        cx.update(|window, cx| focus.contains_focused(window, cx))
+    }
+
+    /// The last painted facts of the element keyed `id`.
+    fn snapshot(id: &str, cx: &mut VisualTestContext) -> Option<ElementSnapshot> {
+        let id = gpui::ElementId::from(SharedString::from(id.to_string()));
+        cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .find(|s| s.path().last() == Some(&id))
+        })
+    }
+
+    /// Down and up: a focused button clicks on the key's release.
+    fn press(key: &str, cx: &mut VisualTestContext) {
+        let keystroke = Keystroke::parse(key).unwrap_or_else(|e| panic!("{e}"));
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn the_confirm_dialog_is_an_alert_dialog(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        ask(&shell, cx);
+        let dialogs: Vec<_> = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| s.role() == Some(Role::AlertDialog))
+                .collect()
+        });
+        assert_eq!(dialogs.len(), 1, "{dialogs:?}");
+        for (id, label) in [("confirm-cancel", "Cancel"), ("confirm-accept", "Delete")] {
+            let Some(button) = snapshot(id, cx) else {
+                panic!("{id} wasn't painted");
+            };
+            assert_eq!(button.role(), Some(Role::Button), "{id}");
+            assert_eq!(button.label(), Some(label), "{id}");
+        }
+    }
+
+    #[gpui::test]
+    fn the_confirm_dialog_keeps_focus_and_keys(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        let confirmed = ask(&shell, cx);
+        assert!(in_dialog(&shell, cx));
+
+        // Keys for the screens don't act behind it.
+        cx.simulate_keystrokes("alt-3 down secondary-2");
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.containers.read(cx).tab()),
+            0
+        );
+        assert_eq!(route(&shell, cx), Route::Containers);
+        assert!(in_dialog(&shell, cx));
+
+        // Tab and Shift+Tab go round its two buttons and never leave it.
+        let mut cancel_focused = false;
+        for key in ["tab", "tab", "tab", "shift-tab", "shift-tab", "tab"] {
+            cx.simulate_keystrokes(key);
+            assert!(in_dialog(&shell, cx), "{key} left the dialog");
+            cancel_focused |=
+                snapshot("confirm-cancel", cx).and_then(|s| s.focused()) == Some(true);
+        }
+        assert!(cancel_focused, "Tab never reached Cancel");
+
+        // Enter on a focused Cancel cancels.
+        while snapshot("confirm-cancel", cx).and_then(|s| s.focused()) != Some(true) {
+            cx.simulate_keystrokes("tab");
+        }
+        press("enter", cx);
+        assert!(!confirm_open(&shell, cx));
+        assert!(!confirmed.get());
+
+        // Esc cancels, too.
+        let confirmed = ask(&shell, cx);
+        cx.simulate_keystrokes("escape");
+        assert!(!confirm_open(&shell, cx));
+        assert!(!confirmed.get());
+
+        // Enter on the dialog itself confirms.
+        let confirmed = ask(&shell, cx);
+        cx.simulate_keystrokes("enter");
+        assert!(!confirm_open(&shell, cx));
+        assert!(confirmed.get());
+        // Focus returns to the shell, where the keys work again.
+        cx.simulate_keystrokes("secondary-2");
+        assert_eq!(route(&shell, cx), Route::Volumes);
+    }
+
+    /// The toasts painted last, oldest first.
+    fn toasts(cx: &mut VisualTestContext) -> Vec<ElementSnapshot> {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let mut toasts: Vec<_> = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| s.role() == Some(Role::Alert))
+                .collect()
+        });
+        toasts.sort_by_key(|toast| toast.bounds().top());
+        toasts
+    }
+
+    fn toast(shell: &Entity<Shell>, title: &str, cx: &mut VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            shell.push_toast(ToastKind::Info, title.into(), "Detail".into(), cx);
+        });
+    }
+
+    fn wait(duration: Duration, cx: &VisualTestContext) {
+        cx.executor().advance_clock(duration);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn toasts_show_three_one_above_the_other_for_six_seconds(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        for title in ["one", "two", "three", "four"] {
+            toast(&shell, title, cx);
+            wait(Duration::from_secs(1), cx);
+        }
+        let shown = toasts(cx);
+        assert_eq!(shown.len(), 3, "{shown:?}");
+        // Stacked with a gap, not overlapping, all at full width.
+        for pair in shown.windows(2) {
+            let [older, newer] = pair else { continue };
+            let gap = f32::from(newer.bounds().top()) - f32::from(older.bounds().bottom());
+            assert!((gap - Theme::SPACE_SM).abs() < 0.5, "{pair:?}");
+            assert_eq!(older.bounds().size.width, newer.bounds().size.width);
+        }
+        // Each goes six seconds after it has come in: the second at 7.2s.
+        wait(Duration::from_millis(3500), cx);
+        assert_eq!(toasts(cx).len(), 2);
+        wait(Duration::from_secs(3), cx);
+        assert!(toasts(cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn toasts_stay_while_hovered_and_close_when_dismissed(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        toast(&shell, "one", cx);
+        wait(Duration::from_secs(1), cx);
+        let Some(shown) = toasts(cx).pop() else {
+            panic!("no toast");
+        };
+        let over = shown.bounds().center();
+        cx.simulate_mouse_move(over, None, gpui::Modifiers::default());
+        toasts(cx);
+        wait(Duration::from_secs(10), cx);
+        assert_eq!(toasts(cx).len(), 1);
+
+        // Its time runs again once the pointer leaves.
+        cx.simulate_mouse_move(
+            gpui::point(px(5.0), px(5.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        toasts(cx);
+        wait(Duration::from_secs(4), cx);
+        assert_eq!(toasts(cx).len(), 1);
+        wait(Duration::from_secs(3), cx);
+        assert!(toasts(cx).is_empty());
+
+        // The close button dismisses it at once.
+        toast(&shell, "two", cx);
+        wait(Duration::from_secs(1), cx);
+        let Some(close) = snapshot("dismiss", cx) else {
+            panic!("no close button");
+        };
+        assert_eq!(close.label(), Some("Dismiss"));
+        cx.simulate_click(close.bounds().center(), gpui::Modifiers::default());
+        wait(Duration::from_millis(500), cx);
+        assert!(toasts(cx).is_empty());
     }
 }

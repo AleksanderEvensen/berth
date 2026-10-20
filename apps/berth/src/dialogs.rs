@@ -2,20 +2,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, SharedString, Window, actions};
-
-actions!(
-    dialog,
-    [
-        #[derive(Eq)]
-        Confirm,
-        #[derive(Eq)]
-        Cancel
-    ]
-);
-
-/// Key context active while a confirm dialog has focus.
-pub const CONFIRM_CONTEXT: &str = "ConfirmDialog";
+use gpui::{App, SharedString, Window};
 
 pub type ConfirmHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 

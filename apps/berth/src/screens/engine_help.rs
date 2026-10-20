@@ -319,11 +319,15 @@ fn render_command(ix: usize, command: &'static str, theme: &Theme) -> impl IntoE
                 .child(command),
         )
         .child(
-            IconButton::new(SharedString::from(format!("copy-{command}")), icons::COPY)
-                .size(24.0, 14.0)
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
-                }),
+            IconButton::new(
+                SharedString::from(format!("copy-{command}")),
+                icons::COPY,
+                "Copy command",
+            )
+            .size(24.0, 14.0)
+            .on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(command.to_string()));
+            }),
         )
 }
 

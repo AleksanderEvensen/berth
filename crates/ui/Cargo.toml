@@ -12,5 +12,10 @@ anyhow.workspace = true
 gpui-base.workspace = true
 palette.workspace = true
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# Snapshots of painted elements' roles and labels, for the accessibility tests.
+gpui-base = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

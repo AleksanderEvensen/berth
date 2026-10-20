@@ -720,7 +720,7 @@ impl ContainersScreen {
             .subtitle(subtitle)
             .leading_inset(self.chrome.header_inset)
             .action(
-                IconButton::new("search", icons::SEARCH)
+                IconButton::new("search", icons::SEARCH, "Search containers")
                     .active(self.search.is_some())
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.search.is_some() {
@@ -1001,8 +1001,7 @@ impl ContainersScreen {
         if active && web_ports.len() > 1 {
             let id = id.clone();
             row = row.action(
-                IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
-                    .tab_stop(false)
+                open_button(&id)
                     .active(self.port_menu.as_ref().is_some_and(|m| m.id == id))
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         let previous_focus = this.menu_return(window, cx);
@@ -1021,21 +1020,13 @@ impl ContainersScreen {
             .and_then(|(e, p)| p.url(e))
             .filter(|_| active)
         {
-            row = row.action(
-                IconButton::new(SharedString::from(format!("open-{id}")), icons::LINK)
-                    .tab_stop(false)
-                    .on_click(move |_, _, cx| cx.open_url(&url)),
-            );
+            row = row.action(open_button(&id).on_click(move |_, _, cx| cx.open_url(&url)));
         }
         if active {
             let ids = vec![id.clone()];
-            row = row.action(
-                IconButton::new(SharedString::from(format!("restart-{id}")), icons::RESTART)
-                    .tab_stop(false)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.run(ids.clone(), Op::Restart, cx)),
-                    ),
-            );
+            row = row.action(restart_button(&id).on_click(
+                cx.listener(move |this, _, _, cx| this.run(ids.clone(), Op::Restart, cx)),
+            ));
         }
         row.action(lifecycle_button(&id, active).on_click(lifecycle))
             .action(delete_button(&id).on_click(delete))
@@ -1456,18 +1447,41 @@ const fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+fn open_button(key: &str) -> IconButton {
+    IconButton::new(
+        SharedString::from(format!("open-{key}")),
+        icons::LINK,
+        "Open port",
+    )
+    .tab_stop(false)
+}
+
+fn restart_button(key: &str) -> IconButton {
+    IconButton::new(
+        SharedString::from(format!("restart-{key}")),
+        icons::RESTART,
+        "Restart",
+    )
+    .tab_stop(false)
+}
+
 fn lifecycle_button(key: &str, active: bool) -> IconButton {
     IconButton::new(
         SharedString::from(format!("lifecycle-{key}")),
         if active { icons::STOP } else { icons::PLAY },
+        if active { "Stop" } else { "Start" },
     )
     .tab_stop(false)
 }
 
 fn delete_button(key: &str) -> IconButton {
-    IconButton::new(SharedString::from(format!("delete-{key}")), icons::TRASH)
-        .tone(ButtonTone::Danger)
-        .tab_stop(false)
+    IconButton::new(
+        SharedString::from(format!("delete-{key}")),
+        icons::TRASH,
+        "Delete",
+    )
+    .tone(ButtonTone::Danger)
+    .tab_stop(false)
 }
 
 const fn status_of(state: ContainerState) -> Status {

@@ -35,6 +35,8 @@ embed-resource = "3.0.12"
 [dev-dependencies]
 tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+# Snapshots of painted elements' roles and labels, for the accessibility tests.
+gpui-base = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true
