@@ -723,9 +723,38 @@ fn local_name(part: &[u8]) -> Option<&std::ffi::OsStr> {
 /// refuses a few characters.
 #[must_use]
 pub fn windows_allows(name: &str) -> bool {
-    const RESERVED: [&str; 22] = [
-        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    // `COM0`/`LPT0` too, which some versions take for devices.
+    const RESERVED: [&str; 30] = [
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM0",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "COM\u{b9}",
+        "COM\u{b2}",
+        "COM\u{b3}",
+        "LPT0",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+        "LPT\u{b9}",
+        "LPT\u{b2}",
+        "LPT\u{b3}",
     ];
     let stem = name.split('.').next().unwrap_or(name);
     !name.ends_with(['.', ' '])
@@ -1183,7 +1212,17 @@ mod tests {
     fn windows_names_are_told_apart() {
         assert!(windows_allows("report.txt"));
         assert!(windows_allows("console.log"));
-        for name in ["AUX.txt", "nul", "com1 .tar.gz", "a.", "a ", "a:b", "a\\b"] {
+        for name in [
+            "AUX.txt",
+            "nul",
+            "com1 .tar.gz",
+            "COM\u{b9}.txt",
+            "lpt\u{b3}",
+            "a.",
+            "a ",
+            "a:b",
+            "a\\b",
+        ] {
             assert!(!windows_allows(name), "{name}");
         }
     }
