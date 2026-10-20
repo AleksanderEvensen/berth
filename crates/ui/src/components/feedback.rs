@@ -187,7 +187,8 @@ pub enum ToastKind {
     Info,
 }
 
-/// A floating notification pill.
+/// A floating notification pill, announced to screen readers as an alert
+/// ([`gpui_base::Toast`]).
 #[derive(IntoElement)]
 #[must_use]
 pub struct Toast {
@@ -199,6 +200,10 @@ pub struct Toast {
 }
 
 impl Toast {
+    pub const WIDTH: f32 = 440.0;
+    /// Height of a toast whose detail fits one line.
+    pub const ONE_LINE_HEIGHT: f32 = 62.0;
+
     pub fn new(id: impl Into<ElementId>, kind: ToastKind, title: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
@@ -231,9 +236,8 @@ impl RenderOnce for Toast {
             ToastKind::Info => theme.accent,
         };
         let on_dismiss = self.on_dismiss;
-        div()
-            .id(self.id.clone())
-            .w(px(440.0))
+        gpui_base::Toast::new(self.id)
+            .w(px(Self::WIDTH))
             .flex()
             .items_start()
             .gap(px(Theme::SPACE_SM + 2.0))

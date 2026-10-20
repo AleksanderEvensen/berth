@@ -9,13 +9,16 @@ use berth_ui::{
     reveal_when_focused, scroll_active_pane, sidebar_glyph, status_dot, tab_stop,
 };
 use gpui::{
-    AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight,
-    IntoElement, Render, SharedString, SpringAnimation, Stateful, Window, canvas, div, prelude::*,
-    px,
+    Anchor, Animation, AnimationExt as _, AnyElement, Context, Div, Entity, EventEmitter,
+    FocusHandle, FontWeight, IntoElement, Render, SharedString, SpringAnimation, Stateful, Task,
+    Window, canvas, div, prelude::*, px,
 };
 
 use crate::chrome;
-use gpui_base::{AlertDialog, AlertDialogPopup};
+use gpui_base::{
+    AlertDialog, AlertDialogPopup, ToastManager, ToastMotion, ToastOptions, ToastStack,
+    ToastStackState, ToastTransitionStatus,
+};
 
 use crate::dialogs::ConfirmRequest;
 use crate::keymap::{
@@ -47,7 +50,8 @@ use crate::store::{Connector, Store, StoreEvent};
 /// sidebar is collapsed.
 const TOGGLE_CLEARANCE: f32 = 34.0;
 const TOAST_LIFETIME: Duration = Duration::from_secs(6);
-const MAX_TOASTS: usize = 3;
+/// How often the toasts' clock runs while any are up.
+const TOAST_TICK: Duration = Duration::from_millis(100);
 
 /// Which screen the sidebar has selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +66,6 @@ enum Route {
 }
 
 struct ToastItem {
-    id: usize,
     kind: ToastKind,
     title: SharedString,
     detail: SharedString,
@@ -98,8 +101,11 @@ pub struct Shell {
     settings: Entity<SettingsScreen>,
     confirm: Option<OpenConfirm>,
     palette: Option<OpenPalette>,
-    toasts: Vec<ToastItem>,
+    toasts: ToastManager<usize, ToastItem>,
+    toast_stack: ToastStackState,
     next_toast_id: usize,
+    /// Advances the toasts' lifecycle while any are up.
+    toast_clock: Option<Task<()>>,
     /// The settings problem already toasted, so it is reported once.
     settings_problem: Option<SharedString>,
 }
@@ -184,8 +190,10 @@ impl Shell {
             settings,
             confirm: None,
             palette: None,
-            toasts: Vec::new(),
+            toasts: ToastManager::new(toast_motion()),
+            toast_stack: ToastStackState::default(),
             next_toast_id: 0,
+            toast_clock: None,
             settings_problem: None,
         }
     }
@@ -624,46 +632,97 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let id = self.next_toast_id;
-        // IDs only identify the bounded list of recent toasts.
+        // IDs only identify the recent toasts.
         self.next_toast_id = self.next_toast_id.wrapping_add(1);
-        self.toasts.push(ToastItem {
-            id,
+        let toast = ToastItem {
             kind,
             title: title.into(),
             detail: detail.into(),
-        });
-        if self.toasts.len() > MAX_TOASTS {
-            self.toasts.remove(0);
-        }
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_LIFETIME).await;
-            this.update(cx, |this, cx| this.dismiss_toast(id, cx)).ok();
-        })
-        .detach();
+        };
+        let lifetime = ToastOptions {
+            timeout: Some(TOAST_LIFETIME),
+        };
+        self.toasts
+            .push(id, toast, lifetime, cx.background_executor().now());
+        self.run_toast_clock(cx);
         cx.notify();
     }
 
     fn dismiss_toast(&mut self, id: usize, cx: &mut Context<Self>) {
-        self.toasts.retain(|t| t.id != id);
+        self.toasts.dismiss(&id, cx.background_executor().now());
         cx.notify();
     }
 
+    /// Tick the toasts' lifecycle until none are left. Their lifetimes
+    /// stand still while the pointer is over them.
+    fn run_toast_clock(&mut self, cx: &Context<Self>) {
+        if self.toast_clock.is_some() {
+            return;
+        }
+        self.toast_clock = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TOAST_TICK).await;
+                let ticking = this.update(cx, |this, cx| {
+                    let now = cx.background_executor().now();
+                    if this
+                        .toasts
+                        .advance(now, this.toast_stack.is_expanded())
+                        .changed
+                    {
+                        cx.notify();
+                    }
+                    if this.toasts.is_empty() {
+                        this.toast_clock = None;
+                    }
+                    this.toast_clock.is_some()
+                });
+                if !matches!(ticking, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
     fn render_toasts(&self, cx: &Context<Self>) -> impl IntoElement {
+        let motion = toast_motion();
+        let reduce_motion = Theme::of(cx).reduce_motion;
+        let stack = self
+            .toasts
+            .visible(motion.collapsed_visible)
+            // Without motion a closing toast just goes.
+            .filter(|(_, _, status)| !(reduce_motion && *status == ToastTransitionStatus::Ending))
+            .fold(
+                ToastStack::new("toasts", self.toast_stack.clone())
+                    .motion(motion)
+                    .placement(Anchor::BottomCenter)
+                    .w(px(Toast::WIDTH)),
+                |stack, (&id, toast, status)| {
+                    let card = Toast::new(("toast", id), toast.kind, toast.title.clone())
+                        .detail(toast.detail.clone())
+                        .on_dismiss(cx.listener(move |this, _, _, cx| this.dismiss_toast(id, cx)));
+                    let card = if status == ToastTransitionStatus::Ending {
+                        div()
+                            .child(card)
+                            .with_animation(
+                                ("toast-out", id),
+                                Animation::new(motion.exit_duration),
+                                |card, t| card.opacity(1.0 - t),
+                            )
+                            .into_any_element()
+                    } else {
+                        card.into_any_element()
+                    };
+                    stack.item(("toast", id), card)
+                },
+            );
         div()
             .absolute()
             .bottom(px(Theme::SPACE_LG + 4.0))
             .left_0()
             .right_0()
             .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .children(self.toasts.iter().map(|toast| {
-                let id = toast.id;
-                Toast::new(("toast", id), toast.kind, toast.title.clone())
-                    .detail(toast.detail.clone())
-                    .on_dismiss(cx.listener(move |this, _, _, cx| this.dismiss_toast(id, cx)))
-            }))
+            .justify_center()
+            .child(stack)
     }
 
     // ---- sidebar ----
@@ -879,6 +938,21 @@ impl Shell {
             .on_click(
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
             )
+    }
+}
+
+/// gpui-base's toast stack, tuned to how toasts stood before it: up to three
+/// at a time, one above the other, as wide as the newest. The stack
+/// collapses older toasts behind the newest until hovered; peeking by a
+/// one-line toast's height plus the gap, they stay where they were.
+fn toast_motion() -> ToastMotion {
+    ToastMotion {
+        duration: Duration::from_millis(200),
+        exit_duration: Duration::from_millis(150),
+        collapsed_peek: px(Toast::ONE_LINE_HEIGHT + Theme::SPACE_SM),
+        expanded_gap: px(Theme::SPACE_SM),
+        collapsed_scale_step: 0.0,
+        collapsed_visible: 3,
     }
 }
 
@@ -1286,5 +1360,91 @@ mod tests {
         // Focus returns to the shell, where the keys work again.
         cx.simulate_keystrokes("secondary-2");
         assert_eq!(route(&shell, cx), Route::Volumes);
+    }
+
+    /// The toasts painted last, oldest first.
+    fn toasts(cx: &mut VisualTestContext) -> Vec<ElementSnapshot> {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let mut toasts: Vec<_> = cx.update(|window, _| {
+            snapshots(window)
+                .into_iter()
+                .filter(|s| s.role() == Some(Role::Alert))
+                .collect()
+        });
+        toasts.sort_by_key(|toast| toast.bounds().top());
+        toasts
+    }
+
+    fn toast(shell: &Entity<Shell>, title: &str, cx: &mut VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            shell.push_toast(ToastKind::Info, title.into(), "Detail".into(), cx);
+        });
+    }
+
+    fn wait(duration: Duration, cx: &VisualTestContext) {
+        cx.executor().advance_clock(duration);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn toasts_show_three_one_above_the_other_for_six_seconds(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        for title in ["one", "two", "three", "four"] {
+            toast(&shell, title, cx);
+            wait(Duration::from_secs(1), cx);
+        }
+        let shown = toasts(cx);
+        assert_eq!(shown.len(), 3, "{shown:?}");
+        // Stacked with a gap, not overlapping, all at full width.
+        for pair in shown.windows(2) {
+            let [older, newer] = pair else { continue };
+            let gap = f32::from(newer.bounds().top()) - f32::from(older.bounds().bottom());
+            assert!((gap - Theme::SPACE_SM).abs() < 0.5, "{pair:?}");
+            assert_eq!(older.bounds().size.width, newer.bounds().size.width);
+        }
+        // Each goes six seconds after it has come in: the second at 7.2s.
+        wait(Duration::from_millis(3500), cx);
+        assert_eq!(toasts(cx).len(), 2);
+        wait(Duration::from_secs(3), cx);
+        assert!(toasts(cx).is_empty());
+    }
+
+    #[gpui::test]
+    fn toasts_stay_while_hovered_and_close_when_dismissed(cx: &mut TestAppContext) {
+        let (shell, cx) = open_shell(cx);
+        toast(&shell, "one", cx);
+        wait(Duration::from_secs(1), cx);
+        let Some(shown) = toasts(cx).pop() else {
+            panic!("no toast");
+        };
+        let over = shown.bounds().center();
+        cx.simulate_mouse_move(over, None, gpui::Modifiers::default());
+        toasts(cx);
+        wait(Duration::from_secs(10), cx);
+        assert_eq!(toasts(cx).len(), 1);
+
+        // Its time runs again once the pointer leaves.
+        cx.simulate_mouse_move(
+            gpui::point(px(5.0), px(5.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        toasts(cx);
+        wait(Duration::from_secs(4), cx);
+        assert_eq!(toasts(cx).len(), 1);
+        wait(Duration::from_secs(3), cx);
+        assert!(toasts(cx).is_empty());
+
+        // The close button dismisses it at once.
+        toast(&shell, "two", cx);
+        wait(Duration::from_secs(1), cx);
+        let Some(close) = snapshot("dismiss", cx) else {
+            panic!("no close button");
+        };
+        assert_eq!(close.label(), Some("Dismiss"));
+        cx.simulate_click(close.bounds().center(), gpui::Modifiers::default());
+        wait(Duration::from_millis(500), cx);
+        assert!(toasts(cx).is_empty());
     }
 }
