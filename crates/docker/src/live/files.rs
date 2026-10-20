@@ -157,10 +157,12 @@ impl BollardEngine {
             let staging = Staging::new(&dest).map_err(|e| EngineError::writing(&e))?;
             // Unpacked as it arrives, on a thread of its own. The staging
             // goes with it, so a cancelled copy is removed only once that
-            // thread is done writing it.
+            // thread is done writing it, and comes back as `Staged`, so a
+            // result nobody collects is removed off the engine's workers.
             let (sender, chunks) = tokio::sync::mpsc::channel(COPY_CHUNKS);
             let mut unpacking = tokio::task::spawn_blocking(move || {
-                unpack(Chunks::new(chunks), &staging.path(), &path, &copied).map(|()| staging)
+                unpack(Chunks::new(chunks), &staging.path(), &path, &copied)
+                    .map(|()| Staged(Some(staging)))
             });
             let (exec, mut output) = start(&docker, &helper, command).await?;
             let mut stderr = Vec::new();
@@ -180,10 +182,10 @@ impl BollardEngine {
                         if unpacked.is_none() && sender.send(message.into()).await.is_err() {
                             // The unpacking stopped before the output did:
                             // at the archive's end, or failing the copy.
-                            let staging = joined(&mut unpacking)
+                            let staged = joined(&mut unpacking)
                                 .await?
                                 .map_err(|e| EngineError::writing(&e))?;
-                            unpacked = Some(Staged(Some(staging)));
+                            unpacked = Some(staged);
                         }
                     }
                     LogOutput::StdIn { .. } => {}
@@ -192,9 +194,7 @@ impl BollardEngine {
             drop((output, sender));
             let unpacked = match unpacked {
                 Some(staged) => Ok(staged),
-                None => joined(&mut unpacking)
-                    .await?
-                    .map(|staging| Staged(Some(staging))),
+                None => joined(&mut unpacking).await?,
             };
             // Only an exit status says the archive is complete; a failed
             // `tar` explains a broken archive best.
